@@ -25,4 +25,4 @@ node tools/test-markdown-server.mjs
 python3 -m unittest discover -s tests -v
 ```
 
-Set `AUDIT_TEST_LEAN` to a Lean executable to enable formal integration tests. HTTP tests explicitly use a simulated child process and do not claim a semantic audit. Real interactive runs retain their actual Codex events and check logs. Repository content is English; user conversation is Romanian.
+Set `AUDIT_TEST_LEAN` to a Lean executable to enable formal integration tests. HTTP tests explicitly use a simulated child process and do not claim a semantic audit. Real interactive runs retain their actual Codex events and check logs. Repository content and user conversation are in English.

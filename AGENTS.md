@@ -1,7 +1,7 @@
 # Repository instructions
 
 - Write all repository content in English, including documentation, examples, reports, code comments, and skill instructions.
-- Communicate with the user in Romanian.
+- Communicate with the user in English.
 - The product audits findings in supplied reports against supplied documents. It does not generate the original substantive report. Its output is an evidence-backed claim audit with formal proofs or refutations where justified.
 - Example dossiers must contain both a correct report and a report with deliberate errors. Auditors receive the report under review and the source documents; only the evaluator's expected outcomes are withheld during blind evaluation.
 - Every audit result must show the exact claim, verification problem, source evidence, applicable rules, assumptions, reasoning, and limits. Refutations require an explicit explanation of why the claim fails. Report missing or insufficient arguments as valuable support-gap findings without treating them as proof that the underlying claim is false.
