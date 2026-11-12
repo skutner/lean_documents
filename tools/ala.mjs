@@ -113,8 +113,18 @@ export function alaArguments({entry,selection,cwd,home,root,taskFile,output}){
 }
 // Standalone coding-agent execution uses the native agent login, never a host Ploinky router. The event stream exposes
 // coding-agent messages and tool output on stderr for the execution journal.
-export function alaEnvironment(env=process.env){
- return {...Object.fromEntries(Object.entries(env).filter(([key])=>!key.startsWith('PLOINKY_'))),ALA_EVENT_STREAM:'1'};
+export function alaEnvironment(env=process.env,options){
+ return {...Object.fromEntries(Object.entries(certificateEnvironment(env,options)).filter(([key])=>!key.startsWith('PLOINKY_'))),ALA_EVENT_STREAM:'1'};
+}
+// macOS only. ALA's Seatbelt sandbox cannot reach the system certificate service, so a coding agent that verifies HTTPS
+// through it (Codex) fails every request with "error sending request". ALA passes SSL_CERT_FILE into the sandbox and
+// such agents read it, so the system's own CA bundle is named, unless the caller already set SSL_CERT_FILE or
+// SSL_CERT_DIR. Measured with a real Codex request: exit 5 without the variable, an answer with it.
+export const MACOS_CA_BUNDLE='/etc/ssl/cert.pem';
+const isFile=file=>{try{return fs.statSync(file).isFile();}catch{return false;}};
+export function certificateEnvironment(env=process.env,{platform=process.platform,exists=isFile}={}){
+ if(platform!=='darwin'||env.SSL_CERT_FILE||env.SSL_CERT_DIR||!exists(MACOS_CA_BUNDLE))return env;
+ return {...env,SSL_CERT_FILE:MACOS_CA_BUNDLE};
 }
 export const ALA_EVENT_PREFIX='@@ALA_EVENT@@';
 // Converts ALA stderr lines into journal records. Streamed fragments that share an output id are joined into one record,
@@ -153,7 +163,8 @@ const catalogUnavailable=()=>fail('Could not load the ALA catalog. Check the ALA
 function runWorker(args,timeout,unavailable){
  return new Promise((resolve,reject)=>{
   const worker=fileURLToPath(new URL('./ala-catalog-worker.mjs',import.meta.url));
-  const child=spawn(process.execPath,[worker,...args],{stdio:['ignore','pipe','pipe'],detached:true});
+  // The worker starts the agent's catalog query in the sandbox, so it gets the same certificate file as a run.
+  const child=spawn(process.execPath,[worker,...args],{stdio:['ignore','pipe','pipe'],detached:true,env:certificateEnvironment()});
   let output='',settled=false,failure=null;
   const stop=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
   const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);clearTimeout(grace);error?reject(error):resolve(value);};

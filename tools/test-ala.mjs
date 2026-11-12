@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { alaArguments, alaEnvironment, createALACatalog, createALAJournal, createSettingsStore, formatSettings, homeRequired, loginCheckUnavailable, parseSettings, readALACatalog, readALALogin, resolveALA, locationRefused, ABSENT_CONFIG, DEFAULT_SETTINGS } from './ala.mjs';
+import { alaArguments, alaEnvironment, certificateEnvironment, MACOS_CA_BUNDLE, createALACatalog, createALAJournal, createSettingsStore, formatSettings, homeRequired, loginCheckUnavailable, parseSettings, readALACatalog, readALALogin, resolveALA, locationRefused, ABSENT_CONFIG, DEFAULT_SETTINGS } from './ala.mjs';
 import { createFakeALA } from './fake-ala-fixture.mjs';
 
 test('settings round-trip through a readable Markdown record and reject unsafe values', async () => {
@@ -54,8 +54,18 @@ test('ALA arguments pass the selection explicitly, isolate personal defaults and
   assert.equal(defaults.includes('--model'), false); assert.equal(defaults.includes('--effort'), false, 'effort needs a model');
   assert.throws(() => alaArguments({ ...base, selection: { agent: '--force' } }), /Invalid coding agent/);
   assert.deepEqual(parseSettings(formatSettings({ agent: 'codex', model: '--force', effort: '-x' })), DEFAULT_SETTINGS, 'option-like identifiers are never saved');
-  const env = alaEnvironment({ PATH: '/bin', PLOINKY_ROUTER: 'x', CODEX_HOME: '/h/.codex' });
+  const env = alaEnvironment({ PATH: '/bin', PLOINKY_ROUTER: 'x', CODEX_HOME: '/h/.codex' }, { platform: 'linux' });
   assert.deepEqual(env, { PATH: '/bin', CODEX_HOME: '/h/.codex', ALA_EVENT_STREAM: '1' });
+  // macOS: the system CA bundle is named for agents that cannot reach the certificate service from the sandbox, unless
+  // the caller chose certificates already or the bundle is missing. Other platforms are left alone.
+  const present = { platform: 'darwin', exists: file => file === MACOS_CA_BUNDLE }, plain = { PATH: '/bin' };
+  assert.equal(MACOS_CA_BUNDLE, '/etc/ssl/cert.pem');
+  assert.deepEqual(certificateEnvironment(plain, present), { PATH: '/bin', SSL_CERT_FILE: '/etc/ssl/cert.pem' }); assert.deepEqual(plain, { PATH: '/bin' }, 'the given environment is not changed');
+  assert.deepEqual(alaEnvironment({ PATH: '/bin', PLOINKY_ROUTER: 'x' }, present), { PATH: '/bin', SSL_CERT_FILE: '/etc/ssl/cert.pem', ALA_EVENT_STREAM: '1' });
+  for (const chosen of [{ SSL_CERT_FILE: '/my/ca.pem' }, { SSL_CERT_DIR: '/my/certs' }]) assert.deepEqual(certificateEnvironment({ ...plain, ...chosen }, present), { ...plain, ...chosen }, 'a choice of the caller is kept');
+  assert.equal(certificateEnvironment(plain, { platform: 'darwin', exists: () => false }), plain, 'no bundle, no variable');
+  for (const platform of ['linux', 'win32']) assert.equal(certificateEnvironment(plain, { platform, exists: () => true }), plain, platform);
+  assert.equal(certificateEnvironment({ ...plain, SSL_CERT_FILE: '' }, present).SSL_CERT_FILE, '/etc/ssl/cert.pem', 'an empty value is no choice');
 });
 
 test('the journal joins streamed fragments, keeps complete outputs separate and explains failures', () => {
