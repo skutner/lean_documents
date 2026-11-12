@@ -5,11 +5,9 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path, PurePosixPath
-import re
-import stat
 import sys
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 CASES = ['acquisition-financing', 'project-funding-gate', 'operating-budget', 'research-funding', 'story-timeline', 'narrative-consistency', 'poem-form-and-voice']
 DEFAULTS = [case + suffix for case in CASES for suffix in ('', '-ro')]
@@ -23,29 +21,9 @@ def table(headers, rows):
     return '\n'.join('| ' + ' | '.join(map(cell, row)) + ' |' for row in [headers, ['---'] * len(headers), *rows]) + '\n'
 
 
-def read_key(path):
-    """The pilot server's API key from its key file (tools/api-auth.mjs): a regular file of this user, never a link.
-    The key is never taken as an argument, where other users could see it."""
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as error:
-        raise SystemExit('No key file for the pilot server at ' + str(path) + ' (' + (error.strerror or str(error)) + '). Start the server, or pass --key-file.')
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 256:
-            raise SystemExit('The key file ' + str(path) + ' is not a small regular file of this user.')
-        key = os.read(descriptor, 256).decode('ascii', 'replace').rstrip('\n')
-    finally:
-        os.close(descriptor)
-    if not re.fullmatch(r'[A-Za-z0-9_-]{43}', key):
-        raise SystemExit('The key file ' + str(path) + ' does not hold a pilot key.')
-    return key
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--origin', default='http://127.0.0.1:8787')
-    parser.add_argument('--key-file', help='the pilot server key file; default <AUDIT_AGENT_HOME or ~/.lean-documents/agent-home>/server/port-<port of --origin>.key')
     parser.add_argument('--examples', nargs='+', default=DEFAULTS)
     parser.add_argument('--output', required=True)
     parser.add_argument('--allow-single-report', action='store_true')
@@ -57,22 +35,13 @@ def main(argv=None):
     parts = urlsplit(origin)
     if parts.scheme != 'http':
         parser.error('--origin must be an http origin')
-    # The key goes only to the literal 127.0.0.1: the name localhost also reaches [::1], where a confined run may listen.
+    # The server answers only on the literal 127.0.0.1: the name localhost also reaches [::1].
     if parts.hostname != '127.0.0.1' or parts.path or parts.query or parts.username or parts.password:
-        parser.error('--origin must be http://127.0.0.1:<port>; the pilot key is sent to no other host')
-    port = parts.port or 80
-    if args.key_file:
-        key_file = Path(args.key_file)
-    else:
-        configured = os.environ.get('AUDIT_AGENT_HOME')
-        if configured and not os.path.isabs(configured):
-            parser.error('AUDIT_AGENT_HOME must be an absolute path: ' + configured)
-        key_file = Path(configured or Path.home() / '.lean-documents' / 'agent-home') / 'server' / ('port-' + str(port) + '.key')
-    key = read_key(key_file)
+        parser.error('--origin must be http://127.0.0.1:<port>; the pilot server answers on no other host')
     blockers, summaries, details = [], [], []
 
     def fetch(route):
-        with urlopen(Request(origin + route, headers={'Authorization': 'Bearer ' + key}), timeout=45) as response:
+        with urlopen(origin + route, timeout=45) as response:
             return json.load(response)
 
     def require(condition, message):

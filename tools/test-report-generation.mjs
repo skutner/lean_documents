@@ -7,7 +7,6 @@ import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import os from 'node:os';
-import { API_UNAUTHORIZED, readApiKey } from './api-auth.mjs';
 import { noLogin } from './agent-home.mjs';
 import net from 'node:net';
 import path from 'node:path';
@@ -81,22 +80,20 @@ async function start(name, { missing = false, auditWait = false, login = true } 
   let output = ''; child.stdout.on('data', b => output += b); child.stderr.on('data', b => output += b);
   for (let n = 0; n < 100 && !output.includes('Audit laboratory:'); n++) { if (child.exitCode !== null) throw Error(output); await pause(20); }
   assert.match(output, /Audit laboratory:/);
-  const origin = `http://127.0.0.1:${port}`, key = await readApiKey({ base, port });
-  // Every request carries the key unless a test sends none.
-  async function request(route, data, status = 200, { key: sent = key } = {}) {
-    const auth = sent ? { Authorization: `Bearer ${sent}` } : {};
-    const response = await fetch(origin + route, data === undefined ? { headers: auth } : { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, ...auth }, body: JSON.stringify(data) });
+  const origin = `http://127.0.0.1:${port}`;
+  async function request(route, data, status = 200) {
+    const response = await fetch(origin + route, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(data) });
     const value = await response.json(); assert.equal(response.status, status, `${route}: ${JSON.stringify(value)}`); return value;
   }
   async function waitFor(route, predicate) {
     for (let n = 0; n < 200; n++) { assert.equal(child.exitCode, null, output); const value = await request(route); if (predicate(value)) return value; await pause(25); }
     throw Error(`Timed out waiting for ${route}`);
   }
-  return { directory, examples, runs, jobs, request, key, homes: () => path.join(fsSync.realpathSync.native(base), 'homes'),
+  return { directory, examples, runs, jobs, request, homes: () => path.join(fsSync.realpathSync.native(base), 'homes'),
     terminal: id => waitFor(`/api/report-jobs/${id}`, v => ['finished', 'failed', 'stopped'].includes(v.status)),
     auditTerminal: id => waitFor(`/api/runs/${id}`, v => !['queued', 'running', 'finalizing'].includes(v.status)),
     async waitMarker(base) { for (let n = 0; n < 150; n++) { try { await fs.access(path.join(base, 'stub-waiting.md')); return; } catch {} await pause(20); } throw Error('Waiting stub did not start'); },
-    async close() { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); } await fs.writeFile(path.join(directory, 'server-output.md'), '# Isolated server output\n\n```text\n' + output + '\n```\n'); assert.equal(output.includes(key), false, 'the key is not in the server output'); assert.equal(output.includes(TOKEN), false, 'the fixture token is not in the server output'); },
+    async close() { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); } await fs.writeFile(path.join(directory, 'server-output.md'), '# Isolated server output\n\n```text\n' + output + '\n```\n'); assert.equal(output.includes(TOKEN), false, 'the fixture token is not in the server output'); },
   };
 }
 
@@ -155,12 +152,10 @@ await test('drafts preserve sources, honor mode/language and publish only the re
   } finally { await server.close(); }
 });
 
-await test('a draft needs the API key and a pilot login; without either it is refused and no job folder is created', { timeout: 15000 }, async () => {
+await test('a draft needs a pilot login; without it the draft is refused and no job folder is created', { timeout: 15000 }, async () => {
   const server = await start('draft-refusals', { login: false });
   try {
     const { id } = await example(server);
-    assert.deepEqual(await server.request(`/api/examples/${id}/reports/generate`, { title: 'Draft', mode: 'grounded' }, 401, { key: null }), { error: API_UNAUTHORIZED });
-    assert.deepEqual(await server.request(`/api/examples/${id}/reports/generate`, { title: 'Draft', mode: 'grounded' }, 401, { key: randomBytes(32).toString('base64url') }), { error: API_UNAUTHORIZED });
     const refused = await server.request(`/api/examples/${id}/reports/generate`, { title: 'Draft', mode: 'grounded' }, 400);
     assert.equal(refused.error, noLogin('codex', path.dirname(server.homes())));
     assert.deepEqual(await fs.readdir(server.jobs), [], 'no job folder is created');

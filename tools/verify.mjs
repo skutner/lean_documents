@@ -25,7 +25,6 @@ export const SUITES = [
   {name: 'verify', command: ['node', 'tools/test-verify.mjs']},
   {name: 'remote-verify', command: ['node', 'tools/test-remote-verify.mjs']},
   {name: 'agent-home', command: ['node', '--test', 'tools/test-agent-home.mjs']},
-  {name: 'api-auth', command: ['node', '--test', 'tools/test-api-auth.mjs']},
   {name: 'ala', command: ['node', '--test', 'tools/test-ala.mjs']},
   {name: 'markdown-server', command: ['node', 'tools/test-markdown-server.mjs']},
   {name: 'report-generation', command: ['node', 'tools/test-report-generation.mjs']},

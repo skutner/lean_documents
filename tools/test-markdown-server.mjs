@@ -12,10 +12,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readExample } from './markdown-store.mjs';
-import { ALA_LOCATION_UNCONFIRMED } from './api-auth.mjs';
 import { createFakeALA } from './fake-ala-fixture.mjs';
 import { leanStatus, resolvePython } from './toolchain.mjs';
-import { API_UNAUTHORIZED, readApiKey } from './api-auth.mjs';
 import { noLogin, homeUnavailable, reasons } from './agent-home.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -48,7 +46,6 @@ async function assertHelperRunsThroughInterpreter(prompt, helperRelative) {
 // for its absence. The bases are removed at exit (from Node, by guarded path).
 const TEMPORARY = fsSync.realpathSync.native(os.tmpdir());
 const TOKEN = `fixture-token-${crypto.randomBytes(12).toString('hex')}`;
-const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 const fixtures = [];
 process.on('exit', () => { for (const dir of fixtures) if (path.dirname(dir) === TEMPORARY && path.basename(dir).startsWith('markdown-server-base-')) fsSync.rmSync(dir, { recursive: true, force: true }); });
 async function fixtureBase(kind = 'logins') {
@@ -119,27 +116,23 @@ ${mode === 'failure' ? "process.stderr.write('ala: Simulated ALA failure\\n');pr
     await pause(30);
   }
   assert.match(output, /Audit laboratory:/, 'isolated server started');
-  // The key is read the way a same-user caller does: from the key file the server wrote after binding the port.
-  const key = await readApiKey({ base, port });
-  // Every request carries the key unless a test says otherwise; every answer is kept to show the key is in none.
-  async function request(route, data, expected = 200, { key: sent = key, headers = {} } = {}) {
-    const auth = sent ? { Authorization: `Bearer ${sent}` } : {};
-    const response = await fetch(origin + route, data === undefined ? { headers: { ...auth, ...headers } } : { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, ...auth, ...headers }, body: JSON.stringify(data) });
+  // Every answer is kept to show the fixture token is in none.
+  async function request(route, data, expected = 200, { headers = {} } = {}) {
+    const response = await fetch(origin + route, data === undefined ? { headers } : { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, ...headers }, body: JSON.stringify(data) });
     const text = await response.text(); answers.push(text);
     const body = JSON.parse(text);
     assert.equal(response.status, expected, `${route}: ${text}`);
     return body;
   }
-  const server = { directory, examples, runs, records, base, key, port, child, request, origin, answers, ala,
+  const server = { directory, examples, runs, records, base, port, child, request, origin, answers, ala,
     output: () => output,
     homes: () => path.join(fsSync.realpathSync.native(base), 'homes'),
     async stop() {
       if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); }
       await fs.writeFile(path.join(directory, 'server-output.md'), '# Isolated server output\n\n```text\n' + output + '\n```\n');
-      // The key never reaches the output (a pipe gets the link command instead) nor an answer; the token neither.
-      assert.equal(output.includes(key), false, 'the key is not in the server output');
+      // The fixture token never reaches the output nor an answer.
       assert.equal(output.includes(TOKEN), false, 'the fixture token is not in the server output');
-      for (const answer of answers) { assert.equal(answer.includes(key), false, 'no answer holds the key'); assert.equal(answer.includes(TOKEN), false, 'no answer holds the fixture token'); }
+      for (const answer of answers) assert.equal(answer.includes(TOKEN), false, 'no answer holds the fixture token');
     },
     async terminal(id) {
       for (let index = 0; index < 160; index++) {
@@ -210,7 +203,7 @@ await test('Markdown uploads preserve bytes, support concurrent catalog reads, p
       const relative = Object.keys(metadata.file_names).find(file => metadata.file_names[file] === source.name);
       assert.ok(relative?.startsWith('sources/document-'));
       assert.deepEqual(await fs.readFile(path.join(server.examples, id, relative)), source.bytes);
-      const download = await fetch(server.origin + '/api/file?' + new URLSearchParams({ example: id, path: relative, download: '1' }), { headers: { Authorization: `Bearer ${server.key}` } });
+      const download = await fetch(server.origin + '/api/file?' + new URLSearchParams({ example: id, path: relative, download: '1' }));
       assert.equal(download.status, 200); assert.deepEqual(Buffer.from(await download.arrayBuffer()), source.bytes);
     }
     const outside = path.join(server.directory, 'outside.md'); await fs.writeFile(outside, 'Outside selected example');
@@ -220,11 +213,10 @@ await test('Markdown uploads preserve bytes, support concurrent catalog reads, p
       await server.request('/api/file?' + new URLSearchParams({ example: id, path: relative }), undefined, 400);
     }
     await server.request('/api/file?' + new URLSearchParams({ example: '../bad', path: 'example.md' }), undefined, 400);
-    // With a valid key, so that the Origin check and not the gate is measured.
-    const invalidOrigin = await fetch(server.origin + '/api/examples', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://untrusted.invalid', Authorization: `Bearer ${server.key}` }, body: '{}' });
+    const invalidOrigin = await fetch(server.origin + '/api/examples', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://untrusted.invalid' }, body: '{}' });
     assert.equal(invalidOrigin.status, 400); assert.deepEqual(await invalidOrigin.json(), { error: 'Invalid Origin' });
     for (const origin of ['http://localhost:' + server.port, 'http://127.0.0.1:1']) {
-      const refused = await fetch(server.origin + '/api/examples', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, Authorization: `Bearer ${server.key}` }, body: '{}' });
+      const refused = await fetch(server.origin + '/api/examples', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: '{}' });
       assert.equal(refused.status, 400, origin);
     }
     const run = await server.request('/api/runs', { exampleId: id, reportPath: report.path });
@@ -353,11 +345,8 @@ await test('the selected coding agent is validated, snapshotted at queue time an
     assert.equal(second.agent, 'codex'); assert.equal(second.model, undefined, 'new work uses the latest saved selection');
     await server.terminal(second.id);
     assert.deepEqual(await fs.readdir(homes), [], 'homes/ is empty after every run reached its terminal state');
-    // Neither the fixture token nor the key is in any file the server, its runs or the fake ALA wrote; the fake ALA's
-    // environment hashes do not include the key's.
-    assert.deepEqual(await filesContaining(server.directory, TOKEN), []); assert.deepEqual(await filesContaining(server.directory, server.key), []);
-    for (const text of await records(server, 'service')) assert.equal(text.includes(sha(server.key)), false);
-    assert.equal((await fs.readFile(path.join(server.runs, second.id, 'fake-ala-invocation.md'), 'utf8')).includes(sha(server.key)), false, 'ALA never receives the key in its environment');
+    // The fixture token is in no file the server, its runs or the fake ALA wrote.
+    assert.deepEqual(await filesContaining(server.directory, TOKEN), []);
     await noDataDocuments(server.directory);
   } finally { await server.stop(); }
 });
@@ -477,40 +466,13 @@ await test('Example language persists and controls the audit while uploaded byte
   } finally {await server.stop();}
 });
 
-await test('every API route refuses a request without the key or with a wrong one, before anything is read or started (H-A3)', { timeout: 30000 }, async () => {
-  const server = await startServer('api-refusal', 'success');
+await test('the page allows only its own script, and the server answers only for the host 127.0.0.1:<PORT>', { timeout: 30000 }, async () => {
+  const server = await startServer('page-and-host', 'success');
   try {
-    const { id, report } = await seed(server);
-    const run = await server.request('/api/runs', { exampleId: id, reportPath: report.path }); await server.terminal(run.id);
-    const listing = async folder => (await fs.readdir(folder, { recursive: true })).map(String).sort();
-    const snapshot = async () => JSON.stringify([await listing(server.examples), await listing(server.runs), await listing(server.records), sha(await fs.readFile(path.join(server.examples, id, 'example.md')))]);
-    const before = await snapshot();
-    const upload = { role: 'source', files: [{ name: 'Planted.md', data: Buffer.from('planted').toString('base64') }] };
-    const routes = [['POST', '/api/examples', { title: 'Planted' }], ['POST', `/api/examples/${id}/files`, upload], ['POST', `/api/examples/${id}/reports/generate`, { mode: 'grounded' }], ['POST', `/api/examples/${id}/stop`, {}],
-      ['POST', '/api/runs', { exampleId: id, reportPath: report.path, reviewNotes: 'planted' }], ['POST', `/api/runs/${run.id}/render`, {}], ['POST', `/api/runs/${run.id}/stop`, {}], ['POST', '/api/agent-settings', { agent: 'claude', model: '' }], ['POST', '/api/ala', { path: server.ala }],
-      ['GET', '/api/examples'], ['GET', '/api/agent-settings'], ['GET', '/api/coding-agents?refresh=1'], ['GET', '/api/coding-agents/codex/models?refresh=1'], ['GET', '/api/report-jobs/draft-x'], ['GET', `/api/runs/${run.id}`], ['GET', `/api/file?example=${id}&path=example.md`], ['POST', '/api/session', {}]];
-    assert.equal(routes.length, 17, 'the 16 API routes of the route table and POST /api/session');
-    const flipped = server.key.slice(0, 20) + (server.key[20] === 'A' ? 'B' : 'A') + server.key.slice(21);
-    for (const sent of [null, crypto.randomBytes(32).toString('base64url'), flipped]) {
-      for (const [method, route, data] of routes) {
-        const body = data === undefined ? '' : JSON.stringify(data);
-        const response = await raw(server.port, [`${method} ${route} HTTP/1.1`, ...(sent ? [`Authorization: Bearer ${sent}`] : []), ...(data === undefined ? [] : ['Content-Type: application/json', `Origin: ${server.origin}`, `Content-Length: ${Buffer.byteLength(body)}`])], body);
-        const label = `${method} ${route} ${sent === null ? 'without a key' : 'with a wrong key'}`;
-        assert.equal(response.status, 401, label); assert.deepEqual(JSON.parse(response.body), { error: API_UNAUTHORIZED }, label);
-        assert.match(response.head, /^WWW-Authenticate: Bearer$/mi, label); assert.match(response.head, /^Cache-Control: no-store$/mi, label);
-      }
-    }
-    assert.equal(await snapshot(), before, 'no example, run, upload or fake-ALA record was created or changed, so no process was started');
-    // Path forms the URL parser normalises: the gate and the router read the same parsed path, so none of them reaches
-    // an API route without the key (a 404 means the parsed path is no route at all).
-    for (const target of ['//api/examples', '/api/%2e%2e/examples', '/api/%2e%2e/api/examples', '/api/./examples', `http://127.0.0.1:${server.port}/api/examples`, `//127.0.0.1:${server.port}/api/examples`, '/API/examples', '/api/examples/..', '/x/../api/examples']) {
-      const response = await raw(server.port, [`GET ${target} HTTP/1.1`]);
-      assert.ok([401, 404].includes(response.status), `${target}: ${response.status}`); assert.equal(response.body.includes('Household bill'), false, target);
-    }
-
-    // GET / needs no key, holds none, and allows only its own script by hash.
+    const { id } = await seed(server);
+    // GET / allows only its own script by hash.
     const page = await fetch(server.origin + '/'), html = await page.text();
-    assert.equal(page.status, 200); assert.equal(html.includes(server.key), false);
+    assert.equal(page.status, 200);
     assert.equal(page.headers.get('referrer-policy'), 'no-referrer'); assert.equal(page.headers.get('x-content-type-options'), 'nosniff');
     assert.equal(html.split('<script').length, 2, 'the page has exactly one script element');
     const script = Buffer.from(html).subarray(Buffer.from(html).indexOf('<script>') + 8, Buffer.from(html).indexOf('</script>'));
@@ -519,44 +481,32 @@ await test('every API route refuses a request without the key or with a wrong on
     assert.doesNotMatch(policy, /unsafe-inline|unsafe-hashes/);
     assert.doesNotMatch(html, /\son[a-z]+\s*=\s*["']/i, 'no inline event handler attribute in the page');
 
-    // Host and Origin: only 127.0.0.1:<PORT>, also with a valid key; localhost would share an origin with [::1].
+    // Host: only 127.0.0.1:<PORT>; localhost would share an origin with [::1].
     for (const host of [`localhost:${server.port}`, `[::1]:${server.port}`, `evil.example:${server.port}`, '127.0.0.1']) {
-      const refused = await raw(server.port, ['GET /api/examples HTTP/1.1', `Authorization: Bearer ${server.key}`], '', { host });
+      const refused = await raw(server.port, ['GET /api/examples HTTP/1.1'], '', { host });
       assert.equal(refused.status, 400, host); assert.deepEqual(JSON.parse(refused.body), { error: `Use http://127.0.0.1:${server.port}` }, host);
     }
-    assert.equal((await raw(server.port, ['GET /api/examples HTTP/1.1', `Authorization: Bearer ${server.key}`])).status, 200, 'GET /api/examples with the key on 127.0.0.1');
-    // Expect: 100-continue. Without the key the client is never invited to send its body; with it, it is.
+    assert.equal((await raw(server.port, ['GET /api/examples HTTP/1.1'])).status, 200, 'GET /api/examples on 127.0.0.1');
+    // Expect: 100-continue. The client is invited to send its body, but never under another Host.
     const body = JSON.stringify({ title: 'Continued' });
-    const unauthenticated = await raw(server.port, ['POST /api/examples HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Content-Length: ${body.length}`], body, { wait: 500 });
-    assert.doesNotMatch(unauthenticated.data, /^HTTP\/1\.1 100/, 'no 100 Continue before the gate'); assert.equal(unauthenticated.status, 401);
-    const authenticated = await raw(server.port, ['POST /api/examples HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Authorization: Bearer ${server.key}`, `Content-Length: ${body.length}`], body, { wait: 500 });
-    assert.match(authenticated.data, /^HTTP\/1\.1 100 Continue\r\n\r\nHTTP\/1\.1 200/); assert.match(authenticated.data, /"id":"custom-continued-/);
-    const wrongHost = await raw(server.port, ['POST /api/examples HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Authorization: Bearer ${server.key}`, `Content-Length: ${body.length}`], body, { wait: 500, host: `localhost:${server.port}` });
+    const invited = await raw(server.port, ['POST /api/examples HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Content-Length: ${body.length}`], body, { wait: 500 });
+    assert.match(invited.data, /^HTTP\/1\.1 100 Continue\r\n\r\nHTTP\/1\.1 200/); assert.match(invited.data, /"id":"custom-continued-/);
+    const wrongHost = await raw(server.port, ['POST /api/examples HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Content-Length: ${body.length}`], body, { wait: 500, host: `localhost:${server.port}` });
     assert.doesNotMatch(wrongHost.data, /^HTTP\/1\.1 100/); assert.equal(wrongHost.status, 400);
-
-    // The exchange: POST /api/session sets the view cookie, which alone reads files and nothing else.
-    const session = await raw(server.port, ['POST /api/session HTTP/1.1', `Authorization: Bearer ${server.key}`, 'Content-Type: application/json', 'Content-Length: 2'], '{}');
-    assert.equal(session.status, 200, 'POST /api/session'); assert.deepEqual(JSON.parse(session.body), { ok: true });
-    const cookie = new RegExp(`^Set-Cookie: (pilot_view_${server.port})=([A-Za-z0-9_-]{43}); Path=/api/file; HttpOnly; SameSite=Strict$`, 'mi').exec(session.head);
-    assert.ok(cookie, session.head.replaceAll(server.key, '<key>'));
-    const viaCookie = await raw(server.port, [`GET /api/file?example=${id}&path=example.md HTTP/1.1`, `Cookie: ${cookie[1]}=${cookie[2]}`]);
-    assert.equal(viaCookie.status, 200, 'the view cookie on GET /api/file'); assert.match(JSON.parse(viaCookie.body).text, /Household bill/);
-    for (const route of ['/api/examples', `/api/runs/${run.id}`]) assert.equal((await raw(server.port, [`GET ${route} HTTP/1.1`, `Cookie: ${cookie[1]}=${cookie[2]}`])).status, 401, route);
 
     // Active content is never served inline (A-E7): the page's script origin depends on it.
     const active = await server.request(`/api/examples/${id}/files`, { role: 'source', files: [{ name: 'page.html', data: Buffer.from('<script>alert(1)</script>').toString('base64') }, { name: 'image.svg', data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>').toString('base64') }] });
     for (const file of active.files.filter(f => /\.(html|svg)$/.test(f.path))) {
-      const response = await fetch(server.origin + '/api/file?' + new URLSearchParams({ example: id, path: file.path, inline: '1' }), { headers: { Authorization: `Bearer ${server.key}` } });
+      const response = await fetch(server.origin + '/api/file?' + new URLSearchParams({ example: id, path: file.path, inline: '1' }));
       assert.equal(response.headers.get('content-type'), 'application/octet-stream', file.path); assert.match(response.headers.get('content-disposition'), /^attachment;/, file.path);
       assert.equal(response.headers.get('x-content-type-options'), 'nosniff'); await response.arrayBuffer();
     }
-    assert.deepEqual(await filesContaining(server.directory, server.key), [], 'the key is in no file under the server folder');
   } finally { await server.stop(); }
 });
 
 await test('outside /api/ only GET is served: any other method is refused unread, before the Origin, content-type and body steps', { timeout: 30000 }, async () => {
   // Test instrumentation, loaded into the server with --import: it records how many bytes the server read from each
-  // connection (never their content), keyed by the client's port, as the gate's own body test reads socket.bytesRead.
+  // connection (never their content), keyed by the client's port, from socket.bytesRead.
   const reads = path.join(suite, 'outside-api-socket-reads.txt'), preload = path.join(suite, 'outside-api-socket-reads.mjs');
   await fs.writeFile(preload, `import http from 'node:http';\nimport fs from 'node:fs';\nconst create = http.createServer;\nhttp.createServer = (...args) => { const server = create(...args); server.on('connection', socket => { const peer = socket.remotePort; socket.once('close', () => fs.appendFileSync(${JSON.stringify(reads)}, peer + ' ' + socket.bytesRead + '\\n')); }); return server; };\n`);
   const server = await startServer('outside-api', 'success', false, simulatedNewPython, { nodeArgs: ['--import', pathToFileURL(preload).href] });
@@ -587,8 +537,8 @@ await test('outside /api/ only GET is served: any other method is refused unread
     // A small body that is not JSON: refused for its method, not parsed (the finding answered 400 with a parse error).
     const notJson = await exchange(['POST /x HTTP/1.1', 'Content-Type: application/json', 'Content-Length: 8'], Buffer.from('not-json'));
     assert.equal(notJson.status, 405); assert.deepEqual(JSON.parse(notJson.body), refusal);
-    // Another Host is refused before the gate, and just as unread: a caller without the key must not make the server
-    // read an upload by naming a Host the server refuses.
+    // Another Host is refused just as unread: a caller must not make the server read an upload by naming a Host the
+    // server refuses.
     for (const target of ['/api/examples', '/x']) {
       const head = [`POST ${target} HTTP/1.1`, 'Content-Type: application/json', `Content-Length: ${declared}`], other = `localhost:${server.port}`;
       const early = await exchange(head, null, other);
@@ -613,10 +563,10 @@ await test('outside /api/ only GET is served: any other method is refused unread
     const continued = await exchange(['POST /x HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Content-Length: ${declared}`]);
     assert.doesNotMatch(continued.data, /^HTTP\/1\.1 100/, 'no 100 Continue outside /api/'); assert.equal(continued.status, 405); assert.deepEqual(JSON.parse(continued.body), refusal);
     for (const method of ['PUT', 'DELETE', 'PATCH', 'OPTIONS']) assert.equal((await exchange([`${method} / HTTP/1.1`, 'Content-Length: 0', 'Connection: close'])).status, 405, method);
-    // An unknown /api/ path without a key gets the gate's 401, so the gate runs before routing.
+    // An unknown /api/ path is no route: a GET gets 404 and a POST is refused as an unknown action.
     const unknown = `/api/${crypto.randomBytes(6).toString('hex')}`;
-    assert.deepEqual(await server.request(unknown, undefined, 401, { key: null }), { error: API_UNAUTHORIZED });
-    assert.deepEqual(await server.request(unknown, {}, 401, { key: null }), { error: API_UNAUTHORIZED });
+    assert.equal((await fetch(server.origin + unknown)).status, 404);
+    assert.deepEqual(await server.request(unknown, {}, 400), { error: 'Unknown action' });
     // GET / stays open.
     const page = await fetch(server.origin + '/'); assert.equal(page.status, 200); assert.match(await page.text(), /<script>/);
     assert.equal(server.child.exitCode, null, 'the server is still running');
@@ -697,18 +647,17 @@ await test('three audits at once get three homes, each owned by its ALA process 
   } finally { await restarted.stop(); }
 });
 
-await test('a location runs can write is never imported: the reproduction of the finding, a planted saved location, and the confirmation record (H-A3)', { timeout: 30000 }, async () => {
+await test('a location runs can write is never imported, whether it is sent to the API or already saved; a saved location outside is used', { timeout: 30000 }, async () => {
   // A fake ALA in tmp/, which every run can write, whose discovery module leaves a marker if it is ever imported.
   const planted = await createFakeALA(path.join(suite, 'planted-ala'), ''), marker = path.join(suite, 'planted-ala-imported.md');
   await fs.writeFile(path.join(planted, 'src/coding-agents/discovery.mjs'), `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(marker)}, '# Imported\\n');\nexport async function discoverCodingAgents() { return []; }\n`);
   const rule = `This ALA location is not accepted: it lies inside ${path.join(await fs.realpath(root), 'tmp')}, where runs can write. Use a checkout outside it.`;
   const open = await startServer('no-ala-cli', 'missing', false, simulatedNewPython, { alaCli: false });
   try {
-    assert.deepEqual(await open.request('/api/ala', { path: planted }, 401, { key: null }), { error: API_UNAUTHORIZED });
     assert.deepEqual(await open.request('/api/ala', { path: planted }, 400), { error: rule });
     assert.equal(fsSync.existsSync(path.join(open.directory, 'agent-settings.md')), false, 'nothing was saved');
   } finally { await open.stop(); }
-  // A location saved through the old open API is refused when it is resolved, and never replaced by detection.
+  // A saved location that runs can write is refused when it is resolved, and never replaced by detection.
   const saved = await startServer('planted-saved', 'missing', false, simulatedNewPython, { alaCli: false, settings: `| ALA location | \`${planted}\` |\n` });
   try {
     const settings = await saved.request('/api/agent-settings');
@@ -717,45 +666,43 @@ await test('a location runs can write is never imported: the reproduction of the
     assert.match((await saved.request('/api/coding-agents/codex/models', undefined, 503)).error, /^ALA was not found/);
   } finally { await saved.stop(); }
   assert.equal(fsSync.existsSync(marker), false, 'the planted discovery module was never imported');
-  // A location outside tmp/ saved before sign-in was required is not used until an authenticated save confirms it.
+  // A saved location outside tmp/ is used as it is, and saving it through the API keeps it.
   const { dir } = await fixtureBase('empty'), outside = await createFakeALA(path.join(dir, 'checkout'), '');
-  const later = await startServer('unconfirmed-saved', 'missing', false, simulatedNewPython, { alaCli: false, settings: `| ALA location | \`${outside}\` |\n` });
+  const later = await startServer('outside-saved', 'missing', false, simulatedNewPython, { alaCli: false, settings: `| ALA location | \`${outside}\` |\n` });
   try {
     const before = await later.request('/api/agent-settings');
-    assert.equal(before.ala.found, false); assert.equal(before.ala.unconfirmed, true); assert.deepEqual(before.ala.checked.map(c => [c.source, c.reason]), [['configured', ALA_LOCATION_UNCONFIRMED]]);
+    assert.equal(before.ala.found, true); assert.equal(before.ala.source, 'configured');
     const after = await later.request('/api/ala', { path: outside });
-    assert.equal(after.ala.found, true); assert.equal(after.ala.source, 'configured'); assert.equal(after.ala.unconfirmed, false);
-    const record = path.join(path.dirname(later.homes()), 'server/ala-location');
-    assert.equal(await fs.readFile(record, 'utf8'), outside + '\n'); assert.equal(fsSync.statSync(record).mode & 0o777, 0o600);
+    assert.equal(after.ala.found, true); assert.equal(after.ala.source, 'configured');
     assert.match(await fs.readFile(path.join(later.directory, 'agent-settings.md'), 'utf8'), new RegExp('\\| ALA location \\| `' + outside.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '` \\|'));
     assert.equal((await later.request('/api/coding-agents')).agents[0].id, 'codex');
   } finally { await later.stop(); }
-  // Clearing the location removes the record (on a server whose ALA comes from ALA_CLI, so nothing is detected).
-  const clearing = await startServer('confirmation-clear', 'success');
-  try {
-    const record = path.join(path.dirname(clearing.homes()), 'server/ala-location');
-    await clearing.request('/api/ala', { path: outside }); assert.equal(fsSync.existsSync(record), true);
-    // A record that cannot be removed is reported, not ignored.
-    await fs.chmod(path.dirname(record), 0o500);
-    try {
-      assert.deepEqual(await clearing.request('/api/ala', { path: '' }, 400), { error: `The ALA location was cleared, but its confirmation record could not be removed: ${record}` });
-      // The answer keeps its text; the reason goes to the server's console.
-      assert.ok(clearing.output().includes(`The ALA location confirmation ${record} could not be removed (EACCES).`), clearing.output());
-    } finally { await fs.chmod(path.dirname(record), 0o700); }
-    await clearing.request('/api/ala', { path: '' }); assert.equal(fsSync.existsSync(record), false);
-  } finally { await clearing.stop(); }
 });
 
-await test('a second server on the same port fails to bind and leaves the first server\'s key file and key working', { timeout: 30000 }, async () => {
+await test('the server does not start with an agent-home base inside the repository or with a PORT that is no TCP port', { timeout: 30000 }, async () => {
+  const start = async env => {
+    const child = spawn(process.execPath, [path.join(root, 'tools/audit-ui.mjs')], { cwd: root, env: { ...cleanEnvironment(), AUDIT_RUNS_ROOT: path.join(suite, 'not-started-runs'), AUDIT_EXAMPLES_ROOT: path.join(suite, 'not-started-examples'), AUDIT_PYTHON: simulatedNewPython, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = ''; child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
+    const [code] = await once(child, 'exit'); return { code, output };
+  };
+  const { dir } = await fixtureBase('empty'), repository = await fs.realpath(root), inside = path.join(repository, 'tmp/markdown-server-tests', path.basename(suite), 'base-inside');
+  const refusedBase = await start({ PORT: String(await freePort()), AUDIT_AGENT_HOME: inside });
+  assert.equal(refusedBase.code, 1); assert.equal(refusedBase.output, `The pilot server did not start: ${reasons.insideRepository(inside, repository)}\n`);
+  assert.equal(fsSync.existsSync(inside), false, 'the refused base was not created');
+  for (const port of ['0', 'abc', '70000', '80.5']) {
+    const refused = await start({ PORT: port, AUDIT_AGENT_HOME: path.join(dir, 'base') });
+    assert.equal(refused.code, 1, port); assert.equal(refused.output, `The pilot server did not start: PORT must be a TCP port from 1 to 65535, not ${port}.\n`, port);
+  }
+});
+
+await test('a second server on the same port fails to bind and leaves the first server working', { timeout: 30000 }, async () => {
   const first = await startServer('one-port', 'success');
   try {
-    const keyFile = path.join(path.dirname(first.homes()), 'server', `port-${first.port}.key`), before = sha(await fs.readFile(keyFile));
     const second = spawn(process.execPath, [path.join(root, 'tools/audit-ui.mjs')], { cwd: root, env: { ...cleanEnvironment(), PORT: String(first.port), AUDIT_AGENT_HOME: first.base, AUDIT_RUNS_ROOT: path.join(first.directory, 'second-runs'), AUDIT_EXAMPLES_ROOT: first.examples, ALA_CLI: first.ala, AUDIT_PYTHON: simulatedNewPython }, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = ''; second.stdout.on('data', b => { output += b; }); second.stderr.on('data', b => { output += b; });
     const [code] = await once(second, 'exit');
     assert.equal(code, 1); assert.match(output, /EADDRINUSE/); assert.doesNotMatch(output, /Audit laboratory/);
-    assert.equal(sha(await fs.readFile(keyFile)), before, 'the key file is unchanged');
-    assert.equal((await first.request('/api/examples')).length, 0, 'the first server\'s key still works');
+    assert.equal((await first.request('/api/examples')).length, 0, 'the first server still answers');
   } finally { await first.stop(); }
 });
 
@@ -765,8 +712,7 @@ await test('without AUDIT_AGENT_HOME the server creates the default base under H
   try {
     const base = path.join(home, '.lean-documents/agent-home');
     assert.equal(path.dirname(server.homes()), base);
-    for (const folder of [path.join(home, '.lean-documents'), base, path.join(base, 'server')]) assert.equal(fsSync.statSync(folder).mode & 0o777, 0o700, folder);
-    assert.equal(fsSync.statSync(path.join(base, `server/port-${server.port}.key`)).mode & 0o777, 0o600);
+    for (const folder of [path.join(home, '.lean-documents'), base]) assert.equal(fsSync.statSync(folder).mode & 0o777, 0o700, folder);
     assert.equal((await server.request('/api/examples')).length, 0);
     assert.match(server.output(), new RegExp(`Dedicated agent home: ${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.`));
   } finally { await server.stop(); }

@@ -10,9 +10,8 @@
  * ALA names for that agent into the template. It hardcodes no agent's sign-in command and prints file names, never
  * content. The base is AUDIT_AGENT_HOME, or ~/.lean-documents/agent-home.
  *
- * ALA is located as the server does, with two refusals, because this script imports ALA's login module unconfined:
- * a saved location counts only when it matches the confirmation record an authenticated server wrote, and an
- * automatically found ALA inside the repository's tmp/ or inside the base is refused. ALA_CLI is not restricted.
+ * ALA is located as the server does, with one refusal, because this script imports ALA's login module unconfined:
+ * an ALA inside the repository's tmp/ or inside the base is refused. ALA_CLI is not restricted.
  * `sweep` needs no ALA, but refuses a base as every other command does.
  *
  * Exit codes: 0 done; 2 usage error, or an agent ALA does not name; 3 ALA not found, refused, or without the login
@@ -25,7 +24,6 @@ import os from 'node:os';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {agentHomeLocation, createAgentHomes, liesWithin, loadALALogins, prepareBase} from './agent-home.mjs';
-import {ALA_LOCATION_UNCONFIRMED, savedLocationConfirmed} from './api-auth.mjs';
 import {alaEnvironment, createSettingsStore, resolveALA} from './ala.mjs';
 import {ROOT} from './toolchain.mjs';
 
@@ -72,23 +70,15 @@ function withInjectedEnvironment(env, resolve) {
   }
 }
 
-/** ALA for this script: the server's resolution plus the two refusals described above. resolveALA refuses a location
+/** ALA for this script: the server's resolution plus the refusal described above. resolveALA refuses a location
  * inside <root>/tmp or the base (every source but ALA_CLI) and then tries the next automatic candidate; this script
- * stops at the first refused one instead, with the location text, after the confirmation check for a saved location. */
+ * stops at the first refused one instead, with the location text. */
 function locateALA(root, base, env) {
   const ala = withInjectedEnvironment(env, () => resolveALA(root, createSettingsStore(path.join(root, 'tmp/readable-pilot/agent-settings.md')).read(), {refused: [base]}));
   const refusal = ala.checked.find(candidate => candidate.refusedInside);
-  if (refusal) {
-    if (refusal.source === 'configured' && !savedLocationConfirmed(base, ala.configured)) {
-      throw new Exit(3, `The saved ALA location ${ala.configured} was ${ALA_LOCATION_UNCONFIRMED}, or start with ALA_CLI set.`);
-    }
-    throw new Exit(3, refusal.reason);
-  }
+  if (refusal) throw new Exit(3, refusal.reason);
   if (!ala.found) {
-    throw new Exit(3, `ALA was not found. Checked: ${ala.checked.map(c => `${c.location} (${c.reason})`).join(', ')}. Set ALA_CLI, or save and confirm the ALA location in Agent settings.`);
-  }
-  if (ala.source === 'configured' && !savedLocationConfirmed(base, ala.configured)) {
-    throw new Exit(3, `The saved ALA location ${ala.configured} was ${ALA_LOCATION_UNCONFIRMED}, or start with ALA_CLI set.`);
+    throw new Exit(3, `ALA was not found. Checked: ${ala.checked.map(c => `${c.location} (${c.reason})`).join(', ')}. Set ALA_CLI, or save the ALA location in Agent settings.`);
   }
   if (ala.source !== 'environment') {
     for (const refused of [path.join(root, 'tmp'), base]) {

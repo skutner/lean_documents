@@ -43,18 +43,16 @@ const refusedRoot=(entry,refused)=>refused.find(folder=>folder&&liesWithin(entry
 const refusedRoots=(root,refused)=>[path.join(root,'tmp'),...(Array.isArray(refused)?refused:[])];
 // An explicit location is authoritative: an invalid one is reported, never silently replaced. Options: `refused` adds
 // folders runs can write to the default <root>/tmp (the rule covers every source but ALA_CLI, which is the operator's own
-// statement); a refused candidate's entry in `checked` names the folder as `refusedInside`. `confirm(saved)` returns null
-// for a saved location that may be used, otherwise the reason it may not.
-export function resolveALA(root,settings={},{refused=[],confirm=null}={}){
- const configured=typeof settings.alaPath==='string'&&settings.alaPath.trim()?settings.alaPath.trim():null,checked=[],roots=refusedRoots(root,refused);let unconfirmed=false;
+// statement); a refused candidate's entry in `checked` names the folder as `refusedInside`.
+export function resolveALA(root,settings={},{refused=[]}={}){
+ const configured=typeof settings.alaPath==='string'&&settings.alaPath.trim()?settings.alaPath.trim():null,checked=[],roots=refusedRoots(root,refused);
  for(const candidate of alaCandidates(root,configured)){
   const result=inspect(candidate.location);let reason=result.valid?null:result.reason,inside=null;
   if(!reason&&candidate.source!=='environment'){inside=refusedRoot(result.entry,roots);if(inside)reason=locationRefused(inside);}
-  if(!reason&&candidate.source==='configured'&&confirm){reason=confirm(configured)||null;unconfirmed=!!reason;}
   checked.push({...candidate,reason,...(inside?{refusedInside:inside}:{})});
   if(!reason)return {found:true,source:candidate.source,entry:result.entry,root:result.alaRoot,dependencies:result.dependencies,configured,checked};
  }
- return {found:false,configured,checked,...(unconfirmed?{unconfirmed:true}:{})};
+ return {found:false,configured,checked};
 }
 // `root` is this repository unless a caller (a test) names another; `refused` adds folders to <root>/tmp as above.
 export function validateALALocation(location,{root=ROOT,refused=[]}={}){

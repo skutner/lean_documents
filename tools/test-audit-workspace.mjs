@@ -7,11 +7,10 @@ import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 
-// Read-only browser regression against the existing local audit server. The API needs the server's key, read from its
-// key file (AUDIT_AGENT_HOME or the default base). The browser profile stores the key, so it lives in the host temporary
-// folder, which no run can read, and is removed afterwards; results stay under tmp/ and never hold the key.
+// Read-only browser regression against the existing local audit server. The browser profile lives in the host
+// temporary folder, which no run can read, and is removed afterwards; results stay under tmp/.
 // Chrome speaks its debugging protocol over a pipe (--remote-debugging-pipe), never over a TCP port: a debugging port
-// listens on loopback without credentials, where a confined run could attach and read the key or drive the browser.
+// listens on loopback without credentials, where a confined run could attach and drive the browser.
 //
 //   node tools/test-audit-workspace.mjs [<example id> [<report path>]]
 //   node tools/test-audit-workspace.mjs --smoke
@@ -92,13 +91,8 @@ if(process.argv[2]==='--smoke'){
  process.exit(0);
 }
 
-// The pilot modules are loaded only here: --smoke reads no key file and no agent-home base.
-const {readApiKey}=await import('./api-auth.mjs');
-const {agentHomeLocation}=await import('./agent-home.mjs');
 const origin='http://127.0.0.1:8787';
 const dir=await fs.mkdtemp(path.join(root,'tmp/workspace-browser-'));
-const key=await readApiKey({base:agentHomeLocation().base,port:8787});
-const authorized={headers:{Authorization:'Bearer '+key}};
 const sourceHTML=await fs.readFile(path.join(root,'tools/audit-ui.html'),'utf8');
 const renderer=vm.createContext({});
 vm.runInContext(sourceHTML.split('<script>')[1].split('async function catalog()')[0],renderer);
@@ -109,7 +103,7 @@ const anchored=vm.runInContext("markdown('## S01 — Chapter 1\\n\\nSource text\
 assert(anchored.includes('id="md-s01"')&&anchored.includes('id="md-r01"'),'Short source and report citations have stable section anchors');
 assert.equal(vm.runInContext("resolveDocumentLink('work/a/traces/step.md','../input/source.md').path",renderer),'work/a/input/source.md');
 assert.throws(()=>vm.runInContext("resolveDocumentLink('one.md','../../outside.md')",renderer));
-const catalogResponse=await fetch(origin+'/api/examples',authorized);
+const catalogResponse=await fetch(origin+'/api/examples');
 const catalog=await catalogResponse.json();
 assert(catalogResponse.ok&&Array.isArray(catalog),'Catalog unavailable: '+JSON.stringify(catalog));
 const requested=process.argv[2];
@@ -122,7 +116,7 @@ const source=example.files.find(f=>f.role==='source');
 const runs=example.runs.filter(r=>r.reportPath===report.path).sort((a,b)=>b.created.localeCompare(a.created));
 const finished=runs.find(r=>r.status==='finished');
 assert(source&&finished,'A source and a real finished verification are required');
-const runData=await (await fetch(origin+'/api/runs/'+finished.id,authorized)).json();
+const runData=await (await fetch(origin+'/api/runs/'+finished.id)).json();
 assert(runData.findings?.length,'The real run must contain findings');
 const claim=runData.findings.find(f=>f.proofs?.length)||runData.findings[0];
 const errors=[],mutations=[];let profileRoot=null,browser=null;
@@ -131,7 +125,7 @@ try{
  profileRoot=await makeProfileRoot();
  browser=await startChrome(profileRoot);
  const cdp=browser.page;
- browser.on(m=>{if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails);else if(m.method==='Network.requestWillBeSent'&&m.params.request.url.startsWith(origin)&&!['GET','HEAD'].includes(m.params.request.method)&&!(m.params.request.method==='POST'&&new URL(m.params.request.url).pathname==='/api/session'))mutations.push({method:m.params.request.method,url:m.params.request.url});});
+ browser.on(m=>{if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails);else if(m.method==='Network.requestWillBeSent'&&m.params.request.url.startsWith(origin)&&!['GET','HEAD'].includes(m.params.request.method))mutations.push({method:m.params.request.method,url:m.params.request.url});});
  async function js(expression){const r=await cdp('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value;}
  async function until(expression){for(let i=0;i<150;i++){if(await js(expression))return;await sleep(100);}throw Error('Timed out: '+expression);}
  async function clickNode(expression){
@@ -145,9 +139,7 @@ try{
  const sourceButton=`${node}.querySelector('[data-input-files] .input-file[data-path="'+${quote(source.path)}+'"]')`;
  await cdp('Runtime.enable');await cdp('Page.enable');await cdp('Network.enable');
  await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
- // The sign-in link goes through the debugging channel, never into the browser's arguments.
- await cdp('Page.navigate',{url:origin+'/#key='+key});await until(`${node}!==null`);
- assert.equal(await js('location.hash'),'','the page removed the key from the address');
+ await cdp('Page.navigate',{url:origin+'/'});await until(`${node}!==null`);
  assert.equal(await js("document.querySelectorAll('dialog,[role=dialog],#refresh,#run-history,#expand-verification').length"),0,'No popups, history, refresh or fullscreen navigation');
  await js("document.getElementById('new-example').click()");
  assert.deepEqual(await js("[...document.querySelectorAll('#example-language option')].map(o=>o.value).sort()"),['en','ro']);
@@ -265,5 +257,5 @@ try{
  browser.noPort();
  await fs.writeFile(path.join(dir,'result.md'),'# Browser verification\n\nPassed: read-only real-server navigation, source preview, finding summary, Lean preview, Markdown links and responsive document bounds.\n\n- Example: '+example.id+'\n- Report: '+report.path+'\n- Run: '+finished.id+'\n- Claim: '+claim.claim_id+'\n\n## Viewports\n\n'+bounds.map(b=>'- '+b.viewportWidth+' × '+b.viewportHeight+': viewport '+b.width+' × '+b.height).join('\n')+'\n');
  console.log('PASS read-only audit workspace. Artifacts: '+dir);
-}catch(e){await fs.writeFile(path.join(dir,'failure.md'),'# Browser verification failed\n\n```text\n'+String(e.stack).split(key).join('<key>')+'\n```\n\nBrowser exceptions: '+errors.length+'\n\nUnexpected writes: '+mutations.length+'\n');throw e;}
-finally{await browser?.close();await fs.writeFile(path.join(dir,'chrome.md'),'# Browser diagnostics\n\n```text\n'+(browser?browser.log():'Chrome did not start; see failure.md.').split(key).join('<key>')+'\n```\n');await removeProfileRoot(profileRoot);}
+}catch(e){await fs.writeFile(path.join(dir,'failure.md'),'# Browser verification failed\n\n```text\n'+String(e.stack)+'\n```\n\nBrowser exceptions: '+errors.length+'\n\nUnexpected writes: '+mutations.length+'\n');throw e;}
+finally{await browser?.close();await fs.writeFile(path.join(dir,'chrome.md'),'# Browser diagnostics\n\n```text\n'+(browser?browser.log():'Chrome did not start; see failure.md.')+'\n```\n');await removeProfileRoot(profileRoot);}

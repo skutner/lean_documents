@@ -18,7 +18,6 @@ import {fileURLToPath} from 'node:url';
 import * as agentHome from './agent-home.mjs';
 import {createFakeALA} from './fake-ala-fixture.mjs';
 import {main as setupMain} from './setup-agent-home.mjs';
-import {writeALAConfirmation} from './api-auth.mjs';
 
 const {createAgentHomes, homeUnavailable, loadALALogins, noLogin, reasons} = agentHome;
 const TOOLS = path.dirname(fileURLToPath(import.meta.url));
@@ -908,7 +907,7 @@ test('Script: a template locked by a live process gives exit 7 after the wait, a
   assert.equal(fs.existsSync(path.join(homes.template, '.codex')), false);
 });
 
-test('Script: a saved ALA location counts only with a confirmation record, and never inside tmp/ of the repository', async t => {
+test('Script: a saved ALA location is used, but never one inside tmp/ of the repository', async t => {
   const {dir, base} = await fixture(t);
   const root = path.join(dir, 'repository');
   const saved = await createFakeALA(path.join(dir, 'saved-ala'), '');
@@ -926,17 +925,11 @@ test('Script: a saved ALA location counts only with a confirmation record, and n
   };
   const env = {AUDIT_AGENT_HOME: base};
   write(saved);
-  let err = capture();
-  assert.equal(await setupMain(['status'], {out: capture(), err, env, root}), 3);
-  assert.equal(err.text, `The saved ALA location ${saved} was saved before sign-in was required; confirm it in Agent settings, or start with ALA_CLI set.\n`);
   agentHome.prepareBase({base, root, create: true});
-  fs.mkdirSync(path.join(base, 'server'), {mode: 0o700});
-  writeALAConfirmation(base, saved);
   assert.equal(await setupMain(['status'], {out: capture(), err: capture(), env, root}), 0);
   const planted = await createFakeALA(path.join(root, 'tmp/run-1/ala'), '');
   write(planted);
-  writeALAConfirmation(base, planted);
-  err = capture();
+  const err = capture();
   assert.equal(await setupMain(['status'], {out: capture(), err, env, root}), 3);
   assert.equal(err.text, `This ALA location is not accepted: it lies inside ${path.join(root, 'tmp')}, where runs can write. Use a checkout outside it.\n`);
 });

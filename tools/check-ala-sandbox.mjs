@@ -8,14 +8,12 @@ import fs from 'node:fs/promises';
 import {rmSync,existsSync,statSync,accessSync,constants as fsConstants} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import http from 'node:http';
 import crypto from 'node:crypto';
 import {spawn,execFile,spawnSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {resolveALA,createSettingsStore,alaArguments,alaEnvironment,ALA_EVENT_PREFIX,ABSENT_CONFIG} from './ala.mjs';
 import {leanExecutable,resolvePython} from './toolchain.mjs';
 import {agentHomeLocation,loadALALogins} from './agent-home.mjs';
-import {API_UNAUTHORIZED,ALA_LOCATION_UNCONFIRMED,createApiAuth,readApiKey,savedLocationConfirmed} from './api-auth.mjs';
 
 // Keep in step with the Lean pin in toolchain.json and the Lean version named in the audit prompt in audit-ui.mjs.
 export const LEAN_VERSION='4.24.0';
@@ -31,7 +29,6 @@ export const CHECKS=[
  ['home_private','HOME is private, and an entry of the real home is neither readable nor listed',true],
  ['other_process_environment','The environment of an outside process is unreadable, while a reader sees its own',true],
  ['real_agent_state_denied','The real coding-agent state folders are not the sandbox home\'s, and neither listable nor their login files readable',true],
- ['pilot_api_denied','The pilot API refuses a call without its key, and the key file is not readable',true],
  ['python','The resolved Python is version 3.12 or later',true],
  ['helper_import','The audit helper loads: <python> tools/document_audit.py --help',true],
  ['lean_version',`The repository Lean toolchain reports version ${LEAN_VERSION}`,true],
@@ -41,7 +38,7 @@ export const CHECKS=[
  ['launchd_residual','Known macOS residual: existing launchd jobs (stated, not measured)',false],
 ];
 // The checks that must fail when nothing confines the probe. cwd, run_write and repo_read pass unconfined.
-export const CONFINEMENT=['repo_write_denied','tmp_write_denied','sibling_write_denied','outside_read_denied','home_private','other_process_environment','real_agent_state_denied','pilot_api_denied'];
+export const CONFINEMENT=['repo_write_denied','tmp_write_denied','sibling_write_denied','outside_read_denied','home_private','other_process_environment','real_agent_state_denied'];
 export const deniedProbes=({root,check,id})=>({repo_write_denied:path.join(root,`ala-sandbox-write-probe-${id}.txt`),tmp_write_denied:path.join(root,'tmp',`ala-sandbox-write-probe-${id}.txt`),sibling_write_denied:path.join(check,'outside-run-probe.txt')});
 // A fixed statement, not a measurement: the check creates no launchd job (ALA DS006, decision Q5).
 export const launchdResidual=(platform=process.platform)=>platform==='darwin'?'Known residual on macOS: a confined process can start or unload existing launchd jobs in your login session; see ALA DS006.':'not applicable';
@@ -100,37 +97,6 @@ ${state.folders.map(f=>` check_state '${f.relative}' '${f.dev}:${f.ino}'${f.file
 fi`;
 }
 
-// The pilot-API probe, run inside by the simulated agent with the Node that runs ALA. It prints one JSON line: that it
-// ran, the status of a call without the key and whether its text is the exact refusal, whether the key file could be
-// read and, only then, the status of a call with what it read. It never prints the key.
-export function apiProbeScript({port,keyFile}){
- return `// Model-free pilot-API probe of tools/check-ala-sandbox.mjs. It never prints the key.
-import http from 'node:http';
-import fs from 'node:fs';
-const port=${Number(port)},keyFile=${JSON.stringify(keyFile)},expected=${JSON.stringify(API_UNAUTHORIZED)};
-const call=headers=>new Promise(resolve=>{const req=http.request({host:'127.0.0.1',port,path:'/api/probe',headers,timeout:5000},res=>{let body='';res.setEncoding('utf8');res.on('data',c=>{if(body.length<8192)body+=c;});res.on('end',()=>resolve({status:res.statusCode,body}));});req.on('timeout',()=>req.destroy(Object.assign(new Error('timeout'),{code:'ETIMEDOUT'})));req.on('error',e=>resolve({error:e.code||e.message}));req.end();});
-const out={ran:true,keyFile};
-const anonymous=await call({});
-if(anonymous.error)out.connect=anonymous.error;else{out.status=anonymous.status;let text=null;try{text=JSON.parse(anonymous.body).error;}catch{}out.textOk=text===expected;}
-let key=null;try{key=fs.readFileSync(keyFile,'utf8').replace(/\\n$/,'');out.keyReadable=true;}catch(e){out.keyReadable=false;out.keyError=e.code||'error';}
-if(key!==null){const r=await call({Authorization:'Bearer '+key});out.keyStatus=r.error||r.status;}
-process.stdout.write(JSON.stringify(out)+'\\n');
-`;
-}
-
-/** The row pilot_api_denied from the probe's line. It passes only when the probe ran, a call without the key got 401
- * with the exact text, and the key file was not readable. */
-export function apiVerdict(raw){
- let v=null;try{v=JSON.parse(String(raw??'').trim());}catch{}
- const fail=detail=>({status:'fail',detail});
- if(!v||typeof v!=='object'||v.ran!==true)return fail('The API probe did not run or gave no usable line, so nothing was measured inside: '+(String(raw??'').trim().slice(0,200)||'no output'));
- if(v.keyReadable!==false)return fail(`The key file ${v.keyFile} was readable inside`+(v.keyStatus!==undefined?`; a call with what it read got ${v.keyStatus}`:''));
- if(v.connect)return fail(`The probe ran but could not connect to the pilot listener (${v.connect}). Loopback works inside on both platforms, so the probe or the listener is broken and the gate was not exercised from inside.`);
- if(v.status===200)return fail('A call without the key got 200');
- if(v.status!==401||v.textOk!==true)return fail(`A call without the key got ${v.status}${v.textOk?'':' without the exact refusal text'}, not the 401 refusal`);
- return {status:'pass',detail:`A call without the key got 401 with the exact refusal text; the key file ${v.keyFile} is not readable inside (${v.keyError||'refused'})`};
-}
-
 /** --negative-control: without --home, with HOME holding .codex, the row must fail because $HOME/.codex is that folder. */
 export function negativeControlOutcome(row){
  const ok=row?.status==='fail'&&/is your real folder/.test(row.detail||'');
@@ -154,11 +120,10 @@ export function combineState(row,{hostProblem=null,marker=false,control=null}={}
 // absolute paths (or null when the host could not resolve them; the host then reports the two checks itself).
 // `sentinel`, `home` and `helper` describe the host fixtures: see makeSentinel, pickHomeEntry and startHelper.
 // `state` ({home, folders: [{relative, path, ino, files}]}, see agentStateFolders) names the coding-agent state folders of
-// a real home, `marker` ({name, value}) is written into $HOME so the host can tell which folder HOME was, and `api`
-// ({node, script}, see apiProbeScript) runs the pilot-API probe. Without them the two rows fail.
-export function probeScript({run,root,check,id,python=null,lean=null,platform=process.platform,sentinel,home,helper,reader,state=null,marker=null,api=null}){
+// a real home and `marker` ({name, value}) is written into $HOME so the host can tell which folder HOME was.
+export function probeScript({run,root,check,id,python=null,lean=null,platform=process.platform,sentinel,home,helper,reader,state=null,marker=null}){
  const values=[run,root,check,id,python||'',lean||'',sentinel.file,sentinel.dir,sentinel.marker,sentinel.base,home.real,home.entry||'',helper.name,helper.value,String(helper.pid),reader,
-  ...(state?[state.home,...state.folders.flatMap(f=>[f.relative,String(f.dev),String(f.ino),...f.files])]:[]),...(marker?[marker.name,marker.value]:[]),...(api?[api.node,api.script]:[])];
+  ...(state?[state.home,...state.folders.flatMap(f=>[f.relative,String(f.dev),String(f.ino),...f.files])]:[]),...(marker?[marker.name,marker.value]:[])];
  for(const value of values)if(/['\r\n\\]/.test(value))throw Error('This check does not support quotes, backslashes or line breaks in paths: '+value);
  if(marker&&!/^[\w.-]+$/.test(marker.name+marker.value))throw Error('Unsupported marker');
  if(state&&state.folders.some(f=>!/^\d+$/.test(String(f.dev))||!/^\d+$/.test(String(f.ino))))throw Error('Unsupported folder identity');
@@ -223,8 +188,6 @@ case "$OE" in
  *) record other_process_environment fail "The reader did not give a usable answer (exit $OR): $OE";;
 esac
 ${stateSection({state,marker,platform})}
-${api?`AO=$('${api.node}' '${api.script}' 2>/dev/null | head -n 1)
-record pilot_api_denied raw "$AO"`:`record pilot_api_denied raw ''`}
 ${python?`PY='${python}'
 V=$("$PY" -c 'import sys; print(sys.version.split()[0])' 2>&1)
 if "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then record python pass "$PY $V"; else record python fail "$PY $V; 3.12 or later is required"; fi
@@ -262,9 +225,6 @@ export function evaluate(tsv,{platform=process.platform,pythonError=null,pythonW
  for(const key of pythonError?['python','helper_import']:[])rows.set(key,{status:'fail',detail:pythonError});
  for(const key of leanError?['lean_version','lean_check']:[])rows.set(key,{status:'fail',detail:leanError});
  rows.set('launchd_residual',{status:'info',detail:launchdResidual(platform)});
- // The probe only reports what it saw; the host decides this row, so a line claiming "pass" itself counts for nothing.
- const apiRow=rows.get('pilot_api_denied');
- if(apiRow)rows.set('pilot_api_denied',apiRow.status==='raw'?apiVerdict(apiRow.detail):{status:'fail',detail:'The probe recorded no raw API line, so nothing was measured inside: '+apiRow.status+' '+apiRow.detail});
  if(pythonWarning&&rows.get('python')&&!pythonError)rows.get('python').detail+=' Warning: '+pythonWarning;
  return CHECKS.map(([key,label,required])=>{const row=rows.get(key);return {key,label,required,status:row?.status||'missing',detail:row?.detail||'The probe did not record this check.',ok:!required||row?.status==='pass'};});
 }
@@ -332,8 +292,8 @@ export function removeSentinel({base,dir}){
 
 const BASE_PREFIX='ala-sandbox-base-';
 /** The check's own agent-home base, beside the sentinel in the host temporary folder (outside the repository and the
- * real home), laid out as the server's: homes/check-home is the --home of the run, server/port-<n>.key the key of the
- * pilot-API listener, so a grant that reached above the home would show. Also the positive and negative control homes. */
+ * real home), laid out as the server's: homes/check-home is the --home of the run. Also the positive and negative control
+ * homes. */
 export async function makeTemporaryBase(sentinel){
  const dir=await fs.realpath(await fs.mkdtemp(path.join(sentinel.base,BASE_PREFIX)));
  const base={base:sentinel.base,dir,homes:path.join(dir,'homes'),checkHome:path.join(dir,'homes','check-home'),controlHome:path.join(dir,'homes','control-home'),controlReal:path.join(dir,'control-real-home'),negativeHome:path.join(dir,'negative-home'),neverCreated:path.join(dir,'never-created-home')};
@@ -378,29 +338,6 @@ export function stateHostProblem(state){
  if(state.problems?.length)return state.problems[0];
  for(const folder of state.folders){try{accessSync(folder.path,fsConstants.R_OK|fsConstants.X_OK);}catch{return `The host cannot list ${folder.path}, so a refusal inside proves nothing.`;}}
  return null;
-}
-
-function callApi(port,headers={}){
- return new Promise(resolve=>{const req=http.request({host:'127.0.0.1',port,path:'/api/probe',headers,timeout:5000,agent:false},res=>{let body='';res.setEncoding('utf8');res.on('data',c=>{if(body.length<8192)body+=c;});res.on('end',()=>resolve({status:res.statusCode,body}));});req.on('timeout',()=>req.destroy(new Error('timeout')));req.on('error',error=>resolve({error:error.code||error.message}));req.end();});
-}
-/** A loopback listener with the server's own gate (tools/api-auth.mjs) in front of one protected route. Its key file is
- * written under `base`/server after the port is bound, as the server does. */
-export async function startApiListener({base,root}){
- let auth=null;
- const server=http.createServer((req,res)=>{const url=new URL(req.url,'http://127.0.0.1');if(!auth){res.writeHead(503);res.end();return;}if(!auth.gate(req,res,url))return;res.writeHead(200,{'Content-Type':'application/json'});res.end('{"ok":true}');});
- await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
- const port=server.address().port;
- try{auth=createApiAuth({base,port,root,explicit:true});auth.start();}catch(error){server.close();throw error;}
- return {port,base,keyFile:auth.keyFile,async stop(){auth.stopSync();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));return true;}};
-}
-/** Host control of pilot_api_denied: the host reads the key, gets 200 with it and the exact 401 without it. */
-export async function apiHostControl({port,base}){
- let key;try{key=await readApiKey({base,port});}catch(error){return {ok:false,detail:'The host cannot read the key file: '+error.message};}
- const allowed=await callApi(port,{Authorization:'Bearer '+key}),refused=await callApi(port);
- let text=null;try{text=JSON.parse(refused.body).error;}catch{}
- if(allowed.status!==200)return {ok:false,detail:`The host's call with the key got ${allowed.status||allowed.error}, not 200, so a refusal inside proves nothing`};
- if(refused.status!==401||text!==API_UNAUTHORIZED)return {ok:false,detail:`The host's call without the key got ${refused.status||refused.error}, not the 401 refusal, so the listener is not the gate`};
- return {ok:true,detail:'The host got 200 with the key and the 401 refusal without it'};
 }
 
 /** An existing entry of the real home for the home_private check. It is never read: only its type is looked at, and
@@ -484,10 +421,10 @@ const INSTRUCTIONS='# Sandbox check\n\nModel-free ALA sandbox check. The simulat
 // check then exits 0 only when real_agent_state_denied fails with "is your real folder".
 export async function main({root,timeout=120000,helperOptions={},homeDir=os.homedir(),log=console.log,negativeControl=false}={}){
  root??=await fs.realpath(path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'));
- // ALA is located as the server does: a saved location only with its confirmation record, and never inside tmp/ or the
+ // ALA is located as the server does, and never inside tmp/ or the
  // agent-home base, because this check imports ALA's modules unconfined. ALA_CLI is the operator's own statement.
  let homeBase=null;try{homeBase=agentHomeLocation({env:process.env,home:homeDir}).base;}catch{}
- const ala=resolveALA(root,createSettingsStore(path.join(root,'tmp/readable-pilot/agent-settings.md')).read(),{refused:[path.join(root,'tmp'),homeBase].filter(Boolean),confirm:location=>homeBase&&savedLocationConfirmed(homeBase,location)?null:ALA_LOCATION_UNCONFIRMED});
+ const ala=resolveALA(root,createSettingsStore(path.join(root,'tmp/readable-pilot/agent-settings.md')).read(),{refused:[path.join(root,'tmp'),homeBase].filter(Boolean)});
  if(!ala.found){console.error('ALA was not found. Checked: '+ala.checked.map(c=>c.location+' ('+c.reason+')').join(', ')+'. Set ALA_CLI or save the ALA location in Agent settings.');return 2;}
  let logins;try{logins=await loadALALogins(ala.entry);}catch(error){console.error(error.message);return 2;}
  let python=null,pythonError=null,lean=null,leanError=null;
@@ -500,19 +437,19 @@ export async function main({root,timeout=120000,helperOptions={},homeDir=os.home
  const codex=path.join(bin,'codex');
  const sentinel=await makeSentinel(root,{home:homeDir}),homeNames=async()=>(await fs.readdir(homeDir).catch(()=>[])).sort(),homeBefore=await homeNames();
  let temporary=null;try{temporary=await makeTemporaryBase(sentinel);}catch(error){removeSentinel(sentinel);throw error;}
- let helper=null,listener=null,cleaned=null;
+ let helper=null,cleaned=null;
  // The helper must not outlive this process, whatever the exit path; the sentinel and the temporary base go with it.
  const stopNow=()=>{try{helper?.child.kill('SIGKILL');}catch{}removeSentinel(sentinel);removeTemporaryBase(temporary);};
  const signals={SIGINT:130,SIGTERM:143,SIGHUP:129},handlers=Object.entries(signals).map(([signal,code])=>[signal,()=>{stopNow();process.exit(code);}]);
  process.once('exit',stopNow);for(const [signal,handler] of handlers)process.once(signal,handler);
- const cleanup=async()=>cleaned??={helperStopped:helper?await helper.stop():null,listenerStopped:listener?await listener.stop().catch(()=>false):null,sentinelRemoved:removeSentinel(sentinel),baseRemoved:removeTemporaryBase(temporary)};
+ const cleanup=async()=>cleaned??={helperStopped:helper?await helper.stop():null,sentinelRemoved:removeSentinel(sentinel),baseRemoved:removeTemporaryBase(temporary)};
  const clean=withoutAgentState(withoutCredentials(process.env),logins);
  const marker={name:'.ala-sandbox-check-marker-'+crypto.randomBytes(4).toString('hex'),value:crypto.randomBytes(12).toString('hex')};
  // One probe run through ALA. `home` is the --home folder (null for the negative control, whose arguments are built
  // without alaArguments, which requires one). Returns the evaluated rows and ALA's result.
- async function probeRun({name,runDir,codexFile,state,api,home,homeFiles=null,env,args}){
+ async function probeRun({name,runDir,codexFile,state,home,homeFiles=null,env,args}){
   await fs.mkdir(runDir,{recursive:true});
-  await fs.writeFile(codexFile,probeScript({run:runDir,root,check,id:name,python:python?.path,lean,sentinel,home:homeEntry,helper,reader,state,marker,api}),{mode:0o755});
+  await fs.writeFile(codexFile,probeScript({run:runDir,root,check,id:name,python:python?.path,lean,sentinel,home:homeEntry,helper,reader,state,marker}),{mode:0o755});
   await fs.chmod(codexFile,0o755); // a restrictive umask must not clear the execute bit
   await fs.writeFile(path.join(runDir,'instructions.md'),INSTRUCTIONS);
   await assertModelFree({env,codex:codexFile,home:home||homeFiles.home,homeFiles:homeFiles?.files||null,homeEnvironment:home?logins.homeEnvironment:null,discover:alaDiscovery(ala.entry)});
@@ -533,7 +470,7 @@ export async function main({root,timeout=120000,helperOptions={},homeDir=os.home
    // No --home: ALA's default, with every agent state variable pointing into the fixture home.
    const env=alaEnvironment({...logins.homeEnvironment(clean,temporary.negativeHome),CODEX_BIN:codex});
    log(`ALA: ${ala.entry}\nCheck folder: ${check}\nNegative control: no --home, HOME=${temporary.negativeHome} (holds only .codex/auth.json with {})\nRunning the simulated Codex through ALA…`);
-   const probe=await probeRun({name:id,runDir:run,codexFile:codex,state,api:null,home:null,homeFiles:{home:temporary.negativeHome,files},env,args});
+   const probe=await probeRun({name:id,runDir:run,codexFile:codex,state,home:null,homeFiles:{home:temporary.negativeHome,files},env,args});
    const outcome=negativeControlOutcome(probe.byKey.real_agent_state_denied);
    const done=await cleanup();
    const report='# ALA sandbox check: negative control\n\nThis model-free run started ALA without `--home`, with `HOME` and every agent state variable pointing to a fixture home that holds only `.codex/auth.json` with `{}`. The row `real_agent_state_denied` must then fail with "is your real folder", which shows the row can detect a shared state folder.\n\n'+
@@ -542,19 +479,14 @@ export async function main({root,timeout=120000,helperOptions={},homeDir=os.home
    log('\n'+report+`\nReport: ${path.join(check,'report.md')}`);
    return outcome.ok&&done.helperStopped&&done.sentinelRemoved&&done.baseRemoved?0:1;
   }
-  listener=await startApiListener({base:temporary.dir,root});
-  const apiScript=path.join(bin,'api-probe.mjs');await fs.writeFile(apiScript,apiProbeScript({port:listener.port,keyFile:listener.keyFile}));
-  const api={node:process.execPath,script:apiScript};
   const state=await agentStateFolders({logins,home:homeDir,probeHome:temporary.neverCreated});
   const args=alaArguments({entry:ala.entry,selection:{agent:'codex'},cwd:run,home:temporary.checkHome,root,taskFile:path.join(run,'instructions.md'),output:path.join(run,'final-message.md')});
   // The simulated Codex replaces the real binary. ALA derives every agent state variable from the empty --home.
   const env=alaEnvironment({...clean,CODEX_BIN:codex});
-  log(`ALA: ${ala.entry}\nCheck folder: ${check}\nCODEX_BIN=${codex} (the simulated Codex)  --home ${temporary.checkHome} (empty)\nHost helper: process ${helper.pid}, environment variable ${helper.name}\nPilot API listener: port ${listener.port}, key file ${listener.keyFile}\nReal agent state folders checked: ${state.folders.map(f=>f.path).join(', ')||'none'}\nRunning the simulated Codex through ALA…`);
-  const apiBefore=await apiHostControl({port:listener.port,base:temporary.dir});
+  log(`ALA: ${ala.entry}\nCheck folder: ${check}\nCODEX_BIN=${codex} (the simulated Codex)  --home ${temporary.checkHome} (empty)\nHost helper: process ${helper.pid}, environment variable ${helper.name}\nReal agent state folders checked: ${state.folders.map(f=>f.path).join(', ')||'none'}\nRunning the simulated Codex through ALA…`);
   const before=await confirmOnHost({helper,reader});
-  const main=await probeRun({name:id,runDir:run,codexFile:codex,state,api,home:temporary.checkHome,env,args});
+  const main=await probeRun({name:id,runDir:run,codexFile:codex,state,home:temporary.checkHome,env,args});
   const after=await confirmOnHost({helper,reader,attempts:1});
-  const apiAfter=await apiHostControl({port:listener.port,base:temporary.dir});
   const {checks,byKey}=main;
   // Host-side confirmation: the run-folder file must reach the host and no refused write may exist.
   if(byKey.run_write.status==='pass'&&!await exists(path.join(run,'write-probe.txt')))failCheck(byKey.run_write,'The write succeeded inside the sandbox but the file is missing on the host.');
@@ -563,7 +495,6 @@ export async function main({root,timeout=120000,helperOptions={},homeDir=os.home
   if(await fs.readFile(sentinel.file,'utf8').catch(()=>null)!==sentinel.marker)failCheck(byKey.outside_read_denied,'The host can no longer read the sentinel '+sentinel.file+', so a refusal inside proves nothing.');
   if(homeEntry.entry&&await fs.access(path.join(homeEntry.real,homeEntry.entry),fs.constants.R_OK).then(()=>false,()=>true))failCheck(byKey.home_private,'The host cannot read '+path.join(homeEntry.real,homeEntry.entry)+', so a refusal inside proves nothing.');
   for(const confirmation of [before,after])if(!confirmation.ok)failCheck(byKey.other_process_environment,confirmation.detail);
-  for(const confirmation of [apiBefore,apiAfter])if(!confirmation.ok)failCheck(byKey.pilot_api_denied,confirmation.detail);
   const mainMarker=await markerFound(temporary.checkHome,marker);
   // Positive control [review 4]: the same probe through ALA with --home and a fixture real home that holds .codex/.
   // It must pass naming the fixture folder, and its marker must reach its own --home folder.
@@ -572,23 +503,23 @@ export async function main({root,timeout=120000,helperOptions={},homeDir=os.home
   const controlRun=path.join(check,'control-run'),controlCodex=path.join(bin,'codex-control');
   const controlArgs=alaArguments({entry:ala.entry,selection:{agent:'codex'},cwd:controlRun,home:temporary.controlHome,root,taskFile:path.join(controlRun,'instructions.md'),output:path.join(controlRun,'final-message.md')});
   log('Running the positive control of real_agent_state_denied through ALA…');
-  const control=await probeRun({name:id+'-control',runDir:controlRun,codexFile:controlCodex,state:controlState,api:null,home:temporary.controlHome,env:alaEnvironment({...clean,CODEX_BIN:controlCodex}),args:controlArgs});
+  const control=await probeRun({name:id+'-control',runDir:controlRun,codexFile:controlCodex,state:controlState,home:temporary.controlHome,env:alaEnvironment({...clean,CODEX_BIN:controlCodex}),args:controlArgs});
   for(const file of Object.values(deniedProbes({root,check,id:id+'-control'})))await fs.rm(file,{force:true});
   const controlRow=control.byKey.real_agent_state_denied;
   combineState(byKey.real_agent_state_denied,{hostProblem:stateHostProblem(state),marker:mainMarker,control:{status:controlRow.status,detail:controlRow.detail,marker:await markerFound(temporary.controlHome,marker)}});
   const alaOk=main.result.code===0&&!main.result.timedOut&&main.finalMessage.includes(PROBE_MESSAGE);
   const passed=alaOk&&checks.every(c=>c.ok);
   const done=await cleanup(),homeAfter=await homeNames(),homeChanged=homeAfter.filter(name=>!homeBefore.includes(name)).length+homeBefore.filter(name=>!homeAfter.includes(name)).length;
-  const report='# ALA sandbox check\n\nThis model-free check ran a simulated Codex through ALA with the same arguments the audit server uses, including a dedicated `--home`. No model, prompt or network request beyond loopback was involved.\n\n'+
+  const report='# ALA sandbox check\n\nThis model-free check ran a simulated Codex through ALA with the same arguments the audit server uses, including a dedicated `--home`. No model, prompt or network request was involved.\n\n'+
    `**Result: ${passed?'passed':'failed'}.** ${alaLineOf(main)}\n\n| Check | Required | Result | Detail |\n| --- | --- | --- | --- |\n`+
    checks.map(c=>`| ${cell(c.label)} | ${c.required?'Yes':'No'} | ${c.status} | ${cell(c.detail)} |`).join('\n')+
    '\n\n## ALA invocation\n\n```sh\n'+[process.execPath,...args].join(' ')+'\n```\n\nThe environment set `CODEX_BIN` to the simulated Codex (`'+codex+'`) and `ALA_EVENT_STREAM=1`; `--home` was an empty folder (`'+temporary.checkHome+'`); `PLOINKY_*`, `OPENAI_*`, `ANTHROPIC_*`, `CLAUDE_CODE_OAUTH_TOKEN` and the agent state variables were removed.\n'+
    '\n## Positive control of real_agent_state_denied\n\n'+alaLineOf(control)+' Row: '+controlRow.status+' — '+cell(controlRow.detail)+'\n\n```sh\n'+[process.execPath,...controlArgs].join(' ')+'\n```\n'+
-   `\n## Host fixtures\n\nA sentinel file in \`${sentinel.dir}\` (removed: ${done.sentinelRemoved?'yes':'NO'}), a helper process ${helper.pid} with the marker variable \`${helper.name}\` (stopped: ${done.helperStopped?'yes':'NO'}), a pilot-API listener on port ${listener.port} with its key file under \`${temporary.dir}\` (stopped: ${done.listenerStopped?'yes':'NO'}), and the temporary base \`${temporary.dir}\` with the --home folders and the control home (removed: ${done.baseRemoved?'yes':'NO'}). The check writes nothing in the real home (${homeDir}); its list of entries was ${homeChanged?`seen to change by ${homeChanged} entries while it ran, which another program must have done`:'unchanged while it ran'}.\n`+
+   `\n## Host fixtures\n\nA sentinel file in \`${sentinel.dir}\` (removed: ${done.sentinelRemoved?'yes':'NO'}), a helper process ${helper.pid} with the marker variable \`${helper.name}\` (stopped: ${done.helperStopped?'yes':'NO'}), and the temporary base \`${temporary.dir}\` with the --home folders and the control home (removed: ${done.baseRemoved?'yes':'NO'}). The check writes nothing in the real home (${homeDir}); its list of entries was ${homeChanged?`seen to change by ${homeChanged} entries while it ran, which another program must have done`:'unchanged while it ran'}.\n`+
    (main.diagnostics.length?'\n## ALA diagnostics\n\n```text\n'+main.diagnostics.slice(-40).join('\n')+'\n```\n':'');
   await fs.writeFile(path.join(check,'report.md'),report);
   log('\n'+report+`\nReport: ${path.join(check,'report.md')}`);
-  return passed&&done.helperStopped&&done.sentinelRemoved&&done.baseRemoved&&done.listenerStopped?0:1;
+  return passed&&done.helperStopped&&done.sentinelRemoved&&done.baseRemoved?0:1;
  }finally{
   await cleanup();
   process.removeListener('exit',stopNow);for(const [signal,handler] of handlers)process.removeListener(signal,handler);

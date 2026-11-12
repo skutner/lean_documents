@@ -7,7 +7,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { alaArguments, alaEnvironment, createALACatalog, createALAJournal, createSettingsStore, formatSettings, parseSettings, readALACatalog, resolveALA, validateALALocation, locationRefused, ABSENT_CONFIG, DEFAULT_SETTINGS } from './ala.mjs';
-import { ALA_LOCATION_UNCONFIRMED, API_UNAUTHORIZED, readApiKey } from './api-auth.mjs';
 import { createFakeALA } from './fake-ala-fixture.mjs';
 
 test('settings round-trip through a readable Markdown record and reject unsafe values', async () => {
@@ -120,15 +119,13 @@ test('ALA location: ALA_CLI overrides, a saved location is authoritative and inv
   }
 });
 
-test('the ALA location rule refuses a location inside tmp/ by folder identity, and a saved one needs its confirmation record', async () => {
-  const { savedLocationConfirmed, writeALAConfirmation } = await import('./api-auth.mjs');
+test('the ALA location rule refuses a location inside tmp/ by folder identity', async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ala-rule-')));
   const saved = process.env.ALA_CLI; delete process.env.ALA_CLI;
   try {
     const root = path.join(directory, 'lean_documents'), tmp = path.join(root, 'tmp'), refused = [tmp];
     const planted = await createFakeALA(path.join(tmp, 'run-1/ala'), '');
     const application = await createFakeALA(path.join(root, 'AdvancedLanguageAgent'), '');
-    const outside = await createFakeALA(path.join(directory, 'checkout'), '');
     const link = path.join(directory, 'link-to-planted'); await fs.symlink(planted, link);
     const text = locationRefused(tmp);
     assert.equal(text, `This ALA location is not accepted: it lies inside ${tmp}, where runs can write. Use a checkout outside it.`);
@@ -158,17 +155,6 @@ test('the ALA location rule refuses a location inside tmp/ by folder identity, a
       const own = await createFakeALA(path.join(inRepository, 'ala'), '');
       assert.throws(() => validateALALocation(own), { message: locationRefused(repositoryTmp) });
     } finally { await fs.rm(inRepository, { recursive: true, force: true }); }
-    // A saved location counts only when it equals the confirmation record.
-    const base = path.join(directory, 'base'); await fs.mkdir(path.join(base, 'server'), { recursive: true, mode: 0o700 }); await fs.chmod(base, 0o700); await fs.chmod(path.join(base, 'server'), 0o700);
-    const confirm = location => savedLocationConfirmed(base, location) ? null : ALA_LOCATION_UNCONFIRMED;
-    const unconfirmed = resolveALA(root, { alaPath: outside }, { refused, confirm });
-    assert.equal(unconfirmed.found, false); assert.equal(unconfirmed.unconfirmed, true);
-    assert.deepEqual(unconfirmed.checked.map(c => [c.source, c.reason]), [['configured', 'saved before sign-in was required; confirm it in Agent settings']]);
-    writeALAConfirmation(base, outside);
-    const confirmed = resolveALA(root, { alaPath: outside }, { refused, confirm });
-    assert.equal(confirmed.found, true); assert.equal(confirmed.source, 'configured'); assert.equal(confirmed.unconfirmed, undefined);
-    writeALAConfirmation(base, planted);
-    assert.equal(resolveALA(root, { alaPath: planted }, { refused, confirm }).checked[0].reason, text, 'a confirmation never lifts the location rule');
   } finally {
     if (saved === undefined) delete process.env.ALA_CLI; else process.env.ALA_CLI = saved;
     await fs.rm(directory, { recursive: true, force: true });
@@ -218,24 +204,20 @@ async function probeFixture() {
   await fs.writeFile(path.join(root, 'skills/evidence-to-proof-review/SKILL.md'), '# Stub skill\n'); await fs.writeFile(reader, m.READER_PERL); await fs.writeFile(path.join(fakeHome, '.zshrc'), '# stub\n');
   const sentinel = await m.makeSentinel(root), home = await m.pickHomeEntry({ home: fakeHome }), helper = await m.startHelper();
   const python = await fs.access('/usr/bin/python3').then(() => '/usr/bin/python3', () => null), lean = path.join(root, 'tmp/toolchains/none/bin/lean');
-  // The fake real home holds a Codex state folder; the pilot-API listener's base lies outside the stub repository.
+  // The fake real home holds a Codex state folder.
   await m.makeCodexFixture(fakeHome);
   const { loadALALogins } = await import('./agent-home.mjs'), ala = await createFakeALA(path.join(root, 'ala'), ''), logins = await loadALALogins(path.join(ala, 'bin/ala.mjs'));
   const state = await m.agentStateFolders({ logins, home: fakeHome, probeHome: path.join(root, 'never-created') });
-  const apiBase = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ala-probe-base-'))), listener = await m.startApiListener({ base: apiBase, root });
-  const apiScript = path.join(check, 'bin/api-probe.mjs'); await fs.writeFile(apiScript, m.apiProbeScript({ port: listener.port, keyFile: listener.keyFile }));
-  const api = { node: process.execPath, script: apiScript }, marker = { name: '.ala-sandbox-check-marker-test', value: 'marker-value-1' };
-  const fx = { m, root, id, check, run, reader, fakeHome, sentinel, home, helper, state, listener, apiBase, api, marker, logins };
-  fx.key = await readApiKey({ base: apiBase, port: listener.port });
+  const marker = { name: '.ala-sandbox-check-marker-test', value: 'marker-value-1' };
+  const fx = { m, root, id, check, run, reader, fakeHome, sentinel, home, helper, state, marker, logins };
   fx.probe = async (overrides = {}, env = {}) => {
-    const script = path.join(check, 'codex'); await fs.writeFile(script, m.probeScript({ run, root, check, id, python, lean, sentinel, home, helper, reader, state, marker, api, ...overrides }), { mode: 0o755 });
+    const script = path.join(check, 'codex'); await fs.writeFile(script, m.probeScript({ run, root, check, id, python, lean, sentinel, home, helper, reader, state, marker, ...overrides }), { mode: 0o755 });
     const stdout = await new Promise((resolve, reject) => execFile('/bin/sh', [script, 'exec', '--json', 'ignored prompt'], { cwd: run, env: { ...process.env, HOME: fakeHome, ...env } }, (error, out) => error ? reject(error) : resolve(out)));
     const tsv = await fs.readFile(path.join(run, 'probe-results.tsv'), 'utf8'), checks = m.evaluate(tsv);
     return { stdout, tsv, checks, result: Object.fromEntries(checks.map(c => [c.key, c])) };
   };
   fx.close = async () => {
     await fs.chmod(sentinel.dir, 0o700).catch(() => {}); await fs.chmod(fakeHome, 0o700).catch(() => {});
-    await listener.stop(); await fs.rm(apiBase, { recursive: true, force: true });
     const stopped = await helper.stop(), removed = m.removeSentinel(sentinel); await fs.rm(root, { recursive: true, force: true });
     assert.equal(stopped, true, 'the helper process is gone'); assert.equal(removed, true, 'the sentinel folder is gone');
   };
@@ -272,9 +254,6 @@ test('the sandbox probe reports writes outside the run folder as failures when n
     assert.equal(privateRun.result.real_agent_state_denied.status, 'fail'); assert.match(privateRun.result.real_agent_state_denied.detail, /\.codex is listable inside/); assert.doesNotMatch(privateRun.result.real_agent_state_denied.detail, /is your real folder/);
     assert.equal(fsExists(path.join(fx.fakeHome, fx.marker.name)), false, 'no marker is written into the real home');
     assert.equal(await fs.readFile(path.join(privateHome, fx.marker.name), 'utf8'), fx.marker.value + '\n', 'the marker reaches a private HOME');
-    // pilot_api_denied, unconfined: the probe reads the key file, so the row fails however the gate answered.
-    assert.equal(result.pilot_api_denied.status, 'fail'); assert.match(result.pilot_api_denied.detail, /^The key file .*port-\d+\.key was readable inside; a call with what it read got 200$/);
-    for (const text of [stdout, (await fx.probe()).tsv, JSON.stringify(result)]) assert.equal(text.includes(fx.key), false, 'the key appears in no probe output');
     // The TMPDIR label comes from content: a folder that lists the sentinel's folder is the host's, a private one is not.
     assert.match((await fx.probe({}, { TMPDIR: fx.sentinel.base })).result.home.detail, /TMPDIR=\S+ \(the host temporary folder: it lists the sentinel folder\)/);
     assert.match((await fx.probe({}, { TMPDIR: privateHome })).result.home.detail, /TMPDIR=\S+ \(private, not the host temporary folder\)/);
@@ -297,17 +276,14 @@ test('outside_read_denied and home_private pass when the sentinel, the home entr
   } finally { await fx.close(); }
 });
 
-test('real_agent_state_denied and pilot_api_denied pass when the real folder and the key file are refused (permission bits stand in for the sandbox)', { skip: unprivileged }, async () => {
+test('real_agent_state_denied passes when the real folder is refused (permission bits stand in for the sandbox)', { skip: unprivileged }, async () => {
   const fx = await probeFixture();
   try {
     const privateHome = path.join(fx.root, 'private-home'); await fs.mkdir(privateHome);
-    await fs.chmod(path.join(fx.fakeHome, '.codex'), 0o000); await fs.chmod(fx.listener.keyFile, 0o000);
-    const { result, tsv } = await fx.probe({}, { HOME: privateHome });
+    await fs.chmod(path.join(fx.fakeHome, '.codex'), 0o000);
+    const { result } = await fx.probe({}, { HOME: privateHome });
     assert.equal(result.real_agent_state_denied.status, 'pass', result.real_agent_state_denied.detail);
     assert.equal(result.real_agent_state_denied.detail, `HOME=${privateHome} is none of them, and none is listable or has a readable login file inside: ${fx.fakeHome}/.codex`);
-    assert.equal(result.pilot_api_denied.status, 'pass', result.pilot_api_denied.detail);
-    assert.match(result.pilot_api_denied.detail, /^A call without the key got 401 with the exact refusal text; the key file .*port-\d+\.key is not readable inside \(EACCES\)$/);
-    assert.equal(tsv.includes(fx.key), false);
     // A HOME whose .codex is a link to the real folder is the real folder: ALA's default without --home on macOS.
     await fs.symlink(path.join(fx.fakeHome, '.codex'), path.join(privateHome, '.codex'));
     const linked = (await fx.probe({}, { HOME: privateHome })).result.real_agent_state_denied;
@@ -315,25 +291,11 @@ test('real_agent_state_denied and pilot_api_denied pass when the real folder and
     // No state folder in the real home: the probe says so and the host decides with the positive control.
     const none = (await fx.probe({ state: { home: privateHome + '-none', folders: [] } }, { HOME: privateHome })).result.real_agent_state_denied;
     assert.deepEqual([none.status, none.ok, none.detail], ['na', false, 'not applicable: no coding-agent state folder exists in the real home']);
-    // The probe cannot connect: its own failure, not a pass.
-    await fx.listener.stop();
-    const closed = (await fx.probe({}, { HOME: privateHome })).result.pilot_api_denied;
-    assert.equal(closed.status, 'fail'); assert.match(closed.detail, /could not connect to the pilot listener \(ECONNREFUSED\)/);
-  } finally { await fs.chmod(path.join(fx.fakeHome, '.codex'), 0o700).catch(() => {}); await fs.chmod(fx.listener.keyFile, 0o600).catch(() => {}); await fx.close(); }
+  } finally { await fs.chmod(path.join(fx.fakeHome, '.codex'), 0o700).catch(() => {}); await fx.close(); }
 });
 
-test('pilot_api_denied fails without a usable probe line, and the host merges real_agent_state_denied with its positive control', async () => {
-  const { evaluate, apiVerdict, combineState, negativeControlOutcome } = await import('./check-ala-sandbox.mjs');
-  const row = tsv => evaluate(tsv).find(c => c.key === 'pilot_api_denied');
-  for (const tsv of ['', 'pilot_api_denied\traw\t', 'pilot_api_denied\traw\tnot json', 'pilot_api_denied\traw\t{"ran":false}', 'pilot_api_denied\tpass\tsaid so']) {
-    const result = row(tsv); assert.equal(result.ok, false, JSON.stringify(tsv)); assert.notEqual(result.status, 'pass', JSON.stringify(tsv));
-  }
-  assert.match(row('pilot_api_denied\traw\t').detail, /did not run or gave no usable line/);
-  const good = { ran: true, keyFile: '/b/server/port-1.key', status: 401, textOk: true, keyReadable: false, keyError: 'EPERM' };
-  assert.equal(apiVerdict(JSON.stringify(good)).status, 'pass');
-  for (const [change, pattern] of [[{ keyReadable: true, keyStatus: 401 }, /was readable inside; a call with what it read got 401/], [{ keyReadable: undefined }, /was readable inside/], [{ status: 200 }, /got 200/], [{ textOk: false }, /without the exact refusal text/], [{ status: 403 }, /got 403/], [{ connect: 'ECONNREFUSED' }, /could not connect/]]) {
-    const verdict = apiVerdict(JSON.stringify({ ...good, ...change })); assert.equal(verdict.status, 'fail', JSON.stringify(change)); assert.match(verdict.detail, pattern);
-  }
+test('the host merges real_agent_state_denied with its positive control', async () => {
+  const { combineState, negativeControlOutcome } = await import('./check-ala-sandbox.mjs');
   const state = (status, detail = 'probe detail') => ({ key: 'real_agent_state_denied', status, detail, required: true, ok: status === 'pass' });
   const control = { status: 'pass', detail: 'HOME=/c is none of them ... /fixture/.codex', marker: true };
   assert.equal(combineState(state('pass'), { marker: true, control }).ok, true);
@@ -567,7 +529,7 @@ fs.writeFileSync(output, JSON.parse(result.stdout.trim().split('\\n').pop()).ite
 const probeRow = async (fx, key) => { const [check] = await fs.readdir(path.join(fx.root, 'tmp/ala-sandbox-check')); return (await fs.readFile(path.join(fx.root, 'tmp/ala-sandbox-check', check, 'run/probe-results.tsv'), 'utf8')).split('\n').find(line => line.startsWith(key + '\t')); };
 const fixturesGone = async fx => {
   const base = await fs.realpath(os.tmpdir()), pid = Number(/helper process (\d+)/.exec(fx.report)[1]);
-  assert.match(fx.report, /\(removed: yes\), a helper process \d+ with the marker variable `\w+` \(stopped: yes\), a pilot-API listener on port \d+ with its key file under `[^`]+` \(stopped: yes\), and the temporary base `[^`]+` with the --home folders and the control home \(removed: yes\)/);
+  assert.match(fx.report, /\(removed: yes\), a helper process \d+ with the marker variable `\w+` \(stopped: yes\), and the temporary base `[^`]+` with the --home folders and the control home \(removed: yes\)/);
   assert.deepEqual((await fs.readdir(base)).filter(name => name.startsWith('ala-sandbox-sentinel-') || name.startsWith('ala-sandbox-base-')), [], 'no sentinel folder and no temporary base is left');
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the helper process is gone');
 };
@@ -584,9 +546,6 @@ test('main() end to end with nothing confining the probe: every confinement row 
     assert.match(fx.row('real_agent_state_denied').detail, new RegExp(`^HOME=\\S+/homes/check-home: \\S+/home/\\.codex is listable inside; positive control failed: HOME=\\S+/homes/control-home: \\S+/control-real-home/\\.codex is listable inside$`));
     // The server's own arguments: --home directly after --cwd, an empty folder in the temporary base.
     const invocation = /## ALA invocation\n\n```sh\n(.*)\n```/.exec(fx.report)[1].split(' ');
-    // [delta 4] layout: the key file lies in server/ of the same base whose homes/ holds the --home folder.
-    const checkHome = invocation[invocation.indexOf('--home') + 1], port = /^Pilot API listener: port (\d+), key file /m.exec(fx.output)[1];
-    assert.equal(fx.row('pilot_api_denied').detail, `The key file ${path.join(path.dirname(path.dirname(checkHome)), 'server', `port-${port}.key`)} was readable inside; a call with what it read got 200`);
     assert.equal(invocation[invocation.indexOf('--cwd') + 2], '--home'); assert.match(invocation[invocation.indexOf('--home') + 1], /\/ala-sandbox-base-[^/]+\/homes\/check-home$/);
     assert.match(fx.report, /## Positive control of real_agent_state_denied/);
     assert.match(fx.report, /list of entries was unchanged while it ran/); assert.deepEqual((await fs.readdir(fx.homeDir)).sort(), before, 'the fake home is untouched');
@@ -621,22 +580,6 @@ test('main() fails home_private when the host cannot read the chosen home entry'
     await fx.run();
     assert.match(await probeRow(fx, 'home_private'), /\tpass\t/, 'the probe finds the entry unreadable and the home unlistable');
     assert.equal(fx.row('home_private').status, 'fail'); assert.match(fx.row('home_private').detail, /host cannot read .*\.zshrc/);
-  } finally { await fx.close(); }
-});
-
-test('main() fails pilot_api_denied when the host control after the run fails, although the probe then reports a pass', async () => {
-  // The fake ALA removes the listener's key file (in server/ of the base whose homes/ holds --home) before the probe
-  // runs: the probe cannot read it and gets the 401, so only the host's second control can fail the row.
-  const fx = await mainFixture({ body: "if (home) { const server = path.join(path.dirname(path.dirname(home)), 'server'); for (const name of fs.existsSync(server) ? fs.readdirSync(server) : []) if (/^port-\\d+\\.key$/.test(name)) fs.rmSync(path.join(server, name)); }" });
-  try {
-    await fx.run();
-    const { apiVerdict } = await import('./check-ala-sandbox.mjs');
-    const raw = (await probeRow(fx, 'pilot_api_denied')).split('\t').slice(2).join('\t');
-    assert.equal(apiVerdict(raw).status, 'pass', 'the probe line alone passes: ' + raw); assert.match(raw, /"keyReadable":false,"keyError":"ENOENT"/);
-    assert.equal(fx.row('pilot_api_denied').status, 'fail');
-    assert.match(fx.row('pilot_api_denied').detail, /^The host cannot read the key file: No running pilot server left a key for port \d+ under \S+\.$/);
-    assert.equal(fx.code, 1);
-    await fixturesGone(fx);
   } finally { await fx.close(); }
 });
 

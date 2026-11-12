@@ -11,8 +11,7 @@ import crypto from 'node:crypto';
 import {inflateRawSync} from 'node:zlib';
 import {resolveALA,validateALALocation,alaUnavailable,createSettingsStore,createALACatalog,readALACatalog,alaArguments,alaEnvironment,createALAJournal} from './ala.mjs';
 import {resolvePython,leanExecutable} from './toolchain.mjs';
-import {agentHomeLocation,createAgentHomes,loadALALogins} from './agent-home.mjs';
-import {createApiAuth,notStarted,ALA_LOCATION_UNCONFIRMED,savedLocationConfirmed,writeALAConfirmation,clearALAConfirmation,answerUnread} from './api-auth.mjs';
+import {agentHomeLocation,createAgentHomes,loadALALogins,prepareBase} from './agent-home.mjs';
 
 const PILOT=process.env.AUDIT_DOCUMENT_PILOT==='1';
 // The real path keeps prompt paths identical to the paths ALA mounts inside its sandbox.
@@ -26,14 +25,12 @@ const REPORT_JOBS=path.join(path.dirname(RUNS),'report-jobs');
 const settingsStore=createSettingsStore(path.join(path.dirname(RUNS),'agent-settings.md'));
 // Every coding agent the server starts (audit, draft, model listing) gets a fresh dedicated agent home under the base
 // (AUDIT_AGENT_HOME, or ~/.lean-documents/agent-home), never the user's own agent folders; see tools/agent-home.mjs.
+const notStarted=reason=>`The pilot server did not start: ${reason}`;
 let HOME_LOCATION;try{HOME_LOCATION=agentHomeLocation();}catch(e){console.error(notStarted(e.reason||e.message));process.exit(1);}
 const agentHomes=createAgentHomes({root:ROOT,base:HOME_LOCATION.base,explicit:HOME_LOCATION.explicit,logins:()=>{const ala=locateALA();if(!ala.found)throw Object.assign(Error(alaUnavailable),{status:503});return loadALALogins(ala.entry);}});
-// The server imports ALA's modules unconfined. A location inside the run folders or the agent-home base is refused, and
-// a saved location counts only when it equals the confirmation record that an authenticated POST /api/ala wrote.
+// The server imports ALA's modules unconfined, so a location inside the run folders or the agent-home base is refused.
 const REFUSED_ALA=[path.join(ROOT,'tmp'),agentHomes.base];
-const locateALA=()=>resolveALA(ROOT,settingsStore.read(),{refused:REFUSED_ALA,confirm:location=>savedLocationConfirmed(authBase(),location)?null:ALA_LOCATION_UNCONFIRMED});
-// The base the key file was written under by apiAuth.start(); the confirmation record lives beside it in server/.
-const authBase=()=>path.dirname(path.dirname(apiAuth.keyFile));
+const locateALA=()=>resolveALA(ROOT,settingsStore.read(),{refused:REFUSED_ALA});
 // The agent list derives install paths from a home that is never created; a model listing opens a home of its own,
 // records the worker as the home's process and closes the home once the worker has ended.
 async function readCatalog(agent){
@@ -43,7 +40,7 @@ async function readCatalog(agent){
  try{return await readALACatalog(ala.entry,home.path,agent,{started:child=>home.recordProcess({pid:child.pid})});}finally{await home.close();agentHomeCache=null;}
 }
 const agentCatalog=createALACatalog(locateALA,{read:readCatalog});
-function alaStatus(){const {found,source,entry,dependencies,configured,checked,unconfirmed}=locateALA();return {found,source:source||null,entry:entry||null,dependencies:!!dependencies,configured,unconfirmed:!!unconfirmed,checked:checked.map(({source,location,reason})=>({source,location,reason}))};}
+function alaStatus(){const {found,source,entry,dependencies,configured,checked}=locateALA();return {found,source:source||null,entry:entry||null,dependencies:!!dependencies,configured,checked:checked.map(({source,location,reason})=>({source,location,reason}))};}
 // New work is refused while ALA is missing, and it records the agent selection it was queued with.
 // Python 3.12 or later is resolved each time it is needed, so an interpreter installed or configured later applies without a restart. Without one, new work is refused with the resolver's text, before ALA is considered.
 const pythonInterpreter=()=>resolvePython();
@@ -63,9 +60,7 @@ const generationActive=new Map(),generationQueue=[],cancelled=new Set();
 let LOCAL_LEAN;try{LOCAL_LEAN=leanExecutable(ROOT);}catch{LOCAL_LEAN=path.join(ROOT,'tmp/toolchains/lean-unsupported-platform/bin/lean');}
 const MAX_CONCURRENT=Math.min(8,Math.max(1,Number(process.env.AUDIT_CONCURRENCY)||2));
 const PORT=Number(process.env.PORT||8787), active=new Map(), queue=[], rendering=new Map();
-// Every /api/* request needs the key of tools/api-auth.mjs, which no confined run can read. The key file is written after
-// the socket is bound.
-let apiAuth;try{apiAuth=createApiAuth({base:HOME_LOCATION.base,port:PORT,root:ROOT,explicit:HOME_LOCATION.explicit});}catch(e){console.error(notStarted(e.reason||e.message));process.exit(1);}
+if(!Number.isSafeInteger(PORT)||PORT<1||PORT>65535){console.error(notStarted(`PORT must be a TCP port from 1 to 65535, not ${process.env.PORT}.`));process.exit(1);}
 const stamp=()=>new Date().toISOString();
 const uid=()=>stamp().replace(/[:.]/g,'-')+'-'+crypto.randomBytes(3).toString('hex');
 const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
@@ -256,9 +251,17 @@ for(const e of await fs.readdir(RUNS,{withFileTypes:true}))if(e.isDirectory()){c
 try{const swept=await agentHomes.sweep();for(const k of swept.kept)console.warn(`Agent home ${k.name} was left in place: ${k.reason}.`);}catch(e){console.warn('The agent-home sweep failed: '+e.message);}
 // The page's only script is allowed by its hash, computed for each response from the bytes served; nothing else runs.
 function pagePolicy(page){const open=Buffer.from('<script>'),close=Buffer.from('</script>'),start=page.indexOf(open),end=start<0?-1:page.indexOf(close,start+open.length);const single=start>=0&&end>=0&&page.indexOf(Buffer.from('<script'),end)<0&&page.indexOf(Buffer.from('<script'),0)===start;const script=single?"'sha256-"+crypto.createHash('sha256').update(page.subarray(start+open.length,end)).digest('base64')+"'":"'none'";return `script-src ${script}; base-uri 'none'; frame-ancestors 'none'`;}
-// The gate lets every path outside /api/ through, and outside /api/ only GET is served (the page). Any other method there
-// is refused before the Origin, content-type and body steps, unread and with the connection closed when a body is
-// announced, so an unauthenticated caller cannot make the server buffer an upload. The router and checkContinue both use it.
+// Answers `status` with the JSON `value` without reading the request body. When a body is announced the answer says
+// `Connection: close`, and once it is flushed the connection is cut: ending it politely would let Node read and discard
+// the rest of the upload. A client still sending may then see a reset instead of the answer.
+function answerUnread(req,res,status,headers,value){
+ const body=(req.headers['content-length']&&req.headers['content-length']!=='0')||req.headers['transfer-encoding'],answer=JSON.stringify(value);
+ res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Content-Length':Buffer.byteLength(answer),...headers,...(body?{Connection:'close'}:{})});
+ res.end(answer);if(body)res.on('finish',()=>req.socket.destroy());
+}
+// Outside /api/ only GET is served (the page). Any other method there is refused before the Origin, content-type and body
+// steps, unread and with the connection closed when a body is announced, so a caller cannot make the server buffer an
+// upload. The router and checkContinue both use it.
 const OUTSIDE_API_METHOD='Only GET is served outside /api/.';
 const OUTSIDE_API_BODY='A request outside /api/ must not carry a body.';
 function refusedOutsideApi(req,res,url){
@@ -268,19 +271,16 @@ function refusedOutsideApi(req,res,url){
  if((req.headers['content-length']&&req.headers['content-length']!=='0')||req.headers['transfer-encoding']){answerUnread(req,res,400,{'Cache-Control':'no-store'},{error:OUTSIDE_API_BODY});return true;}
  return false;
 }
-// Only 127.0.0.1: the name localhost also reaches [::1], where a confined run may listen and share the origin. The Host
-// check and the URL parse run before the gate, so their refusal is answered unread as well: a caller without the key must
-// not make the server read an upload by naming another Host. The router and checkContinue both use it.
+// Only 127.0.0.1: the name localhost also reaches [::1], where a confined run may listen and share the origin. The
+// refusal is answered unread, so a caller cannot make the server read an upload by naming another Host. The router and
+// checkContinue both use it.
 function acceptedURL(req,res){try{if(req.headers.host!==`127.0.0.1:${PORT}`)throw Error(`Use http://127.0.0.1:${PORT}`);return new URL(req.url,`http://127.0.0.1:${PORT}`);}catch(e){answerUnread(req,res,400,{'Cache-Control':'no-store'},{error:e.message});return null;}}
 const server=http.createServer(async(req,res)=>{
  try{
   const url=acceptedURL(req,res);if(!url)return;let result;
-  // Every /api/* request needs the key; the gate answers 401 itself, before any request body is read.
-  if(!apiAuth.gate(req,res,url))return;
   if(refusedOutsideApi(req,res,url))return;
   if(req.method==='POST'){
    if(req.headers.origin&&req.headers.origin!==`http://127.0.0.1:${PORT}`)throw Error('Invalid Origin');
-   if(url.pathname==='/api/session'){apiAuth.session(req,res);return;}
    if(req.headers['content-type']!=='application/json')throw Error('JSON required');const data=await requestBody(req);
    if(url.pathname==='/api/examples')result=await createExample(data);
    else if(/^\/api\/examples\/[^/]+\/files$/.test(url.pathname))result=await addFiles(safeId(url.pathname.split('/')[3]),data);
@@ -290,9 +290,7 @@ const server=http.createServer(async(req,res)=>{
    else if(/^\/api\/runs\/[^/]+\/render$/.test(url.pathname))result=await renderCheckedReport(safeId(url.pathname.split('/')[3]));
    else if(/^\/api\/runs\/[^/]+\/stop$/.test(url.pathname))result=await stopRun(safeId(url.pathname.split('/')[3]));
    else if(url.pathname==='/api/agent-settings'){const selection=await agentCatalog.validate(data);await settingsStore.write({...settingsStore.read(),...selection});result=await agentSettings();}
-   // Saving a location also writes its confirmation record (under the agent-home base, which no run can reach); the
-   // record holds exactly the value read back from the settings, so the two compare equal.
-   else if(url.pathname==='/api/ala'){const location=data.path===null||data.path===''?'':validateALALocation(data.path,{refused:REFUSED_ALA});const saved=await settingsStore.write({...settingsStore.read(),alaPath:location});if(saved.alaPath)writeALAConfirmation(authBase(),saved.alaPath);else{try{clearALAConfirmation(authBase());}catch(e){console.error(e.message);throw Error('The ALA location was cleared, but its confirmation record could not be removed: '+path.join(authBase(),'server','ala-location'));}}agentCatalog.clear();agentHomeCache=null;result=await agentSettings();}
+   else if(url.pathname==='/api/ala'){const location=data.path===null||data.path===''?'':validateALALocation(data.path,{refused:REFUSED_ALA});await settingsStore.write({...settingsStore.read(),alaPath:location});agentCatalog.clear();agentHomeCache=null;result=await agentSettings();}
    else throw Error('Unknown action');
   }else if(req.method!=='GET')throw Error('Unsupported method');
   else if(url.pathname==='/'){const page=await fs.readFile(path.join(ROOT,'tools/audit-ui.html'));res.setHeader('Cache-Control','no-store');res.setHeader('Content-Type','text/html; charset=utf-8');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Content-Security-Policy',pagePolicy(page));res.end(page);return;}
@@ -316,16 +314,14 @@ const server=http.createServer(async(req,res)=>{
   res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');res.end(JSON.stringify(result));
  }catch(e){res.writeHead([400,429,503].includes(e.status)?e.status:400,{'Content-Type':'application/json'});res.end(JSON.stringify({error:e.message}));}
 });
-// The key file is written only once the port is bound, so a server that fails on a busy port never replaces a running
-// server's key. The sign-in link reaches a terminal only (tools/api-auth.mjs, announce).
-// Node answers "100 Continue" itself unless a checkContinue listener exists: the Host check and the gate run first, so an
-// unauthenticated client is never invited to send its body.
-server.on('checkContinue',(req,res)=>{const url=acceptedURL(req,res);if(!url)return;if(!apiAuth.gate(req,res,url)||refusedOutsideApi(req,res,url))return;res.writeContinue();server.emit('request',req,res);});
-server.on('error',e=>{console.error(e.message);process.exitCode=1;});if(!process.env.AUDIT_WORKER_ONLY)server.listen(PORT,'127.0.0.1',()=>{try{apiAuth.start();}catch(e){console.error(e.message);server.close();process.exit(1);}console.log(`Audit laboratory: http://127.0.0.1:${PORT}`);apiAuth.announce(process.stdout);console.log(`Dedicated agent home: ${agentHomes.base}. Each coding agent starts with a fresh home there, never with your own agent folders. Sign in for the pilot: node tools/setup-agent-home.mjs login <agent> -- <sign-in command>`);const ala=alaStatus();console.log(ala.found?`ALA: ${ala.entry}${ala.dependencies?'':' (dependencies missing: run npm install in the ALA folder)'}`:`ALA not found. Checked: ${ala.checked.map(c=>c.location).join(', ')}. Set its location in Agent Settings or with ALA_CLI.`);const python=pythonStatus();console.log(python.found?`Python: ${python.path} ${python.version}`:`Python: not available. ${python.error}`);if(python.warning)console.warn(`Python warning: ${python.warning}`);});
-// At exit, open agent homes are removed once their ALA process group has ended (or left and reported), and the key file
-// is removed if it still holds this server's key. Open connections are cut, so a browser's keep-alive connection
-// cannot hold the shutdown.
-process.on('exit',()=>{agentHomes.removeOpenSync();apiAuth.stopSync();});
+// The agent-home base is created, or refused, once the port is bound: a server with a base it may not use does not start.
+// Node answers "100 Continue" itself unless a checkContinue listener exists: the Host check and the refusal outside
+// /api/ run first, so a client they refuse is never invited to send its body.
+server.on('checkContinue',(req,res)=>{const url=acceptedURL(req,res);if(!url)return;if(refusedOutsideApi(req,res,url))return;res.writeContinue();server.emit('request',req,res);});
+server.on('error',e=>{console.error(e.message);process.exitCode=1;});if(!process.env.AUDIT_WORKER_ONLY)server.listen(PORT,'127.0.0.1',()=>{try{prepareBase({base:HOME_LOCATION.base,root:ROOT,explicit:HOME_LOCATION.explicit,create:true});}catch(e){console.error(notStarted(e.reason||e.message));server.close();process.exit(1);}console.log(`Audit laboratory: http://127.0.0.1:${PORT}`);console.log(`Dedicated agent home: ${agentHomes.base}. Each coding agent starts with a fresh home there, never with your own agent folders. Sign in for the pilot: node tools/setup-agent-home.mjs login <agent> -- <sign-in command>`);const ala=alaStatus();console.log(ala.found?`ALA: ${ala.entry}${ala.dependencies?'':' (dependencies missing: run npm install in the ALA folder)'}`:`ALA not found. Checked: ${ala.checked.map(c=>c.location).join(', ')}. Set its location in Agent Settings or with ALA_CLI.`);const python=pythonStatus();console.log(python.found?`Python: ${python.path} ${python.version}`:`Python: not available. ${python.error}`);if(python.warning)console.warn(`Python warning: ${python.warning}`);});
+// At exit, open agent homes are removed once their ALA process group has ended (or left and reported). Open connections
+// are cut, so a browser's keep-alive connection cannot hold the shutdown.
+process.on('exit',()=>{agentHomes.removeOpenSync();});
 for(const sig of ['SIGINT','SIGTERM','SIGHUP'])process.on(sig,()=>{queue.length=0;generationQueue.length=0;for(const child of [...active.values(),...generationActive.values()])if(child){try{process.kill(-child.pid,'SIGTERM');}catch{child.kill('SIGTERM');}}server.close(()=>process.exit());server.closeAllConnections();setTimeout(()=>process.exit(),3000).unref();});
 
 export {queueRun, inspectRun, queueGeneration};

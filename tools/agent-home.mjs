@@ -8,7 +8,6 @@
  *   homes/           home-<server pid>-<16 hex> while in use, gone-<same suffix> while being removed,
  *                    home-<suffix>.owner beside each (never inside it)
  *   staging/         login-<pid>-<16 hex> scratch homes of a sign-in
- *   server/          the pilot API key (tools/api-auth.mjs)
  *   template.lock    the owner's pid; it appears with its content already in it
  *
  * Removal of a used home never walks or repairs it by path in this process on macOS: clearing flags, restoring owner
@@ -160,7 +159,7 @@ function privacyProblem(metadata) {
 }
 
 /** Confirms that `folder` is a real folder of this user with no group or other access, creating it with mode 0700
- * first when `create` is set. Returns false when it is absent and not created. Used for server/ by api-auth.mjs. */
+ * first when `create` is set. Returns false when it is absent and not created. */
 export function checkPrivateFolder(folder, {create = false} = {}) {
   if (create) {
     try {
@@ -198,7 +197,7 @@ function storedSpelling(location) {
 /** HD-6 for a base: not inside the repository, not inside Node's runtime root, and a private folder, created when
  * `create` is set (its parent only for the default location, `explicit: false`). Returns {base, exists}: the base with
  * its ancestors resolved, and once it exists as a real folder, in the spelling the volume stores. Used by
- * createAgentHomes and by api-auth.mjs. */
+ * createAgentHomes. */
 export function prepareBase({base, root, explicit = true, create = false}) {
   if (typeof base !== 'string' || !path.isAbsolute(base)) throw unavailable(reasons.relativeBase(base));
   const location = canonicalParent(base);
