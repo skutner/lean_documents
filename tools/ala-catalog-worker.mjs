@@ -1,28 +1,40 @@
-// Catalog-only ALA adapter. It lists installed coding agents and their models; it never starts a prompt, task or model inference.
-//   node tools/ala-catalog-worker.mjs <ala entry> <agent home> [agent]
-// Every call names an agent home, as an ALA execution with --home would (ALA's listAgentModels): the environment is
-// homeEnvironment(<environment without PLOINKY_*>, home), so neither discovery nor the agent's own model listing ever
-// looks at the user's real agent folders. The agent list may name a home that does not exist (only install paths are
-// derived from it); a model listing needs an existing real folder, the home the server opened for it.
+// Catalog-only ALA adapter. It lists installed coding agents and their models, or reports the login of one agent; it never
+// starts a prompt, task or model inference.
+//   node tools/ala-catalog-worker.mjs <ala entry> <agent home | -> [agent]
+//   node tools/ala-catalog-worker.mjs <ala entry> <agent home | -> --login <agent>
+// The login form asks ALA's login module, which reads the agent's login files. A run can write those files, so the
+// server never reads them itself: it runs this process and kills it when it does not answer in time.
+// The home is the one a run would get, as an ALA execution with or without --home (ALA's listAgentModels): `-` is your
+// own home, so the environment is the caller's without PLOINKY_* and the service gets no home; a folder must be an
+// existing real folder, and the environment is homeEnvironment(<environment without PLOINKY_*>, folder).
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
-const [entrypoint,home,agent]=process.argv.slice(2);
+const [entrypoint,home,agent,loginAgent]=process.argv.slice(2);
 let workspace;
 try{
- if(typeof home!=='string'||!path.isAbsolute(home))throw Error('An agent home is required.');
- let agentHome=path.resolve(home);
- if(agent){
-  const metadata=await fs.lstat(agentHome).catch(()=>null);
-  if(!metadata?.isDirectory())throw Error('An agent home is required.');
-  agentHome=await fs.realpath(agentHome);
+ const required=()=>Error('An agent home folder or "-" is required.');
+ let agentHome=null;
+ if(home!=='-'){
+  if(typeof home!=='string'||!path.isAbsolute(home))throw required();
+  const metadata=await fs.lstat(home).catch(()=>null);
+  if(!metadata?.isDirectory())throw required();
+  agentHome=await fs.realpath(home);
  }
  const entry=await fs.realpath(entrypoint),alaRoot=path.dirname(path.dirname(entry));
+ // Standalone coding-agent discovery uses the native agent login, never a host Ploinky router.
+ const caller=Object.fromEntries(Object.entries(process.env).filter(([key])=>!key.startsWith('PLOINKY_')));
+ if(agent==='--login'){
+  let logins=null;try{logins=await import(pathToFileURL(path.join(alaRoot,'src/coding-agents/logins.mjs')));}catch{}
+  if(!logins||['homeEnvironment','codingAgentLoginFiles','detectCodingAgentLogin'].some(name=>typeof logins[name]!=='function')){process.stdout.write(JSON.stringify({problem:'noModule'}));process.exit(0);}
+  const env=agentHome?logins.homeEnvironment(caller,agentHome):caller,detection=await logins.detectCodingAgentLogin(loginAgent,{env});
+  process.stdout.write(JSON.stringify({login:{loggedIn:!!detection?.loggedIn,file:!!detection?.file,env:Array.isArray(detection?.env)?detection.env:[],files:logins.codingAgentLoginFiles(loginAgent,{env})}}));
+  process.exit(0);
+ }
  const {homeEnvironment}=await import(pathToFileURL(path.join(alaRoot,'src/coding-agents/logins.mjs')));
  const {discoverCodingAgents}=await import(pathToFileURL(path.join(alaRoot,'src/coding-agents/discovery.mjs')));
- // Standalone coding-agent discovery uses the native agent login, never a host Ploinky router.
- const env=homeEnvironment(Object.fromEntries(Object.entries(process.env).filter(([key])=>!key.startsWith('PLOINKY_'))),agentHome);
+ const env=agentHome?homeEnvironment(caller,agentHome):caller;
  const agents=await discoverCodingAgents({env});
  if(!agent)process.stdout.write(JSON.stringify({agents:agents.map(a=>({id:a.name,label:a.name,available:!!a.available}))}));
  else{

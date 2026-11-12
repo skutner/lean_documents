@@ -14,7 +14,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readExample } from './markdown-store.mjs';
 import { createFakeALA } from './fake-ala-fixture.mjs';
 import { leanStatus, resolvePython } from './toolchain.mjs';
-import { noLogin, homeUnavailable, reasons } from './agent-home.mjs';
+import { OWN_HOME, noLogin, homeUnavailable, reasons, settingFile } from './agent-home.mjs';
+import { loginCheckUnavailable } from './ala.mjs';
+import { main as setHome } from './set-home.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 await fs.mkdir(path.join(root, 'tmp/markdown-server-tests'), { recursive: true });
@@ -41,26 +43,40 @@ async function assertHelperRunsThroughInterpreter(prompt, helperRelative) {
   assert.match(prompt, /Never run a \.py file directly/);
 }
 
-// Every server gets its own agent-home base in the host temporary folder, outside the repository, never the real one.
-// Its template holds fixture logins whose token is random and is never written into the repository: assertions look
-// for its absence. The bases are removed at exit (from Node, by guarded path).
+// Every server gets its own fixture HOME in the host temporary folder, never the real home: by default the server starts
+// ALA without --home, so the coding agent would use that HOME's login and state. Its logins hold a random token that is
+// never written into the repository: assertions look for its absence. The fixtures are removed at exit (from Node, by
+// guarded path). A folder set with set-home lies beside the fixture HOME, in the same temporary folder.
 const TEMPORARY = fsSync.realpathSync.native(os.tmpdir());
 const TOKEN = `fixture-token-${crypto.randomBytes(12).toString('hex')}`;
 const fixtures = [];
-process.on('exit', () => { for (const dir of fixtures) if (path.dirname(dir) === TEMPORARY && path.basename(dir).startsWith('markdown-server-base-')) fsSync.rmSync(dir, { recursive: true, force: true }); });
-async function fixtureBase(kind = 'logins') {
-  const dir = await fs.realpath(await fs.mkdtemp(path.join(TEMPORARY, 'markdown-server-base-'))); fixtures.push(dir);
-  const base = path.join(dir, 'base'), template = path.join(base, 'template');
-  for (const folder of [base, template]) { await fs.mkdir(folder, { mode: 0o700 }); await fs.chmod(folder, 0o700); }
-  const files = kind === 'empty' ? {} : { '.codex/auth.json': JSON.stringify({ tokens: { access_token: TOKEN } }), '.claude/.credentials.json': JSON.stringify({ claudeAiOauth: { accessToken: TOKEN + '-claude' } }), ...(kind === 'foreign' ? { '.codex/config.toml': 'model = "fixture"\n' } : {}) };
+process.on('exit', () => { for (const dir of fixtures) if (path.dirname(dir) === TEMPORARY && path.basename(dir).startsWith('markdown-server-home-')) { restoreAccess(dir); fsSync.rmSync(dir, { recursive: true, force: true }); } });
+function restoreAccess(dir) { try { execFileSync('/bin/chmod', ['-R', 'u+rwx', dir]); } catch {} }
+async function writeLogins(home, kind = 'logins') {
+  const files = kind === 'empty' ? {} : { '.codex/auth.json': JSON.stringify({ tokens: { access_token: TOKEN } }), '.claude/.credentials.json': JSON.stringify({ claudeAiOauth: { accessToken: TOKEN + '-claude' } }) };
   for (const [relative, content] of Object.entries(files)) {
-    const folder = path.join(template, path.dirname(relative)); await fs.mkdir(folder, { recursive: true, mode: 0o700 }); await fs.chmod(folder, 0o700);
-    await fs.writeFile(path.join(template, relative), content, { mode: 0o600 }); await fs.chmod(path.join(template, relative), 0o600);
+    await fs.mkdir(path.join(home, path.dirname(relative)), { recursive: true, mode: 0o700 });
+    await fs.writeFile(path.join(home, relative), content, { mode: 0o600 });
   }
-  return { dir, base };
 }
-// Test servers never inherit credential variables or an agent-home location from the runner's shell.
-const CREDENTIALS = /^(OPENAI|ANTHROPIC|CLAUDE_CODE|CLAUDE|CODEX|OPENCODE|PI_CODING|OMP|GEMINI|GOOGLE|OPENROUTER|XAI|MISTRAL|GROQ|DEEPSEEK|AZURE_OPENAI)_|^AUDIT_AGENT_HOME$|^ALA_CLI$/;
+/** A fixture HOME (with fixture logins unless `kind` is 'empty') inside a fresh folder of the host temporary folder. */
+async function fixtureHome(kind = 'logins') {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(TEMPORARY, 'markdown-server-home-'))); fixtures.push(dir);
+  const home = path.join(dir, 'home'); await fs.mkdir(home, { mode: 0o700 });
+  await writeLogins(home, kind);
+  return { dir, home };
+}
+const assertFixtureHome = home => assert.ok(typeof home === 'string' && home.startsWith(TEMPORARY + path.sep) && path.basename(path.dirname(home)).startsWith('markdown-server-home-'), `a test server gets a fixture HOME, never the real home: ${home}`);
+/** npm run set-home for the fixture HOME `home`, in this process. */
+async function setAgentHome(home, argv) {
+  let out = '', err = '';
+  const code = await setHome(argv, { home, out: { write: text => (out += text) }, err: { write: text => (err += text) } });
+  assert.equal(code, 0, err); return out;
+}
+const tree = folder => fsSync.readdirSync(folder, { recursive: true }).map(String).sort();
+// Test servers never inherit credential variables, agent state locations or ALA_CLI from the runner's shell; AUDIT_AGENT_HOME
+// would stop them.
+const CREDENTIALS = /^(OPENAI|ANTHROPIC|CLAUDE_CODE|CLAUDE|CODEX|OPENCODE|PI_CODING|OMP|GEMINI|GOOGLE|OPENROUTER|XAI|MISTRAL|GROQ|DEEPSEEK|AZURE_OPENAI|XDG)_|^AUDIT_AGENT_HOME$|^ALA_CLI$/;
 const cleanEnvironment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !CREDENTIALS.test(key)));
 async function freePort() { const probe = net.createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve)); return port; }
 /** One raw HTTP request, so the Host header and repeated or unusual headers reach the server exactly as written. */
@@ -79,23 +95,24 @@ function raw(port, lines, body = '', { host = `127.0.0.1:${port}`, wait = null }
 }
 
 async function startServer(name, mode, pilot = false, python = simulatedNewPython, options = {}) {
-  const { template = 'logins', alaCli = true, settings = null, env: extra = {}, port: fixedPort = null, fixture = null, home = null, nodeArgs = [] } = options;
+  const { logins = 'logins', alaCli = true, settings = null, env: extra = {}, port: fixedPort = null, home: givenHome = null, nodeArgs = [] } = options;
   const directory = path.join(suite, name), examples = path.join(directory, 'examples'), runs = path.join(directory, 'runs'), records = path.join(directory, 'fake-ala-records');
   await fs.mkdir(examples, { recursive: true }); await fs.mkdir(records, { recursive: true });
   await fs.mkdir(path.join(examples, 'builder-without-metadata'), { recursive: true });
   if (settings !== null) await fs.writeFile(path.join(directory, 'agent-settings.md'), settings);
-  const { base } = home ? { base: path.join(home, '.lean-documents/agent-home') } : fixture || await fixtureBase(template);
+  const home = givenHome || (await fixtureHome(logins)).home;
+  assertFixtureHome(home);
   // The simulated ALA checkout stays outside the server folder, whose persisted documents are checked for data files.
   const fake = path.join(suite, name + '-fake-ala'), ala = mode === 'missing' ? path.join(suite, name + '-missing-ala') : fake;
   if (mode !== 'missing' && !fsSync.existsSync(fake)) await createFakeALA(fake, `
 if(process.env.FAKE_ALA_WAIT)await new Promise(resolve=>setTimeout(resolve,Number(process.env.FAKE_ALA_WAIT)));
-// Error injection, chosen by the review notes of a run (the prompt carries them): what a hostile run might do to its home.
-const inject=/INJECT:(\\w+)/.exec(prompt)?.[1],login=home&&path.join(home,'.codex/auth.json');
+// Error injection, chosen by the review notes of a run (the prompt carries them): what a run might do to a set folder.
+const inject=/INJECT:(\\w+)/.exec(prompt)?.[1];
+if(inject==='wait')await new Promise(resolve=>setTimeout(resolve,60000));
+// A run can write its agent home; this record shows what a run left there.
+if(home)fs.writeFileSync(path.join(home,'fake-run-'+path.basename(cwd)+'.md'),'# Written by a simulated run\\n');
 if(inject==='remove')fs.rmSync(home,{recursive:true,force:true});
-if(inject==='link'){const outside=path.join(cwd,'outside-target.md');fs.writeFileSync(outside,'# Outside file\\n');fs.rmSync(login);fs.symlinkSync(outside,login);}
-if(inject==='nested'){let folder=home;for(let i=0;i<200;i++){folder=path.join(folder,'n');fs.mkdirSync(folder);}fs.writeFileSync(path.join(folder,'deep.md'),'deep');}
-if(inject==='copy')fs.copyFileSync(login,path.join(home,'.codex/auth-backup.json'));
-if(inject==='mode')fs.chmodSync(home,0);
+if(inject==='mode')fs.chmodSync(home,0o755);
 event({type:'coding-agent-message',agent,message:'Simulated executor; ',outputKind:'assistant',outputComplete:false,outputId:'m1'});
 event({type:'coding-agent-message',agent,message:'no audit was performed.',outputKind:'assistant',outputComplete:true,outputId:'m1'});
 event({type:'coding-agent-message',agent,message:'simulated tool output\\n',outputKind:'output',outputComplete:false});
@@ -104,7 +121,7 @@ ${mode === 'failure' ? "process.stderr.write('ala: Simulated ALA failure\\n');pr
 `);
   const port = fixedPort || await freePort();
   const child = spawn(process.execPath, [...nodeArgs, path.join(root, 'tools/audit-ui.mjs')], {
-    cwd: root, env: { ...cleanEnvironment(), PORT: String(port), AUDIT_RUNS_ROOT: runs, AUDIT_EXAMPLES_ROOT: examples, ...(alaCli ? { ALA_CLI: ala } : {}), ...(home ? { HOME: home } : { AUDIT_AGENT_HOME: base }), FAKE_ALA_RECORDS: records, AUDIT_PYTHON: python, PLOINKY_TEST_ROUTER: 'must-not-reach-ala', AUDIT_TEST_MODE: '1', AUDIT_DOCUMENT_PILOT: pilot ? '1' : '0', ...extra },
+    cwd: root, env: { ...cleanEnvironment(), PORT: String(port), AUDIT_RUNS_ROOT: runs, AUDIT_EXAMPLES_ROOT: examples, ...(alaCli ? { ALA_CLI: ala } : {}), HOME: home, FAKE_ALA_RECORDS: records, AUDIT_PYTHON: python, PLOINKY_TEST_ROUTER: 'must-not-reach-ala', AUDIT_TEST_MODE: '1', AUDIT_DOCUMENT_PILOT: pilot ? '1' : '0', ...extra },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -124,15 +141,23 @@ ${mode === 'failure' ? "process.stderr.write('ala: Simulated ALA failure\\n');pr
     assert.equal(response.status, expected, `${route}: ${text}`);
     return body;
   }
-  const server = { directory, examples, runs, records, base, port, child, request, origin, answers, ala,
+  const server = { directory, examples, runs, records, home, port, child, request, origin, answers, ala,
     output: () => output,
-    homes: () => path.join(fsSync.realpathSync.native(base), 'homes'),
+    setHome: argv => setAgentHome(home, argv),
     async stop() {
       if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); }
       await fs.writeFile(path.join(directory, 'server-output.md'), '# Isolated server output\n\n```text\n' + output + '\n```\n');
       // The fixture token never reaches the output nor an answer.
       assert.equal(output.includes(TOKEN), false, 'the fixture token is not in the server output');
       for (const answer of answers) assert.equal(answer.includes(TOKEN), false, 'no answer holds the fixture token');
+    },
+    async job(id) {
+      for (let index = 0; index < 160; index++) {
+        const result = await request(`/api/report-jobs/${id}`);
+        if (!['queued', 'running', 'finalizing'].includes(result.status)) return result;
+        await pause(30);
+      }
+      throw Error('Report draft never reached a terminal state');
     },
     async terminal(id) {
       for (let index = 0; index < 160; index++) {
@@ -161,8 +186,10 @@ async function seed(server) {
   return { id, report, bytes };
 }
 
-// Names under the simulated agent home, as the fake ALA recorded them (never contents).
+// Names under the simulated agent home, as the fake ALA recorded them (never contents), and the arguments it was given,
+// one per line, so an argument with spaces stays one argument.
 const homeEntries = text => text.split('## Agent home entries\n\n```text\n')[1].split('\n```')[0].split('\n').filter(Boolean);
+const invocationArguments = text => text.split('## Arguments\n\n```text\n')[1].split('\n```')[0].split('\n');
 async function filesContaining(directory, needle) {
   const found = [];
   for (const entry of await fs.readdir(directory, { withFileTypes: true, recursive: true })) {
@@ -280,28 +307,22 @@ await test('zero executor exit without an audit is incomplete, never verified', 
   } finally { await server.stop(); }
 });
 
-await test('the selected coding agent is validated, snapshotted at queue time and passed to ALA with a read-only repository', { timeout: 30000 }, async () => {
-  const server = await startServer('agent-selection', 'success');
+await test('the selected coding agent is validated, snapshotted at queue time and passed to ALA without --home by default, with a read-only repository', { timeout: 30000 }, async () => {
+  const { home } = await fixtureHome(), homeBefore = tree(home);
+  const server = await startServer('agent-selection', 'success', false, simulatedNewPython, { home });
   try {
     const initial = await server.request('/api/agent-settings');
     assert.deepEqual([initial.agent, initial.model, initial.effort], ['codex', '', ''], 'Codex with its own default model remains the default');
-    // The settings carry the dedicated agent home's state: a usable template with file logins for Codex and Claude.
-    const homes = server.homes(), base = path.dirname(homes);
-    assert.equal(initial.agentHome.base, base); assert.equal(initial.agentHome.ready, true); assert.equal(initial.agentHome.error, null);
-    assert.deepEqual(['codex', 'claude', 'pi'].map(name => [name, initial.agentHome.agents[name]?.loggedIn, initial.agentHome.agents[name]?.source]), [['codex', true, 'file'], ['claude', true, 'file'], ['pi', false, 'none']]);
-    assert.equal(initial.ala.found, true); assert.equal(initial.ala.source, 'environment');
+    // Without a setting file the agent home is your own (here the fixture HOME); only the selected agent's login is shown.
+    assert.deepEqual(initial.agentHome, { mode: 'own', folder: null, setting: settingFile(home), error: null, agents: { codex: { loggedIn: true, source: 'file', variables: [], files: [path.join(home, '.codex/auth.json')] } } });
+    assert.equal(initial.ala.found, true); assert.equal(initial.ala.source, 'environment'); assert.equal('configured' in initial.ala, false);
     const { agents } = await server.request('/api/coding-agents');
     assert.deepEqual(agents.map(agent => [agent.id, agent.available]), [['codex', true], ['claude', true], ['pi', false]]);
     assert.deepEqual((await server.request('/api/coding-agents/codex/models')).models, [{ id: 'test-codex-model', label: 'Test Codex Model', efforts: ['low', 'high'] }]);
-    // The agent list derives install paths from a home that is never created; the model listing got a home of its own,
-    // which existed while the service was created and is gone afterwards.
+    // The agent list and the model list run with the home a run would get: the server's own HOME, and no --home.
     const [discovery] = await records(server, 'discovery'), [service] = await records(server, 'service');
-    assert.ok(discovery.includes(`| Environment HOME | ${path.join(homes, '.discovery')} |`), discovery); assert.equal(fsSync.existsSync(path.join(homes, '.discovery')), false);
-    const listingHome = /\| Agent home \| ([^|]+) \|/.exec(service)[1];
-    assert.equal(path.dirname(listingHome), homes); assert.match(service, /\| Agent home exists \| yes \|/); assert.ok(service.includes(`| Environment HOME | ${listingHome} |`));
-    assert.deepEqual(homeEntries(service), ['.codex/', '.codex/auth.json'], 'only the Codex login was copied for the Codex listing');
-    assert.equal(fsSync.existsSync(listingHome), false, 'the listing home is removed once the worker has ended');
-    assert.deepEqual(await fs.readdir(homes), [], 'nothing is left in homes/ after the model listing');
+    assert.ok(discovery.includes(`| Environment HOME | ${home} |`), discovery);
+    assert.match(service, /\| Agent home \| none \|/); assert.ok(service.includes(`| Environment HOME | ${home} |`), service);
     await server.request('/api/coding-agents/pi/models', undefined, 400);
     for (const invalid of [{ agent: 'pi', model: '' }, { agent: 'unknown', model: '' }, { agent: 'claude', model: 'test-codex-model' }, { agent: 'codex', model: 'test-codex-model', effort: 'max' }, { agent: 'codex', model: '', effort: 'low' }, { agent: 'codex', model: 5 }]) {
       await server.request('/api/agent-settings', invalid, 400);
@@ -319,14 +340,11 @@ await test('the selected coding agent is validated, snapshotted at queue time an
     assert.equal(result.status, 'incomplete'); assert.equal(result.agent, 'claude', 'queued work keeps its agent'); assert.equal(result.model, 'test-claude-model');
     const runDirectory = path.join(server.runs, run.id);
     const invocation = await fs.readFile(path.join(runDirectory, 'fake-ala-invocation.md'), 'utf8');
-    const args = invocation.split('```text\n')[1].split('\n```')[0].split('\n'), value = flag => args[args.indexOf(flag) + 1];
-    // The run's own agent home: directly after --cwd, inside <base>/homes, existing during the run with exactly Claude's
-    // login file, and removed once the run ended.
-    const runHome = value('--home');
-    assert.equal(args[args.indexOf('--cwd') + 2], '--home'); assert.equal(path.dirname(runHome), homes); assert.match(path.basename(runHome), /^home-\d+-[0-9a-f]{16}$/);
-    assert.match(invocation, /\| Agent home exists \| yes \|/); assert.deepEqual(homeEntries(invocation), ['.claude/', '.claude/.credentials.json']);
-    assert.equal(fsSync.existsSync(runHome), false, 'the run home is gone after the terminal state');
-    for (const text of [invocation, discovery, service]) assert.equal(text.includes(path.join(base, 'template')), false, 'no invocation or catalog record names the template');
+    const args = invocationArguments(invocation), value = flag => args[args.indexOf(flag) + 1];
+    // Your own home: no --home at all, so the repository mount follows the working folder.
+    assert.equal(args.includes('--home'), false); assert.equal(args[args.indexOf('--cwd') + 2], '--folder');
+    assert.match(invocation, /\| Agent home \| none \|/); assert.match(invocation, /\| Agent home exists \| no \|/);
+    assert.equal(result.agentHome, OWN_HOME);
     assert.equal(value('--ca'), 'claude'); assert.equal(value('--model'), 'test-claude-model'); assert.equal(args.includes('--effort'), false);
     assert.equal(value('--cwd'), runDirectory); assert.equal(value('--folder'), await fs.realpath(root), 'the repository is mounted read-only');
     assert.equal(value('--taskFile'), path.join(runDirectory, 'instructions.md')); assert.equal(value('--output'), path.join(runDirectory, 'final-message.md'));
@@ -336,15 +354,17 @@ await test('the selected coding agent is validated, snapshotted at queue time an
     assert.equal(await fs.readFile(path.join(runDirectory, 'final-message.md'), 'utf8'), 'Simulated final message.\n');
     const runRecord = await fs.readFile(path.join(runDirectory, 'run.md'), 'utf8');
     assert.match(runRecord, /## Coding agent\n\nclaude\n/); assert.match(runRecord, /## Model\n\ntest-claude-model\n/); assert.match(runRecord, /## ALA entrypoint\n\n\S+bin\/ala\.mjs\n/);
+    assert.match(runRecord, /## Agent home\n\nyour own home \(ALA started without --home\)\n/);
     const journal = await fs.readFile(path.join(runDirectory, 'execution.md'), 'utf8');
     assert.match(journal, /Simulated executor; no audit was performed\./, 'fragments sharing one output id form one record');
     assert.match(journal, /simulated tool output/); assert.match(journal, /Intentional test diagnostic/); assert.match(journal, /Simulated final message\./);
-    assert.match(journal, /agent home prepared[\s\S]*### Agent\n\nclaude[\s\S]*### Login\n\nlogin file/);
-    assert.match(journal, /agent home removed[\s\S]*### Removed\n\nyes[\s\S]*### Login files rewritten\n\nnone/);
+    assert.match(journal, /agent home[\s\S]*### Agent\n\nclaude[\s\S]*### Home\n\nyour own home \(ALA started without --home\)[\s\S]*### Login\n\nlogin file/);
+    assert.doesNotMatch(journal, /agent home prepared/); assert.doesNotMatch(journal, /agent home removed/);
     const second = await server.request('/api/runs', { exampleId: id, reportPath: report.path });
     assert.equal(second.agent, 'codex'); assert.equal(second.model, undefined, 'new work uses the latest saved selection');
     await server.terminal(second.id);
-    assert.deepEqual(await fs.readdir(homes), [], 'homes/ is empty after every run reached its terminal state');
+    // Nothing was created in the HOME: no .lean-documents, no agent home.
+    assert.deepEqual(tree(home), homeBefore, 'the server created nothing in HOME');
     // The fixture token is in no file the server, its runs or the fake ALA wrote.
     assert.deepEqual(await filesContaining(server.directory, TOKEN), []);
     await noDataDocuments(server.directory);
@@ -480,6 +500,10 @@ await test('the page allows only its own script, and the server answers only for
     assert.equal(policy, `script-src 'sha256-${crypto.createHash('sha256').update(script).digest('base64')}'; base-uri 'none'; frame-ancestors 'none'`);
     assert.doesNotMatch(policy, /unsafe-inline|unsafe-hashes/);
     assert.doesNotMatch(html, /\son[a-z]+\s*=\s*["']/i, 'no inline event handler attribute in the page');
+    // The page shows the agent home but has no form for it, nor one for where ALA is (A1).
+    assert.match(html, /id="agent-home-panel"/); assert.match(html, /npm run set-home/);
+    // The names are assembled so that the searches for removed code find no use of them in the tools.
+    for (const removed of [['ala', 'form'].join('-'), ['ala', 'auto'].join('-'), ['save', 'ALA'].join(''), ['bind', 'ALAForm'].join(''), ['', 'api', 'ala'].join('/') + "'", ['setup', 'agent', 'home'].join('-')]) assert.equal(html.includes(removed), false, removed);
 
     // Host: only 127.0.0.1:<PORT>; localhost would share an origin with [::1].
     for (const host of [`localhost:${server.port}`, `[::1]:${server.port}`, `evil.example:${server.port}`, '127.0.0.1']) {
@@ -573,47 +597,132 @@ await test('outside /api/ only GET is served: any other method is refused unread
   } finally { await server.stop(); }
 });
 
-await test('without a pilot login new work and the model listing are refused with the exact text and nothing is created (H-3)', { timeout: 30000 }, async () => {
-  const empty = await startServer('no-login', 'success', false, simulatedNewPython, { template: 'empty' });
+await test('without a login new work is refused with the exact noLogin text and nothing is created; a credential variable is a login (criterion 11)', { timeout: 30000 }, async () => {
+  const empty = await startServer('no-login', 'success', false, simulatedNewPython, { logins: 'empty' });
   try {
-    const base = path.dirname(empty.homes()), { id, report } = await seed(empty);
+    const { id, report } = await seed(empty), own = { mode: 'own', folder: null };
+    await empty.request(`/api/examples/${id}/files`, { role: 'source', files: [{ name: 'Bill.md', data: Buffer.from('# Bill\n\nTotal 9.\n').toString('base64') }] });
+    const files = { codex: [path.join(empty.home, '.codex/auth.json')], claude: [path.join(empty.home, '.claude/.credentials.json'), path.join(empty.home, '.claude/.claude.json')] };
     for (const agent of ['codex', 'claude']) {
       await empty.request('/api/agent-settings', { agent, model: '' });
-      assert.deepEqual(await empty.request('/api/runs', { exampleId: id, reportPath: report.path }, 400), { error: noLogin(agent, base) });
-      assert.deepEqual(await empty.request(`/api/coding-agents/${agent}/models?refresh=1`, undefined, 400), { error: noLogin(agent, base) });
+      assert.deepEqual(await empty.request('/api/runs', { exampleId: id, reportPath: report.path }, 400), { error: noLogin(agent, own, files[agent]) });
+      assert.deepEqual(await empty.request(`/api/examples/${id}/reports/generate`, { mode: 'grounded' }, 400), { error: noLogin(agent, own, files[agent]) });
+      // Listings need no login: ALA's own failure would answer them.
+      assert.equal((await empty.request(`/api/coding-agents/${agent}/models?refresh=1`)).models.length, 1);
+      const settings = await empty.request('/api/agent-settings');
+      assert.deepEqual(Object.keys(settings.agentHome.agents), [agent], 'only the selected agent is shown');
+      assert.deepEqual(settings.agentHome.agents[agent], { loggedIn: false, source: 'none', variables: [], files: files[agent] });
     }
     assert.deepEqual(await fs.readdir(empty.runs), [], 'no run folder is created');
-    const settings = await empty.request('/api/agent-settings');
-    assert.equal(settings.agentHome.ready, true); assert.equal(settings.agentHome.agents.claude.loggedIn, false); assert.equal(settings.agentHome.agents.claude.source, 'none');
-    assert.deepEqual(fsSync.existsSync(empty.homes()) ? await fs.readdir(empty.homes()) : [], []);
+    assert.deepEqual(await fs.readdir(path.join(empty.directory, 'report-jobs')), [], 'no draft folder is created');
   } finally { await empty.stop(); }
-  // A template holding anything but a login file refuses every agent with the template text.
-  const foreign = await startServer('foreign-template', 'success', false, simulatedNewPython, { template: 'foreign' });
-  try {
-    const { id, report } = await seed(foreign);
-    const refused = await foreign.request('/api/runs', { exampleId: id, reportPath: report.path }, 503);
-    assert.equal(refused.error, homeUnavailable(reasons.foreign('.codex/config.toml', 'file')));
-    assert.deepEqual(await fs.readdir(foreign.runs), []);
-    const settings = await foreign.request('/api/agent-settings');
-    assert.equal(settings.agentHome.ready, false); assert.equal(settings.agentHome.error, refused.error);
-  } finally { await foreign.stop(); }
-  // A credential variable in the server's environment is a login: the home is empty and only the name is recorded.
-  const variable = await startServer('environment-login', 'success', false, simulatedNewPython, { template: 'empty', env: { OPENAI_API_KEY: TOKEN + '-variable' } });
+  // A credential variable in the server's environment is a login; only its name is recorded.
+  const variable = await startServer('environment-login', 'success', false, simulatedNewPython, { logins: 'empty', env: { OPENAI_API_KEY: TOKEN + '-variable' } });
   try {
     const { id, report } = await seed(variable);
     const run = await variable.request('/api/runs', { exampleId: id, reportPath: report.path }); await variable.terminal(run.id);
     const invocation = await fs.readFile(path.join(variable.runs, run.id, 'fake-ala-invocation.md'), 'utf8');
-    assert.match(invocation, /\| Agent home exists \| yes \|/); assert.deepEqual(homeEntries(invocation), [], 'with an environment login the home is empty');
+    assert.match(invocation, /\| Agent home \| none \|/);
     assert.match(await fs.readFile(path.join(variable.runs, run.id, 'execution.md'), 'utf8'), /### Login\n\nvariable from the server's environment \(OPENAI_API_KEY\)/);
     assert.deepEqual(await filesContaining(variable.directory, TOKEN), [], 'the variable value is in no file');
   } finally { await variable.stop(); }
 });
 
-await test('three audits at once get three homes, each owned by its ALA process group, and SIGTERM leaves homes/ empty', { timeout: 60000 }, async () => {
-  const fixture = await fixtureBase();
-  const server = await startServer('three-homes', 'success', false, simulatedNewPython, { fixture, env: { AUDIT_CONCURRENCY: '3', FAKE_ALA_WAIT: '60000' } });
+await test('set-home applies to the next agent start of a running server: runs, drafts and model lists get --home <folder> after --cwd; a reset goes back (criteria 5, 6)', { timeout: 60000 }, async () => {
+  const server = await startServer('set-home', 'success');
+  try {
+    const { id, report } = await seed(server);
+    await server.request(`/api/examples/${id}/files`, { role: 'source', files: [{ name: 'Bill.md', data: Buffer.from('# Bill\n\nTotal 9.\n').toString('base64') }] });
+    const second = (await server.request(`/api/examples/${id}/files`, { role: 'report', files: [{ name: 'Second.md', data: Buffer.from('# Second\n').toString('base64') }] })).reports.find(r => r.label === 'Second.md');
+    // The default model list first, so a stale catalog would show its record again.
+    await server.request('/api/coding-agents/codex/models');
+    assert.match((await records(server, 'service')).at(-1), /\| Agent home \| none \|/);
+    // A folder with a space and non-ASCII characters, beside the fixture HOME; set while the server runs.
+    const folder = path.join(path.dirname(server.home), 'pilot home ș');
+    assert.match(await server.setHome([folder]), new RegExp(`^Agent home: ${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\n`));
+    const settings = await server.request('/api/agent-settings');
+    assert.deepEqual([settings.agentHome.mode, settings.agentHome.folder, settings.agentHome.error], ['folder', folder, null]);
+    // The folder holds no login yet: refused with the set-folder text, and nothing is created.
+    assert.deepEqual(await server.request('/api/runs', { exampleId: id, reportPath: report.path }, 400), { error: noLogin('codex', { mode: 'folder', folder }, [path.join(folder, '.codex/auth.json')]) });
+    assert.deepEqual(await fs.readdir(server.runs), []);
+    await writeLogins(folder);
+    const runs = [];
+    for (const reportPath of [report.path, second.path]) {
+      const run = await server.request('/api/runs', { exampleId: id, reportPath });
+      const result = await server.terminal(run.id);
+      assert.equal(result.status, 'incomplete'); assert.equal(result.agentHome, folder);
+      const invocation = await fs.readFile(path.join(server.runs, run.id, 'fake-ala-invocation.md'), 'utf8'), args = invocationArguments(invocation);
+      assert.deepEqual(args.slice(args.indexOf('--cwd'), args.indexOf('--cwd') + 4), ['--cwd', path.join(server.runs, run.id), '--home', folder], 'the folder is one argument, directly after --cwd');
+      assert.equal(args.filter(arg => arg === '--home').length, 1);
+      assert.match(invocation, /\| Agent home exists \| yes \|/);
+      assert.match(await fs.readFile(path.join(server.runs, run.id, 'execution.md'), 'utf8'), new RegExp(`agent home[\\s\\S]*### Home\\n\\n${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n`));
+      runs.push(run.id);
+    }
+    // The folder and what the runs wrote in it stay.
+    assert.deepEqual(fsSync.readdirSync(folder).filter(name => name.startsWith('fake-run-')).sort(), runs.map(run => `fake-run-${run}.md`).sort());
+    // Two verifications of the same report at once behave as at the base: one starts, the other is refused (probe).
+    const runsBefore = await fs.readdir(server.runs);
+    const pair = await Promise.all([0, 1].map(() => fetch(server.origin + '/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: server.origin }, body: JSON.stringify({ exampleId: id, reportPath: report.path }) }).then(async response => ({ status: response.status, body: await response.json() }))));
+    assert.deepEqual(pair.map(answer => answer.status).sort(), [200, 400], JSON.stringify(pair));
+    assert.match(pair.find(answer => answer.status === 400).body.error, /^This report already has (a verification starting|an active verification)$/);
+    const started = pair.find(answer => answer.status === 200).body;
+    assert.equal((await server.terminal(started.id)).agentHome, folder);
+    assert.deepEqual((await fs.readdir(server.runs)).filter(run => !runsBefore.includes(run)), [started.id], 'exactly one new run folder');
+    // A model list without refresh: the catalog is kept per home, so nothing cached for your own home answers for the folder.
+    await server.request('/api/coding-agents/codex/models');
+    const service = (await records(server, 'service')).at(-1);
+    assert.ok(service.includes(`| Agent home | ${folder} |`), service); assert.ok(service.includes(`| Environment HOME | ${folder} |`), service);
+    // A report draft: the command in the job record has --home <folder> directly after --cwd.
+    const draft = await server.request(`/api/examples/${id}/reports/generate`, { mode: 'grounded' });
+    const job = await server.job(draft.id);
+    assert.equal(job.agentHome, folder);
+    const internal = JSON.parse(await fs.readFile(path.join(server.directory, 'report-jobs', draft.id, 'internal/job.json'), 'utf8'));
+    assert.ok(internal.command.includes(` --cwd ${path.join(server.directory, 'report-jobs', draft.id)} --home ${folder} --folder `), internal.command);
+    // Reset: the next run, draft and model list have no --home; the folder keeps its entries.
+    const entries = tree(folder);
+    await server.setHome(['--reset']);
+    const after = await server.request('/api/runs', { exampleId: id, reportPath: report.path });
+    const ended = await server.terminal(after.id), args = invocationArguments(await fs.readFile(path.join(server.runs, after.id, 'fake-ala-invocation.md'), 'utf8'));
+    assert.equal(args.includes('--home'), false); assert.equal(ended.agentHome, OWN_HOME);
+    const ownDraft = await server.request(`/api/examples/${id}/reports/generate`, { mode: 'grounded' }); await server.job(ownDraft.id);
+    const ownCommand = JSON.parse(await fs.readFile(path.join(server.directory, 'report-jobs', ownDraft.id, 'internal/job.json'), 'utf8')).command;
+    assert.equal(ownCommand.includes('--home'), false, ownCommand);
+    // The catalog is kept per home: without refresh the answer of your own home from before the change is served again,
+    // and no new read starts; with refresh the service is asked again, without a home.
+    const before = (await records(server, 'service')).length;
+    await server.request('/api/coding-agents/codex/models'); assert.equal((await records(server, 'service')).length, before);
+    await server.request('/api/coding-agents/codex/models?refresh=1');
+    assert.match((await records(server, 'service')).at(-1), /\| Agent home \| none \|/);
+    assert.deepEqual(tree(folder).filter(name => !name.startsWith('fake-run-')), entries.filter(name => !name.startsWith('fake-run-')), 'the folder is left as it is');
+    assert.ok(entries.length > 0 && entries.every(name => fsSync.existsSync(path.join(folder, name))), 'nothing in the folder was removed');
+    assert.deepEqual(await filesContaining(server.directory, TOKEN), []);
+  } finally { await server.stop(); }
+});
+
+await test('the API cannot change the agent home: extra keys are ignored, other routes are unknown actions, and the setting stays (criterion 9)', { timeout: 30000 }, async () => {
+  const server = await startServer('read-only-home', 'success');
+  try {
+    const folder = path.join(path.dirname(server.home), 'set-folder'), file = settingFile(server.home);
+    const digest = () => (fsSync.existsSync(file) ? crypto.createHash('sha256').update(fsSync.readFileSync(file)).digest('hex') : 'absent');
+    for (const setFirst of [false, true]) {
+      if (setFirst) await server.setHome([folder]);
+      const before = digest(), state = (await server.request('/api/agent-settings')).agentHome;
+      await server.request('/api/agent-settings', { agent: 'codex', model: '', effort: '', agentHome: '/x', home: '/x' });
+      await server.request('/api/agent-settings', { agent: '/x', model: '' }, 400);
+      for (const route of ['/api/agent-home', '/api/agent-settings/home', '/api/set-home']) assert.deepEqual(await server.request(route, { home: '/x' }, 400), { error: 'Unknown action' }, route);
+      assert.equal(digest(), before, 'the setting file is unchanged');
+      const after = (await server.request('/api/agent-settings')).agentHome;
+      assert.deepEqual([after.mode, after.folder], [state.mode, state.folder]);
+    }
+    assert.equal(fsSync.existsSync('/x'), false);
+  } finally { await server.stop(); }
+});
+
+await test('three audits at once in a set folder share one --home; SIGTERM ends every ALA process group, the folder keeps what it held, and a restart marks them interrupted', { timeout: 60000 }, async () => {
+  const server = await startServer('three-runs', 'success', false, simulatedNewPython, { env: { AUDIT_CONCURRENCY: '3', FAKE_ALA_WAIT: '60000' } });
   let pids = [];
   try {
+    const folder = path.join(path.dirname(server.home), 'shared'); await server.setHome([folder]); await writeLogins(folder);
     const { id } = await seed(server);
     const uploaded = await server.request(`/api/examples/${id}/files`, { role: 'report', files: ['Second.md', 'Third.md'].map(name => ({ name, data: Buffer.from(`# ${name}\n`).toString('base64') })) });
     const runs = [];
@@ -626,79 +735,84 @@ await test('three audits at once get three homes, each owned by its ALA process 
     }
     assert.deepEqual(states.map(state => state.status), ['running', 'running', 'running']);
     const homes = await Promise.all(runs.map(async run => /\| Agent home \| ([^|]+) \|/.exec(await fs.readFile(path.join(server.runs, run.id, 'fake-ala-invocation.md'), 'utf8'))[1]));
-    assert.equal(new Set(homes).size, 3, 'three distinct homes'); for (const home of homes) assert.equal(path.dirname(home), server.homes());
-    // The owner record beside each home names the ALA process, which leads its own process group (detached spawn).
+    assert.deepEqual(homes, [folder, folder, folder], 'three invocations with the same --home');
+    // Each ALA process leads its own process group (detached spawn), which Stop and shutdown signal.
     pids = states.map(state => state.pid);
-    for (const home of homes) {
-      const owner = JSON.parse(await fs.readFile(home + '.owner', 'utf8'));
-      assert.equal(owner.group, owner.ala, 'the recorded group is the ALA pid'); assert.ok(pids.includes(owner.ala));
-      const pgid = Number(execFileSync('/bin/ps', ['-o', 'pgid=', '-p', String(owner.ala)], { encoding: 'utf8' }).trim());
-      assert.equal(pgid, owner.ala, 'the ALA process leads its own process group');
-    }
+    for (const pid of pids) assert.equal(Number(execFileSync('/bin/ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).trim()), pid, 'the ALA process leads its own process group');
+    const held = tree(folder);
     server.child.kill('SIGTERM'); await once(server.child, 'exit');
-    assert.deepEqual(await fs.readdir(server.homes()), [], 'the exit handler removed every open home once the ALA groups ended');
+    for (let i = 0; i < 100 && pids.some(pid => { try { process.kill(pid, 0); return true; } catch { return false; } }); i++) await pause(30);
     for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `ALA process ${pid} ended`);
+    assert.deepEqual(tree(folder), held, 'the folder still holds what it held');
   } finally { await server.stop(); }
-  const restarted = await startServer('three-homes', 'success', false, simulatedNewPython, { fixture });
+  const restarted = await startServer('three-runs', 'success', false, simulatedNewPython, { home: server.home });
   try {
-    assert.deepEqual(await fs.readdir(restarted.homes()), [], 'homes/ is empty after the restart');
     const catalog = await restarted.request('/api/examples');
     assert.deepEqual(catalog[0].runs.map(run => run.status), ['interrupted', 'interrupted', 'interrupted']);
   } finally { await restarted.stop(); }
 });
 
-await test('a location runs can write is never imported, whether it is sent to the API or already saved; a saved location outside is used', { timeout: 30000 }, async () => {
-  // A fake ALA in tmp/, which every run can write, whose discovery module leaves a marker if it is ever imported.
-  const planted = await createFakeALA(path.join(suite, 'planted-ala'), ''), marker = path.join(suite, 'planted-ala-imported.md');
-  await fs.writeFile(path.join(planted, 'src/coding-agents/discovery.mjs'), `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(marker)}, '# Imported\\n');\nexport async function discoverCodingAgents() { return []; }\n`);
-  const rule = `This ALA location is not accepted: it lies inside ${path.join(await fs.realpath(root), 'tmp')}, where runs can write. Use a checkout outside it.`;
-  const open = await startServer('no-ala-cli', 'missing', false, simulatedNewPython, { alaCli: false });
-  try {
-    assert.deepEqual(await open.request('/api/ala', { path: planted }, 400), { error: rule });
-    assert.equal(fsSync.existsSync(path.join(open.directory, 'agent-settings.md')), false, 'nothing was saved');
-  } finally { await open.stop(); }
-  // A saved location that runs can write is refused when it is resolved, and never replaced by detection.
-  const saved = await startServer('planted-saved', 'missing', false, simulatedNewPython, { alaCli: false, settings: `| ALA location | \`${planted}\` |\n` });
-  try {
-    const settings = await saved.request('/api/agent-settings');
-    assert.equal(settings.ala.found, false); assert.deepEqual(settings.ala.checked.map(c => [c.source, c.reason]), [['configured', rule]]);
-    assert.match((await saved.request('/api/coding-agents', undefined, 503)).error, /^ALA was not found/);
-    assert.match((await saved.request('/api/coding-agents/codex/models', undefined, 503)).error, /^ALA was not found/);
-  } finally { await saved.stop(); }
-  assert.equal(fsSync.existsSync(marker), false, 'the planted discovery module was never imported');
-  // A saved location outside tmp/ is used as it is, and saving it through the API keeps it.
-  const { dir } = await fixtureBase('empty'), outside = await createFakeALA(path.join(dir, 'checkout'), '');
-  const later = await startServer('outside-saved', 'missing', false, simulatedNewPython, { alaCli: false, settings: `| ALA location | \`${outside}\` |\n` });
-  try {
-    const before = await later.request('/api/agent-settings');
-    assert.equal(before.ala.found, true); assert.equal(before.ala.source, 'configured');
-    const after = await later.request('/api/ala', { path: outside });
-    assert.equal(after.ala.found, true); assert.equal(after.ala.source, 'configured');
-    assert.match(await fs.readFile(path.join(later.directory, 'agent-settings.md'), 'utf8'), new RegExp('\\| ALA location \\| `' + outside.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '` \\|'));
-    assert.equal((await later.request('/api/coding-agents')).agents[0].id, 'codex');
-  } finally { await later.stop(); }
+await test('the API cannot set where ALA is: the old location route is an unknown action and a saved location is ignored and never imported (A1)', { timeout: 30000 }, async () => {
+  // Fake ALAs whose discovery module leaves a marker if it is ever imported: one in tmp/, which every run can write, and
+  // one outside the repository. Neither is ever used.
+  const planted = await createFakeALA(path.join(suite, 'planted-ala'), ''), { dir } = await fixtureHome('empty'), outside = await createFakeALA(path.join(dir, 'checkout'), '');
+  const marker = path.join(suite, 'planted-ala-imported.md');
+  for (const ala of [planted, outside]) await fs.writeFile(path.join(ala, 'src/coding-agents/discovery.mjs'), `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(marker)}, '# Imported\\n');\nexport async function discoverCodingAgents() { return []; }\n`);
+  // The route string is assembled so that the search for the removed route finds no use of it in the tools.
+  const removedRoute = ['', 'api', 'ala'].join('/');
+  for (const [name, location] of [['saved-outside', outside], ['saved-planted', planted], ['no-settings', null]]) {
+    const settings = location ? `| Coding agent | codex |\n| ALA location | \`${location}\` |\n` : null;
+    // Without ALA_CLI the server detects ALA on its own; only the settings route and the removed route are called here.
+    const server = await startServer(name, 'missing', false, simulatedNewPython, { alaCli: false, settings });
+    try {
+      const file = path.join(server.directory, 'agent-settings.md'), bytes = location ? await fs.readFile(file) : null;
+      for (const body of [{ path: outside }, { path: planted }, { path: null }]) assert.deepEqual(await server.request(removedRoute, body, 400), { error: 'Unknown action' });
+      if (location) assert.deepEqual(await fs.readFile(file), bytes, 'agent-settings.md is unchanged');
+      else assert.equal(fsSync.existsSync(file), false, 'no agent-settings.md is created');
+      const state = await server.request('/api/agent-settings');
+      assert.notEqual(state.ala.source, 'configured'); assert.equal('configured' in state.ala, false);
+      for (const saved of [outside, planted]) assert.equal(state.ala.checked.some(c => c.source === 'configured' || c.location === saved || c.location.startsWith(saved + path.sep)), false, JSON.stringify(state.ala.checked));
+    } finally { await server.stop(); }
+  }
+  assert.equal(fsSync.existsSync(marker), false, 'no planted discovery module was ever imported');
 });
 
-await test('the server does not start with an agent-home base inside the repository or with a PORT that is no TCP port', { timeout: 30000 }, async () => {
-  const start = async env => {
-    const child = spawn(process.execPath, [path.join(root, 'tools/audit-ui.mjs')], { cwd: root, env: { ...cleanEnvironment(), AUDIT_RUNS_ROOT: path.join(suite, 'not-started-runs'), AUDIT_EXAMPLES_ROOT: path.join(suite, 'not-started-examples'), AUDIT_PYTHON: simulatedNewPython, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+await test('the server does not start with a setting it cannot use, with AUDIT_AGENT_HOME set, or with a PORT that is no TCP port; it creates nothing in HOME', { timeout: 30000 }, async () => {
+  const start = async (home, env) => {
+    assertFixtureHome(home);
+    const child = spawn(process.execPath, [path.join(root, 'tools/audit-ui.mjs')], { cwd: root, env: { ...cleanEnvironment(), HOME: home, AUDIT_RUNS_ROOT: path.join(suite, 'not-started-runs'), AUDIT_EXAMPLES_ROOT: path.join(suite, 'not-started-examples'), AUDIT_PYTHON: simulatedNewPython, PORT: String(await freePort()), ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = ''; child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
     const [code] = await once(child, 'exit'); return { code, output };
   };
-  const { dir } = await fixtureBase('empty'), repository = await fs.realpath(root), inside = path.join(repository, 'tmp/markdown-server-tests', path.basename(suite), 'base-inside');
-  const refusedBase = await start({ PORT: String(await freePort()), AUDIT_AGENT_HOME: inside });
-  assert.equal(refusedBase.code, 1); assert.equal(refusedBase.output, `The pilot server did not start: ${reasons.insideRepository(inside, repository)}\n`);
-  assert.equal(fsSync.existsSync(inside), false, 'the refused base was not created');
+  const { dir, home } = await fixtureHome('empty'), file = settingFile(home), repository = await fs.realpath(root);
+  await fs.mkdir(path.dirname(file), { mode: 0o700 });
+  const cases = [
+    ['not json', reasons.badSetting(file, 'not JSON')],
+    [JSON.stringify({ home: path.join(dir, 'gone') }), reasons.missing(path.join(dir, 'gone'))],
+    [JSON.stringify({ home: path.join(repository, 'tmp') }), reasons.insideRepository(path.join(repository, 'tmp'), repository)],
+    [JSON.stringify({ home: 'relative' }), reasons.notAbsolute('relative')]
+  ];
+  for (const [text, reason] of cases) {
+    await fs.writeFile(file, text); const before = tree(home);
+    const refused = await start(home, {});
+    assert.equal(refused.code, 1, text); assert.equal(refused.output, `The pilot server did not start: ${reason}\n`, text);
+    assert.deepEqual(tree(home), before, `${text}: nothing is created`);
+  }
+  await fs.rm(path.dirname(file), { recursive: true });
+  const retired = await start(home, { AUDIT_AGENT_HOME: '/x' });
+  assert.equal(retired.code, 1); assert.equal(retired.output, `The pilot server did not start: ${reasons.retired()}\n`);
   for (const port of ['0', 'abc', '70000', '80.5']) {
-    const refused = await start({ PORT: port, AUDIT_AGENT_HOME: path.join(dir, 'base') });
+    const refused = await start(home, { PORT: port });
     assert.equal(refused.code, 1, port); assert.equal(refused.output, `The pilot server did not start: PORT must be a TCP port from 1 to 65535, not ${port}.\n`, port);
   }
+  assert.deepEqual(tree(home), [], 'no .lean-documents was created');
 });
 
 await test('a second server on the same port fails to bind and leaves the first server working', { timeout: 30000 }, async () => {
   const first = await startServer('one-port', 'success');
   try {
-    const second = spawn(process.execPath, [path.join(root, 'tools/audit-ui.mjs')], { cwd: root, env: { ...cleanEnvironment(), PORT: String(first.port), AUDIT_AGENT_HOME: first.base, AUDIT_RUNS_ROOT: path.join(first.directory, 'second-runs'), AUDIT_EXAMPLES_ROOT: first.examples, ALA_CLI: first.ala, AUDIT_PYTHON: simulatedNewPython }, stdio: ['ignore', 'pipe', 'pipe'] });
+    assertFixtureHome(first.home);
+    const second = spawn(process.execPath, [path.join(root, 'tools/audit-ui.mjs')], { cwd: root, env: { ...cleanEnvironment(), PORT: String(first.port), HOME: first.home, AUDIT_RUNS_ROOT: path.join(first.directory, 'second-runs'), AUDIT_EXAMPLES_ROOT: first.examples, ALA_CLI: first.ala, AUDIT_PYTHON: simulatedNewPython }, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = ''; second.stdout.on('data', b => { output += b; }); second.stderr.on('data', b => { output += b; });
     const [code] = await once(second, 'exit');
     assert.equal(code, 1); assert.match(output, /EADDRINUSE/); assert.doesNotMatch(output, /Audit laboratory/);
@@ -706,45 +820,84 @@ await test('a second server on the same port fails to bind and leaves the first 
   } finally { await first.stop(); }
 });
 
-await test('without AUDIT_AGENT_HOME the server creates the default base under HOME (an injected fixture home, never the real one)', { timeout: 30000 }, async () => {
-  const { dir } = await fixtureBase('empty'), home = path.join(dir, 'home'); await fs.mkdir(home);
-  const server = await startServer('default-base', 'success', false, simulatedNewPython, { home });
+await test('in the default mode the server starts without creating anything in HOME and says that agents use your own home (criterion 3)', { timeout: 30000 }, async () => {
+  const { home } = await fixtureHome(), before = tree(home);
+  const server = await startServer('default-home', 'success', false, simulatedNewPython, { home });
   try {
-    const base = path.join(home, '.lean-documents/agent-home');
-    assert.equal(path.dirname(server.homes()), base);
-    for (const folder of [path.join(home, '.lean-documents'), base]) assert.equal(fsSync.statSync(folder).mode & 0o777, 0o700, folder);
     assert.equal((await server.request('/api/examples')).length, 0);
-    assert.match(server.output(), new RegExp(`Dedicated agent home: ${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.`));
+    assert.match(server.output(), /^Agent home: your own home\. ALA starts each coding agent without --home, so it uses, and a run can change, your own agent state\. For a separate folder: npm run set-home -- <folder>$/m);
+    assert.deepEqual(tree(home), before, 'no .lean-documents is created');
   } finally { await server.stop(); }
+  // With a set folder the line names it.
+  const folder = path.join(path.dirname(home), 'named'); await setAgentHome(home, [folder]);
+  const named = await startServer('named-home', 'success', false, simulatedNewPython, { home });
+  try {
+    assert.ok(named.output().includes(`Agent home: ${folder} (set with npm run set-home). Every coding agent starts with --home ${folder}; runs share it.`), named.output());
+  } finally { await named.stop(); }
 });
 
-await test('error injection: whatever a run does to its home, the home is removed and no login copy is left (probes)', { timeout: 60000 }, async () => {
-  const fixture = await fixtureBase();
-  const server = await startServer('error-injection', 'success', false, simulatedNewPython, { fixture, env: { AUDIT_CONCURRENCY: '1' } });
-  const homes = [];
+await test('no silent fallback: a folder removed while a run is queued fails that run; afterwards runs, drafts and model lists are refused and nothing starts (criterion 10, probes)', { timeout: 60000 }, async () => {
+  const server = await startServer('removed-folder', 'success', false, simulatedNewPython, { env: { AUDIT_CONCURRENCY: '1' } });
   try {
+    const folder = path.join(path.dirname(server.home), 'removable'); await server.setHome([folder]); await writeLogins(folder);
     const { id } = await seed(server);
-    const uploaded = await server.request(`/api/examples/${id}/files`, { role: 'report', files: ['remove', 'mode', 'link', 'nested', 'copy'].map(name => ({ name: `${name}.md`, data: Buffer.from(`# ${name}\n`).toString('base64') })) });
-    for (const report of uploaded.reports) {
-      const injection = report.label.replace('.md', '');
-      const run = await server.request('/api/runs', { exampleId: id, reportPath: report.path, reviewNotes: `INJECT:${injection}` });
-      const result = await server.terminal(run.id);
-      assert.equal(result.status, 'incomplete', injection);
-      const journal = await fs.readFile(path.join(server.runs, run.id, 'execution.md'), 'utf8');
-      assert.match(journal, /agent home removed/, injection);
-      homes.push([injection, /\| Agent home \| ([^|]+) \|/.exec(await fs.readFile(path.join(server.runs, run.id, 'fake-ala-invocation.md'), 'utf8'))[1], journal]);
-    }
-    const byName = Object.fromEntries(homes.map(([name, home, journal]) => [name, { home, journal }]));
-    assert.match(byName.link.journal, /### Login files rewritten\n\n\.codex\/auth\.json/, 'a login replaced by a link is reported as rewritten');
-    assert.match(byName.remove.journal, /### Login files rewritten\n\n\.codex\/auth\.json/, 'a removed home counts its login as rewritten');
-    assert.match(byName.copy.journal, /### Login files rewritten\n\nnone/);
-    for (const [name, home] of homes) assert.equal(fsSync.existsSync(home), false, `${name}: the home is gone`);
-    assert.deepEqual(await fs.readdir(server.homes()), [], 'homes/ is empty');
-    assert.deepEqual(await filesContaining(server.homes(), TOKEN), []); assert.deepEqual(await filesContaining(server.directory, TOKEN), [], 'no login copy anywhere in the server folder');
+    await server.request(`/api/examples/${id}/files`, { role: 'source', files: [{ name: 'Bill.md', data: Buffer.from('# Bill\n\nTotal 9.\n').toString('base64') }] });
+    const uploaded = await server.request(`/api/examples/${id}/files`, { role: 'report', files: ['blocking', 'queued', 'refused', 'remove', 'mode', 'after-mode', 'after-remove'].map(name => ({ name: `${name}.md`, data: Buffer.from(`# ${name}\n`).toString('base64') })) });
+    const reportOf = name => uploaded.reports.find(r => r.label === `${name}.md`).path;
+    const invocations = async () => (await fs.readdir(server.runs)).filter(run => fsSync.existsSync(path.join(server.runs, run, 'fake-ala-invocation.md'))).length;
+    const missing = homeUnavailable(reasons.missing(folder));
+    // One run holds the only slot; a second is queued while the folder exists; the folder goes before the second starts.
+    const blocking = await server.request('/api/runs', { exampleId: id, reportPath: reportOf('blocking'), reviewNotes: 'INJECT:wait' });
+    for (let i = 0; i < 200 && !fsSync.existsSync(path.join(server.runs, blocking.id, 'fake-ala-invocation.md')); i++) await pause(30);
+    const queued = await server.request('/api/runs', { exampleId: id, reportPath: reportOf('queued') });
+    assert.equal((await server.request(`/api/runs/${queued.id}`)).status, 'queued');
+    await fs.rm(folder, { recursive: true });
+    await server.request(`/api/runs/${blocking.id}/stop`, {});
+    const failed = await server.terminal(queued.id);
+    assert.equal(failed.status, 'failed'); assert.equal(failed.error, missing);
+    assert.equal(fsSync.existsSync(path.join(server.runs, queued.id, 'fake-ala-invocation.md')), false, 'ALA never started for it');
+    // New work and the model list are refused with the same text; nothing is created and nothing starts.
+    const runsBefore = (await fs.readdir(server.runs)).sort(), started = await invocations(), services = (await records(server, 'service')).length;
+    assert.deepEqual(await server.request('/api/runs', { exampleId: id, reportPath: reportOf('refused') }, 503), { error: missing });
+    assert.deepEqual(await server.request(`/api/examples/${id}/reports/generate`, { mode: 'grounded' }, 503), { error: missing });
+    assert.deepEqual(await server.request('/api/coding-agents/codex/models', undefined, 503), { error: missing });
+    assert.deepEqual(await server.request('/api/coding-agents', undefined, 503), { error: missing });
+    assert.deepEqual((await fs.readdir(server.runs)).sort(), runsBefore, 'no run folder is created');
+    assert.deepEqual(await fs.readdir(path.join(server.directory, 'report-jobs')), [], 'no draft folder is created');
+    assert.equal(await invocations(), started); assert.equal((await records(server, 'service')).length, services);
+    assert.equal((await server.request('/api/agent-settings')).agentHome.error, reasons.missing(folder));
+    assert.equal(fsSync.existsSync(folder), false, 'the server never recreates the folder');
+    // A run that changes the mode of its home does not block the next run (A5).
+    await server.setHome([folder]); await writeLogins(folder);
+    assert.equal((await server.terminal((await server.request('/api/runs', { exampleId: id, reportPath: reportOf('mode'), reviewNotes: 'INJECT:mode' })).id)).status, 'incomplete');
+    assert.equal(fsSync.statSync(folder).mode & 0o777, 0o755);
+    const next = await server.terminal((await server.request('/api/runs', { exampleId: id, reportPath: reportOf('after-mode') })).id);
+    assert.equal(next.status, 'incomplete'); assert.equal(next.agentHome, folder);
+    // A run that removes its home: the run ends, and the next start is refused with the missing-folder text.
+    const removing = await server.terminal((await server.request('/api/runs', { exampleId: id, reportPath: reportOf('remove'), reviewNotes: 'INJECT:remove' })).id);
+    assert.equal(removing.status, 'incomplete'); assert.equal(fsSync.existsSync(folder), false);
+    const count = await invocations();
+    assert.deepEqual(await server.request('/api/runs', { exampleId: id, reportPath: reportOf('after-remove') }, 503), { error: missing });
+    assert.equal(await invocations(), count, 'no fallback to your own home');
   } finally { await server.stop(); }
-  // The outside file a run linked its login to survives the removal.
-  const linked = (await fs.readdir(server.runs)).map(run => path.join(server.runs, run, 'outside-target.md')).filter(file => fsSync.existsSync(file));
-  assert.equal(linked.length, 1); assert.equal(await fs.readFile(linked[0], 'utf8'), '# Outside file\n');
+  // A login check that blocks (as ALA's own does on a login file a run swapped for a FIFO) is killed at its timeout: new
+  // work is refused with 503, nothing is created, and the server keeps answering and stops normally.
+  const blocked = await startServer('blocking-login-check', 'success', false, simulatedNewPython, { env: { AUDIT_LOGIN_CHECK_MS: '400' } });
+  try {
+    const { id, report } = await seed(blocked);
+    await fs.writeFile(path.join(blocked.ala, 'src/coding-agents/logins.mjs'), "export const homeEnvironment = (env, home) => ({ ...env, HOME: home });\nexport const codingAgentLoginFiles = () => [];\nexport function detectCodingAgentLogin() { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); }\nexport const detectCodingAgentLogins = () => [];\n");
+    const refusal = { error: loginCheckUnavailable('codex') }, started = Date.now();
+    // The run request and the status request share one check.
+    const pending = Promise.all([blocked.request('/api/runs', { exampleId: id, reportPath: report.path }, 503), blocked.request('/api/agent-settings')]);
+    assert.equal((await blocked.request('/api/examples')).length, 1, 'the server answers while the check is blocked');
+    assert.ok(Date.now() - started < 350, 'that answer did not wait for the check');
+    const [answer, during] = await pending;
+    assert.deepEqual(answer, refusal); assert.equal(during.agentHome.error, loginCheckUnavailable('codex'));
+    assert.ok(Date.now() - started < 5000, 'the blocked check ended at its timeout');
+    assert.deepEqual(await fs.readdir(blocked.runs), []);
+    const status = await blocked.request('/api/agent-settings');
+    assert.equal(status.agentHome.error, loginCheckUnavailable('codex')); assert.deepEqual(status.agentHome.agents, {});
+  } finally { await blocked.stop(); }
   // A login module that throws on import refuses new work with the module text; nothing is created.
   const broken = await startServer('throwing-login-module', 'success');
   try {

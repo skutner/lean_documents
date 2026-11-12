@@ -5,9 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
-// A cycle with agent-home.mjs, which imports alaEnvironment; both bindings are function declarations used only at call time.
 import {liesWithin} from './agent-home.mjs';
-import {ROOT} from './toolchain.mjs';
 
 const ENTRY=path.join('bin','ala.mjs');
 const fail=(message,status=400)=>Object.assign(Error(message),{status});
@@ -26,11 +24,10 @@ function onPath(){
  for(const folder of (process.env.PATH||'').split(path.delimiter).filter(Boolean)){const file=path.join(folder,'ala');try{if(fs.statSync(file).isFile())return fs.realpathSync(file);}catch{}}
  return null;
 }
-// ALA_CLI is an operator override; a saved location comes next; automatic detection is the fallback: a checkout beside or
-// inside the repository, then the copy `npm install` puts under node_modules (the commit pinned in package.json), then PATH.
-export function alaCandidates(root,configured){
+// ALA_CLI is an operator override; automatic detection is the fallback: a checkout beside or inside the repository, then
+// the copy `npm install` puts under node_modules (the commit pinned in package.json), then PATH. The API cannot set it.
+export function alaCandidates(root){
  if(process.env.ALA_CLI)return [{source:'environment',location:process.env.ALA_CLI}];
- if(configured)return [{source:'configured',location:configured}];
  const candidates=[{source:'parent',location:path.resolve(root,'..','AdvancedLanguageAgent')},{source:'application',location:path.resolve(root,'AdvancedLanguageAgent')},{source:'dependency',location:path.resolve(root,'node_modules','advanced-language-agent')}];
  const installed=onPath();if(installed)candidates.push({source:'path',location:installed});
  return candidates;
@@ -39,36 +36,29 @@ export function alaCandidates(root,configured){
 // compared by device and inode of every ancestor of the real entry, so neither a link nor letter case hides one.
 export const locationRefused=folder=>`This ALA location is not accepted: it lies inside ${folder}, where runs can write. Use a checkout outside it.`;
 const refusedRoot=(entry,refused)=>refused.find(folder=>folder&&liesWithin(entry,folder))||null;
-// <root>/tmp, where every run and draft folder lies, is always refused; a caller adds folders (the server and the setup
-// script add the agent-home base) but can never remove this default.
+// <root>/tmp, where every run and draft folder lies, is always refused; a caller adds folders (the server adds the folder
+// set with npm run set-home) but can never remove this default.
 const refusedRoots=(root,refused)=>[path.join(root,'tmp'),...(Array.isArray(refused)?refused:[])];
-// An explicit location is authoritative: an invalid one is reported, never silently replaced. Options: `refused` adds
-// folders runs can write to the default <root>/tmp (the rule covers every source but ALA_CLI, which is the operator's own
-// statement); a refused candidate's entry in `checked` names the folder as `refusedInside`.
-export function resolveALA(root,settings={},{refused=[]}={}){
- const configured=typeof settings.alaPath==='string'&&settings.alaPath.trim()?settings.alaPath.trim():null,checked=[],roots=refusedRoots(root,refused);
- for(const candidate of alaCandidates(root,configured)){
+// ALA_CLI is authoritative: an invalid one is reported, never silently replaced. `refused` adds folders runs can write
+// to the default <root>/tmp (the rule covers every source but ALA_CLI, which is the operator's own statement); a
+// refused candidate's entry in `checked` names the folder as `refusedInside`.
+export function resolveALA(root,{refused=[]}={}){
+ const checked=[],roots=refusedRoots(root,refused);
+ for(const candidate of alaCandidates(root)){
   const result=inspect(candidate.location);let reason=result.valid?null:result.reason,inside=null;
   if(!reason&&candidate.source!=='environment'){inside=refusedRoot(result.entry,roots);if(inside)reason=locationRefused(inside);}
   checked.push({...candidate,reason,...(inside?{refusedInside:inside}:{})});
-  if(!reason)return {found:true,source:candidate.source,entry:result.entry,root:result.alaRoot,dependencies:result.dependencies,configured,checked};
+  if(!reason)return {found:true,source:candidate.source,entry:result.entry,root:result.alaRoot,dependencies:result.dependencies,checked};
  }
- return {found:false,configured,checked};
+ return {found:false,checked};
 }
-// `root` is this repository unless a caller (a test) names another; `refused` adds folders to <root>/tmp as above.
-export function validateALALocation(location,{root=ROOT,refused=[]}={}){
- if(typeof location!=='string'||!location.trim()||location.length>4096||/[\0\r\n|]/.test(location))throw fail('Enter the ALA folder or its bin/ala.mjs path.');
- if(!path.isAbsolute(location.trim()))throw fail('Use an absolute path for the ALA location.');
- const result=inspect(location.trim());if(!result.valid)throw fail(`${result.reason} Expected an AdvancedLanguageAgent checkout containing bin/ala.mjs.`);
- const inside=refusedRoot(result.entry,refusedRoots(root,refused));if(inside)throw fail(locationRefused(inside));
- return location.trim();
-}
-export const alaUnavailable='ALA was not found. Run "npm install" in this repository, set its location in Agent Settings, or start the server with ALA_CLI pointing to the AdvancedLanguageAgent checkout.';
+export const alaUnavailable='ALA was not found. Run "npm install" in this repository, or start the server with ALA_CLI pointing to the AdvancedLanguageAgent checkout.';
 
 // ---------- Saved agent settings ----------
-// A readable Markdown record, so the legacy Markdown-only profile never gains a data document.
+// A readable Markdown record, so the legacy Markdown-only profile never gains a data document. An "ALA location" row left
+// by an earlier version is ignored and disappears when the record is next written.
 export const DEFAULT_SETTINGS=Object.freeze({agent:'codex',model:'',effort:''});
-const settingRows=[['agent','Coding agent'],['model','Model'],['effort','Effort'],['alaPath','ALA location']];
+const settingRows=[['agent','Coding agent'],['model','Model'],['effort','Effort']];
 // Identifiers become ALA argument values, so none may start with '-' and be read as an option.
 const AGENT_ID=/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/,EFFORT_ID=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const validModel=v=>typeof v==='string'&&v.length<=256&&!/[\r\n\0|]/.test(v)&&v===v.trim()&&!v.startsWith('-');
@@ -77,7 +67,6 @@ function cleanSettings(value){
  if(AGENT_ID.test(value?.agent||''))out.agent=value.agent;
  if(validModel(value?.model))out.model=value.model;
  if(value?.effort===''||EFFORT_ID.test(value?.effort||''))out.effort=value?.effort||'';
- if(typeof value?.alaPath==='string'&&value.alaPath&&path.isAbsolute(value.alaPath)&&!/[\0\r\n|]/.test(value.alaPath))out.alaPath=value.alaPath;
  return out;
 }
 export function parseSettings(markdown){
@@ -85,13 +74,13 @@ export function parseSettings(markdown){
  for(const m of markdown.matchAll(/^\| ([^|\n]+?) \| ([^|\n]*?) \|$/gm)){
   const row=settingRows.find(([,label])=>label===m[1]);if(!row)continue;
   const raw=m[2].replace(/^`|`$/g,'');
-  found[row[0]]=['Agent default','Automatic detection'].includes(raw)?'':raw;
+  found[row[0]]=raw==='Agent default'?'':raw;
  }
  return cleanSettings(found);
 }
 export function formatSettings(settings){
  const s=cleanSettings(settings);
- const shown={agent:s.agent,model:s.model?'`'+s.model+'`':'Agent default',effort:s.effort||'Agent default',alaPath:s.alaPath?'`'+s.alaPath+'`':'Automatic detection'};
+ const shown={agent:s.agent,model:s.model?'`'+s.model+'`':'Agent default',effort:s.effort||'Agent default'};
  return '# Coding agent settings\n\nNew verifications and report drafts run through ALA (Advanced Language Agent) with the coding agent below. Work that has already been queued keeps the settings it was queued with. Agent default leaves the model or effort choice to the coding agent itself.\n\n| Setting | Value |\n| --- | --- |\n'+settingRows.map(([key,label])=>'| '+label+' | '+shown[key]+' |').join('\n')+'\n';
 }
 export function createSettingsStore(file){
@@ -107,17 +96,20 @@ export function createSettingsStore(file){
 // Pointing --config at a file that is never created keeps personal ALA defaults from silently changing the recorded
 // model or effort; the selection is always passed explicitly instead.
 export const ABSENT_CONFIG='no-ala-config.json';
-// The working directory is the only writable mount. The repository is mounted read-only at its own path, so prompts can
-// name skills, helpers and the Lean toolchain by absolute path while originals and other runs stay unmodifiable.
-// `home` is the dedicated agent home of this one process (tools/agent-home.mjs); there is no call without one, so ALA
-// never falls back to the user's own agent folders. A home ALA cannot find stops ALA itself.
+// The run folder is writable, and so is the agent home: by default ALA mounts the agent's own state folder, with a set
+// folder (tools/agent-home.mjs) that folder. The repository is mounted read-only at its own path, so prompts can name
+// skills, helpers and the Lean toolchain by absolute path while originals and other runs stay unmodifiable.
+// `home` is null for your own home (no --home) or the absolute folder set with npm run set-home; it is never left out,
+// so a forgotten argument cannot silently choose your own home. A home ALA cannot find stops ALA itself.
+export const homeRequired='The agent home must be given: null for your own home, or an absolute folder';
 const within=(inner,outer)=>{const relative=path.relative(path.resolve(outer),path.resolve(inner));return relative===''||(!relative.startsWith('..')&&!path.isAbsolute(relative))||liesWithin(inner,outer);};
 export function alaArguments({entry,selection,cwd,home,root,taskFile,output}){
  const {agent,model,effort}=selection;
  if(!AGENT_ID.test(agent||''))throw Error('Invalid coding agent');
- if(typeof home!=='string'||!path.isAbsolute(home))throw Error('An agent home is required');
- if([root,cwd].some(folder=>typeof folder==='string'&&folder&&within(home,folder)))throw Error('The agent home must lie outside the repository and the run folder');
- return [entry,'--ca',agent,...(model?['--model',model]:[]),...(model&&effort?['--effort',effort]:[]),'--config',path.join(cwd,ABSENT_CONFIG),'--cwd',cwd,'--home',home,'--folder',root,'--taskFile',taskFile,'--output',output];
+ if(home===undefined)throw Error(homeRequired);
+ if(home!==null&&(typeof home!=='string'||!path.isAbsolute(home)))throw Error('The agent home must be an absolute path');
+ if(home!==null&&[root,cwd].some(folder=>typeof folder==='string'&&folder&&within(home,folder)))throw Error('The agent home must lie outside the repository and the run folder');
+ return [entry,'--ca',agent,...(model?['--model',model]:[]),...(model&&effort?['--effort',effort]:[]),'--config',path.join(cwd,ABSENT_CONFIG),'--cwd',cwd,...(home===null?[]:['--home',home]),'--folder',root,'--taskFile',taskFile,'--output',output];
 }
 // Standalone coding-agent execution uses the native agent login, never a host Ploinky router. The event stream exposes
 // coding-agent messages and tool output on stderr for the execution journal.
@@ -156,36 +148,52 @@ export function createALAJournal(record){
 
 // ---------- Agent and model catalog ----------
 const catalogUnavailable=()=>fail('Could not load the ALA catalog. Check the ALA installation and coding-agent login, then retry.',503);
-// `home` is required: the agent list uses a home that is never created (only install paths are derived from it), and a
-// model listing uses a freshly opened agent home. `started(child)` receives the detached worker, whose pid is its
-// process group, before anything else happens. The promise settles only after the worker has exited, also on a timeout.
-export function readALACatalog(entry,home,agent,{started}={}){
- if(!entry)return Promise.reject(fail(alaUnavailable,503));
- if(typeof home!=='string'||!path.isAbsolute(home))return Promise.reject(fail('An agent home is required',500));
+// `home` is the home a run would get, as in alaArguments: null for your own home, else the set folder. The worker runs
+// detached, so a timeout kills its process group. The promise settles only after the worker has exited.
+function runWorker(args,timeout,unavailable){
  return new Promise((resolve,reject)=>{
   const worker=fileURLToPath(new URL('./ala-catalog-worker.mjs',import.meta.url));
-  const child=spawn(process.execPath,[worker,entry,home,...(agent?[agent]:[])],{stdio:['ignore','pipe','pipe'],detached:true});
+  const child=spawn(process.execPath,[worker,...args],{stdio:['ignore','pipe','pipe'],detached:true});
   let output='',settled=false,failure=null;
   const stop=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
   const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);clearTimeout(grace);error?reject(error):resolve(value);};
   // A killed worker settles on its exit; the grace timer only covers a worker that never reports one.
   let grace=null;const abort=error=>{if(failure)return;failure=error;stop();grace=setTimeout(()=>finish(failure),5000);};
-  const timer=setTimeout(()=>abort(catalogUnavailable()),25000);
-  child.stdout.on('data',chunk=>{output+=chunk;if(output.length>2000000)abort(catalogUnavailable());});
+  const timer=setTimeout(()=>abort(unavailable()),timeout);
+  child.stdout.on('data',chunk=>{output+=chunk;if(output.length>2000000)abort(unavailable());});
   // Native stderr can contain installation paths or account diagnostics; do not expose it through the API.
   child.stderr.resume();
-  child.on('error',()=>finish(failure||catalogUnavailable()));
+  child.on('error',()=>finish(failure||unavailable()));
   child.on('exit',()=>{if(failure)finish(failure);});
-  child.on('close',code=>{if(failure)return finish(failure);if(code!==0)return finish(catalogUnavailable());try{finish(null,JSON.parse(output));}catch{finish(catalogUnavailable());}});
-  if(child.pid&&started){try{started(child);}catch(error){abort(error);}}
+  child.on('close',code=>{if(failure)return finish(failure);if(code!==0)return finish(unavailable());try{finish(null,JSON.parse(output));}catch{finish(unavailable());}});
  });
 }
+const workerHome=home=>{if(home===undefined)throw fail(homeRequired);if(home!==null&&(typeof home!=='string'||!path.isAbsolute(home)))throw fail('The agent home must be an absolute path');return home===null?'-':home;};
+export function readALACatalog(entry,home,agent){
+ if(!entry)return Promise.reject(fail(alaUnavailable,503));
+ let folder;try{folder=workerHome(home);}catch(error){return Promise.reject(error);}
+ return runWorker([entry,folder,...(agent?[agent]:[])],25000,catalogUnavailable);
+}
+// The login of one agent in the home a run would get: {login: {loggedIn, file, env, files}} or {problem: 'noModule'}.
+// ALA's login module reads files a run can write (a login file swapped for a FIFO blocks the read), so the check runs in
+// the worker process and is killed when it does not answer in time; the caller's process never opens those files.
+export const loginCheckUnavailable=agent=>`The login check for ${agent} failed or did not finish, so no coding agent was started. A file in the agent home may be blocking it; see tools/README.md, "Limits".`;
+export function readALALogin(entry,home,agent,{timeout=10000}={}){
+ if(!entry)return Promise.reject(fail(alaUnavailable,503));
+ if(typeof agent!=='string'||!AGENT_ID.test(agent))return Promise.reject(fail('Choose an installed coding agent.'));
+ let folder;try{folder=workerHome(home);}catch(error){return Promise.reject(error);}
+ return runWorker([entry,folder,'--login',agent],timeout,()=>fail(loginCheckUnavailable(agent),503));
+}
 const cleanEfforts=list=>Array.isArray(list)?[...new Set(list.filter(e=>typeof e==='string'&&EFFORT_ID.test(e)))]:[];
-// The caller supplies `read(agent)`, which must give the worker an agent home; there is no default that reaches ALA.
-export function createALACatalog(locate,{read,ttl=60000}={}){
+// The caller supplies `read(agent)`, which gives the worker the agent home a run would get; there is no default that
+// reaches ALA.
+export function createALACatalog(locate,{read,ttl=60000,scope=()=>''}={}){
  if(typeof read!=='function')throw new TypeError('createALACatalog needs a read(agent) function that supplies an agent home');
+ // Every key carries `scope()` (the server passes the agent home in force), so an answer for one home is never served
+ // from the cache for another, and a request never joins a read that started for another home.
  const cached=new Map(),pending=new Map();
- async function fetchCatalog(key,agent){
+ async function fetchCatalog(name,agent){
+  const key=JSON.stringify([scope(),name]);
   const previous=cached.get(key);if(previous&&previous.until>Date.now())return previous.value;
   if(pending.has(key))return pending.get(key);
   if(pending.size>=4)throw fail('Catalog requests are busy. Please retry shortly.',429);
@@ -198,8 +206,8 @@ export function createALACatalog(locate,{read,ttl=60000}={}){
  }
  return {
   clear:()=>cached.clear(),
-  agents:({refresh=false}={})=>{if(refresh)cached.delete('agents');return fetchCatalog('agents');},
-  async models(agent,{refresh=false}={}){if(typeof agent!=='string'||!AGENT_ID.test(agent))throw fail('Choose an installed coding agent.');if(refresh)cached.delete('models:'+agent);const {agents}=await fetchCatalog('agents');if(!agents.some(a=>a.id===agent&&a.available))throw fail('Choose an installed coding agent.');return fetchCatalog('models:'+agent,agent);},
+  agents:({refresh=false}={})=>{if(refresh)cached.delete(JSON.stringify([scope(),'agents']));return fetchCatalog('agents');},
+  async models(agent,{refresh=false}={}){if(typeof agent!=='string'||!AGENT_ID.test(agent))throw fail('Choose an installed coding agent.');if(refresh)cached.delete(JSON.stringify([scope(),'models:'+agent]));const {agents}=await fetchCatalog('agents');if(!agents.some(a=>a.id===agent&&a.available))throw fail('Choose an installed coding agent.');return fetchCatalog('models:'+agent,agent);},
   // Only an installed agent and a model that ALA reports for it can be saved; an empty model or effort means Agent default.
   async validate(body){
    const model=body?.model??'',effort=body?.effort??'';

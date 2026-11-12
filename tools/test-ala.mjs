@@ -6,15 +6,17 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { alaArguments, alaEnvironment, createALACatalog, createALAJournal, createSettingsStore, formatSettings, parseSettings, readALACatalog, resolveALA, validateALALocation, locationRefused, ABSENT_CONFIG, DEFAULT_SETTINGS } from './ala.mjs';
+import { alaArguments, alaEnvironment, createALACatalog, createALAJournal, createSettingsStore, formatSettings, homeRequired, loginCheckUnavailable, parseSettings, readALACatalog, readALALogin, resolveALA, locationRefused, ABSENT_CONFIG, DEFAULT_SETTINGS } from './ala.mjs';
 import { createFakeALA } from './fake-ala-fixture.mjs';
 
 test('settings round-trip through a readable Markdown record and reject unsafe values', async () => {
-  assert.deepEqual(parseSettings(formatSettings({ agent: 'claude', model: 'claude-x/model:1', effort: 'high', alaPath: '/opt/AdvancedLanguageAgent' })), { agent: 'claude', model: 'claude-x/model:1', effort: 'high', alaPath: '/opt/AdvancedLanguageAgent' });
+  assert.deepEqual(parseSettings(formatSettings({ agent: 'claude', model: 'claude-x/model:1', effort: 'high' })), { agent: 'claude', model: 'claude-x/model:1', effort: 'high' });
   assert.deepEqual(parseSettings(formatSettings({ agent: 'codex', model: '', effort: '' })), DEFAULT_SETTINGS);
   assert.match(formatSettings(DEFAULT_SETTINGS), /\| Model \| Agent default \|/);
-  assert.match(formatSettings(DEFAULT_SETTINGS), /\| ALA location \| Automatic detection \|/);
-  assert.deepEqual(parseSettings('| Coding agent | bad agent; rm |\n| ALA location | relative/path |\n'), DEFAULT_SETTINGS);
+  // The API can no longer save where ALA is (A1): an "ALA location" row of an earlier version is ignored and not written again.
+  assert.doesNotMatch(formatSettings({ ...DEFAULT_SETTINGS, location: '/opt/AdvancedLanguageAgent' }), /ALA location/);
+  assert.deepEqual(parseSettings('| Coding agent | claude |\n| ALA location | `/opt/AdvancedLanguageAgent` |\n'), { ...DEFAULT_SETTINGS, agent: 'claude' });
+  assert.deepEqual(parseSettings('| Coding agent | bad agent; rm |\n'), DEFAULT_SETTINGS);
   assert.deepEqual(parseSettings(''), DEFAULT_SETTINGS);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'ala-settings-'));
   try {
@@ -22,19 +24,29 @@ test('settings round-trip through a readable Markdown record and reject unsafe v
     assert.deepEqual(store.read(), DEFAULT_SETTINGS, 'a missing record means the Codex default');
     assert.deepEqual(await store.write({ agent: 'pi', model: 'm', effort: '' }), { agent: 'pi', model: 'm', effort: '' });
     assert.deepEqual((await fs.readdir(path.dirname(store.file))), ['agent-settings.md'], 'atomic write leaves no temporary file');
+    await fs.writeFile(store.file, '| Coding agent | codex |\n| ALA location | `/opt/AdvancedLanguageAgent` |\n');
+    await store.write({ ...store.read(), model: 'm2' });
+    assert.doesNotMatch(await fs.readFile(store.file, 'utf8'), /ALA location/, 'the old row disappears when the record is next written');
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 
 test('ALA arguments pass the selection explicitly, isolate personal defaults and mount the repository read-only', () => {
-  const base = { entry: '/ala/bin/ala.mjs', cwd: '/repo/tmp/runs/r1', home: '/base/homes/home-1-0123456789abcdef', root: '/repo', taskFile: '/repo/tmp/runs/r1/instructions.md', output: '/repo/tmp/runs/r1/final-message.md' };
+  const base = { entry: '/ala/bin/ala.mjs', cwd: '/repo/tmp/runs/r1', home: null, root: '/repo', taskFile: '/repo/tmp/runs/r1/instructions.md', output: '/repo/tmp/runs/r1/final-message.md' };
   const args = alaArguments({ ...base, selection: { agent: 'codex', model: 'm1', effort: 'high' } }), value = flag => args[args.indexOf(flag) + 1];
   assert.equal(args[0], '/ala/bin/ala.mjs');
   assert.equal(value('--ca'), 'codex'); assert.equal(value('--model'), 'm1'); assert.equal(value('--effort'), 'high');
   assert.equal(value('--cwd'), base.cwd); assert.equal(value('--folder'), '/repo');
-  // The dedicated agent home comes directly after the working folder, and no call can omit it.
-  assert.deepEqual(args.slice(args.indexOf('--cwd'), args.indexOf('--cwd') + 4), ['--cwd', base.cwd, '--home', base.home]);
-  assert.equal(args.filter(arg => arg === '--home').length, 1);
-  for (const home of [undefined, null, '', 'relative/home']) assert.throws(() => alaArguments({ ...base, home, selection: { agent: 'codex' } }), { message: 'An agent home is required' }, String(home));
+  // Your own home (null): no --home, the repository mount follows the working folder directly.
+  assert.equal(args.includes('--home'), false); assert.equal(args[args.indexOf('--cwd') + 2], '--folder');
+  // A set folder comes directly after the working folder, once.
+  const set = alaArguments({ ...base, home: '/h', selection: { agent: 'codex' } });
+  assert.deepEqual(set.slice(set.indexOf('--cwd'), set.indexOf('--cwd') + 4), ['--cwd', base.cwd, '--home', '/h']);
+  assert.equal(set.filter(arg => arg === '--home').length, 1);
+  // A forgotten argument never means your own home (A3).
+  const { home: _, ...withoutHome } = base;
+  assert.throws(() => alaArguments({ ...withoutHome, selection: { agent: 'codex' } }), { message: homeRequired });
+  assert.equal(homeRequired, 'The agent home must be given: null for your own home, or an absolute folder');
+  for (const home of ['', 'relative', 5, false]) assert.throws(() => alaArguments({ ...base, home, selection: { agent: 'codex' } }), { message: 'The agent home must be an absolute path' }, String(home));
   for (const home of ['/repo', '/repo/tmp/agent-home', base.cwd, base.cwd + '/home']) assert.throws(() => alaArguments({ ...base, home, selection: { agent: 'codex' } }), { message: 'The agent home must lie outside the repository and the run folder' }, home); assert.equal(args[args.indexOf('--folder') + 2], '--taskFile', 'the repository mount has no write modifier');
   assert.equal(value('--config'), path.join(base.cwd, ABSENT_CONFIG));
   assert.equal(value('--taskFile'), base.taskFile); assert.equal(value('--output'), base.output);
@@ -71,10 +83,11 @@ test('the journal joins streamed fragments, keeps complete outputs separate and 
   assert.equal(journal.failure(), 'ala: Coding-agent execution requires Bubblewrap');
 });
 
-test('the catalog has no reader that reaches ALA without an agent home', async () => {
+test('the catalog has no reader that reaches ALA without an agent home: null is your own home, a forgotten one is an error', async () => {
   assert.throws(() => createALACatalog(() => ({ entry: '/ala/bin/ala.mjs' })), /needs a read\(agent\) function that supplies an agent home/);
-  await assert.rejects(readALACatalog('/ala/bin/ala.mjs'), /An agent home is required/);
-  await assert.rejects(readALACatalog('/ala/bin/ala.mjs', 'relative'), /An agent home is required/);
+  await assert.rejects(readALACatalog('/ala/bin/ala.mjs'), { message: homeRequired, status: 400 });
+  await assert.rejects(readALACatalog('/ala/bin/ala.mjs', undefined, 'codex'), { message: homeRequired, status: 400 });
+  await assert.rejects(readALACatalog('/ala/bin/ala.mjs', 'relative'), { message: 'The agent home must be an absolute path', status: 400 });
 });
 
 test('the catalog caches metadata and saves only an installed agent with a model and effort it reports', async () => {
@@ -94,25 +107,24 @@ test('the catalog caches metadata and saves only an installed agent with a model
   failing = false; assert.equal((await catalog.models('codex')).models.length, 1);
 });
 
-test('ALA location: ALA_CLI overrides, a saved location is authoritative and invalid folders are reported', async () => {
+test('ALA location: ALA_CLI overrides automatic detection, and an invalid ALA_CLI is reported, never replaced', async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'ala-location-'));
   const saved = process.env.ALA_CLI; delete process.env.ALA_CLI;
   try {
     const ala = await createFakeALA(path.join(directory, 'AdvancedLanguageAgent'), '');
     const app = path.join(directory, 'lean_documents'); await fs.mkdir(app);
-    const parent = resolveALA(app, {});
+    const parent = resolveALA(app);
     assert.equal(parent.found, true); assert.equal(parent.source, 'parent'); assert.equal(parent.entry, path.join(await fs.realpath(ala), 'bin/ala.mjs'));
-    const wrong = resolveALA(app, { alaPath: path.join(directory, 'missing') });
-    assert.equal(wrong.found, false, 'an invalid saved location is never replaced by automatic detection'); assert.equal(wrong.checked[0].source, 'configured');
+    assert.equal('configured' in parent, false, 'there is no saved location');
     process.env.ALA_CLI = path.join(ala, 'bin/ala.mjs');
-    assert.equal(resolveALA(app, { alaPath: path.join(directory, 'missing') }).source, 'environment');
-    assert.equal(validateALALocation(ala), ala);
-    assert.throws(() => validateALALocation('relative/AdvancedLanguageAgent'), /absolute path/);
-    assert.throws(() => validateALALocation(app), /Not found/);
+    assert.equal(resolveALA(app).source, 'environment');
+    process.env.ALA_CLI = path.join(directory, 'missing');
+    const wrong = resolveALA(app);
+    assert.equal(wrong.found, false, 'an invalid ALA_CLI is never replaced by automatic detection'); assert.deepEqual(wrong.checked.map(c => [c.source, c.reason]), [['environment', 'Not found.']]);
     const other = path.join(directory, 'other'); await fs.mkdir(path.join(other, 'bin'), { recursive: true });
     await fs.writeFile(path.join(other, 'bin/ala.mjs'), ''); await fs.writeFile(path.join(other, 'package.json'), '{"name":"something-else"}');
-    assert.throws(() => validateALALocation(other), /not an ALA installation/);
-    assert.throws(() => validateALALocation('/tmp/a|b'), /Enter the ALA folder/);
+    process.env.ALA_CLI = other;
+    assert.equal(resolveALA(app).checked[0].reason, 'This location is not an ALA installation.');
   } finally {
     if (saved === undefined) delete process.env.ALA_CLI; else process.env.ALA_CLI = saved;
     await fs.rm(directory, { recursive: true, force: true });
@@ -124,20 +136,18 @@ test('ALA location: the copy npm install puts under node_modules is found after 
   const saved = process.env.ALA_CLI, savedPath = process.env.PATH; delete process.env.ALA_CLI; process.env.PATH = path.join(directory, 'empty-path');
   try {
     const app = path.join(directory, 'lean_documents'); await fs.mkdir(app);
-    const missing = resolveALA(app, {});
+    const missing = resolveALA(app);
     assert.equal(missing.found, false); assert.deepEqual(missing.checked.map(c => c.source), ['parent', 'application', 'dependency']);
     const installed = await createFakeALA(path.join(app, 'node_modules/advanced-language-agent'), '');
-    const found = resolveALA(app, {});
+    const found = resolveALA(app);
     assert.equal(found.found, true); assert.equal(found.source, 'dependency'); assert.equal(found.entry, path.join(installed, 'bin/ala.mjs'));
     // npm puts node_modules/.bin on PATH, where `ala` is a link to the same entry: the dependency is named first.
     await fs.mkdir(path.join(app, 'node_modules/.bin')); await fs.symlink('../advanced-language-agent/bin/ala.mjs', path.join(app, 'node_modules/.bin/ala'));
     process.env.PATH = path.join(app, 'node_modules/.bin');
-    assert.equal(resolveALA(app, {}).source, 'dependency');
-    // A saved location and a checkout inside or beside the repository still come first.
-    const wrong = resolveALA(app, { alaPath: path.join(directory, 'missing') });
-    assert.equal(wrong.found, false, 'an invalid saved location is not replaced by the installed copy'); assert.deepEqual(wrong.checked.map(c => c.source), ['configured']);
-    await createFakeALA(path.join(app, 'AdvancedLanguageAgent'), ''); assert.equal(resolveALA(app, {}).source, 'application');
-    await createFakeALA(path.join(directory, 'AdvancedLanguageAgent'), ''); assert.equal(resolveALA(app, {}).source, 'parent');
+    assert.equal(resolveALA(app).source, 'dependency');
+    // A checkout inside or beside the repository still comes first.
+    await createFakeALA(path.join(app, 'AdvancedLanguageAgent'), ''); assert.equal(resolveALA(app).source, 'application');
+    await createFakeALA(path.join(directory, 'AdvancedLanguageAgent'), ''); assert.equal(resolveALA(app).source, 'parent');
   } finally {
     if (saved === undefined) delete process.env.ALA_CLI; else process.env.ALA_CLI = saved;
     process.env.PATH = savedPath;
@@ -145,78 +155,141 @@ test('ALA location: the copy npm install puts under node_modules is found after 
   }
 });
 
-test('the ALA location rule refuses a location inside tmp/ by folder identity', async () => {
+test('the ALA location rule refuses an automatic location inside tmp/ or an added folder by folder identity, and detection moves on', async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ala-rule-')));
-  const saved = process.env.ALA_CLI; delete process.env.ALA_CLI;
+  const saved = process.env.ALA_CLI, savedPath = process.env.PATH; delete process.env.ALA_CLI; process.env.PATH = path.join(directory, 'empty-path');
   try {
-    const root = path.join(directory, 'lean_documents'), tmp = path.join(root, 'tmp'), refused = [tmp];
+    const root = path.join(directory, 'lean_documents'), tmp = path.join(root, 'tmp');
     const planted = await createFakeALA(path.join(tmp, 'run-1/ala'), '');
-    const application = await createFakeALA(path.join(root, 'AdvancedLanguageAgent'), '');
-    const link = path.join(directory, 'link-to-planted'); await fs.symlink(planted, link);
     const text = locationRefused(tmp);
     assert.equal(text, `This ALA location is not accepted: it lies inside ${tmp}, where runs can write. Use a checkout outside it.`);
-    for (const location of [planted, path.join(planted, 'bin/ala.mjs'), link]) {
-      assert.throws(() => validateALALocation(location, { refused }), { message: text }, location);
-      const resolved = resolveALA(root, { alaPath: location }, { refused });
-      assert.equal(resolved.found, false, location); assert.equal(resolved.checked[0].reason, text);
-      assert.equal(resolved.checked.length, 1, 'a refused saved location is never replaced by automatic detection');
-    }
-    // A case-insensitive volume reaches tmp/ as TMP/; folder identity still refuses it.
-    const upper = path.join(root, 'TMP/run-1/ala');
-    if (fsExists(upper)) assert.throws(() => validateALALocation(upper, { refused }), { message: text }, 'letter case does not hide tmp/');
-    assert.equal(validateALALocation(application, { refused }), application, '<root>/AdvancedLanguageAgent is accepted');
-    assert.equal(resolveALA(root, {}, { refused }).source, 'application');
-    // <root>/tmp is refused by default; roots a caller passes are added to it, never replace it.
-    assert.throws(() => validateALALocation(planted, { root }), { message: text }, 'the default refuses <root>/tmp');
-    const extra = path.join(directory, 'other-refused'); await fs.mkdir(extra);
-    assert.throws(() => validateALALocation(planted, { root, refused: [extra] }), { message: text }, 'an added root keeps the default');
-    const defaulted = resolveALA(root, { alaPath: planted }, { refused: [extra] });
-    assert.equal(defaulted.found, false); assert.deepEqual(defaulted.checked.map(c => [c.source, c.reason, c.refusedInside]), [['configured', text, tmp]]);
-    assert.equal(resolveALA(root, { alaPath: planted }).checked[0].reason, text, 'resolveALA without options refuses <root>/tmp');
-    // Without a root, validateALALocation protects this repository's tmp/.
-    const repositoryTmp = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'tmp');
-    await fs.mkdir(repositoryTmp, { recursive: true });
-    const inRepository = await fs.mkdtemp(path.join(repositoryTmp, 'ala-default-rule-'));
-    try {
-      const own = await createFakeALA(path.join(inRepository, 'ala'), '');
-      assert.throws(() => validateALALocation(own), { message: locationRefused(repositoryTmp) });
-    } finally { await fs.rm(inRepository, { recursive: true, force: true }); }
+    // <root>/AdvancedLanguageAgent is a link into tmp/: refused, and the installed copy is used instead.
+    await fs.symlink(planted, path.join(root, 'AdvancedLanguageAgent'));
+    const installed = await createFakeALA(path.join(root, 'node_modules/advanced-language-agent'), '');
+    const resolved = resolveALA(root);
+    assert.equal(resolved.found, true); assert.equal(resolved.source, 'dependency'); assert.equal(resolved.entry, path.join(installed, 'bin/ala.mjs'));
+    assert.deepEqual(resolved.checked.find(c => c.source === 'application'), { source: 'application', location: path.join(root, 'AdvancedLanguageAgent'), reason: text, refusedInside: tmp });
+    // `ala` on PATH inside tmp/ (a case-insensitive volume reaches it as TMP/ as well).
+    await fs.rm(path.join(root, 'node_modules'), { recursive: true });
+    const bin = path.join(tmp, 'bin'); await fs.mkdir(bin); await fs.symlink(path.join(planted, 'bin/ala.mjs'), path.join(bin, 'ala'));
+    process.env.PATH = fsExists(path.join(root, 'TMP')) ? path.join(root, 'TMP/bin') : bin;
+    const onPath = resolveALA(root);
+    assert.equal(onPath.found, false); assert.deepEqual(onPath.checked.find(c => c.source === 'path')?.reason, text);
+    // A folder the caller adds (the server adds the folder set with npm run set-home) is refused too; <root>/tmp stays refused.
+    const setFolder = path.join(directory, 'set-home-folder'), beside = await createFakeALA(path.join(setFolder, 'AdvancedLanguageAgent'), '');
+    await fs.rm(path.join(root, 'AdvancedLanguageAgent')); await fs.symlink(beside, path.join(root, 'AdvancedLanguageAgent'));
+    process.env.PATH = path.join(directory, 'empty-path');
+    assert.equal(resolveALA(root).source, 'application', 'outside every refused folder it is used');
+    const refused = resolveALA(root, { refused: [setFolder] });
+    assert.equal(refused.found, false); assert.deepEqual(refused.checked.find(c => c.source === 'application').refusedInside, setFolder);
+    // ALA_CLI is the operator's own statement and is never refused.
+    process.env.ALA_CLI = planted;
+    assert.equal(resolveALA(root, { refused: [setFolder] }).source, 'environment');
   } finally {
     if (saved === undefined) delete process.env.ALA_CLI; else process.env.ALA_CLI = saved;
+    process.env.PATH = savedPath;
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
 
-test('the catalog worker refuses to start without an agent home and lists with the environment ALA derives from one', async () => {
+test('the login check runs in the worker: it reports the login of the home, a module it cannot use, and is killed when it blocks', async () => {
+  const { execFile } = await import('node:child_process');
+  const worker = path.join(path.dirname(new URL(import.meta.url).pathname), 'ala-catalog-worker.mjs');
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ala-login-'))), savedVariables = {};
+  try {
+    const ala = await createFakeALA(path.join(directory, 'ala'), ''), entry = path.join(ala, 'bin/ala.mjs');
+    // The worker inherits this process's environment: a credential variable exported in the developer's shell would count as a login.
+    for (const name of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']) if (name in process.env) { savedVariables[name] = process.env[name]; delete process.env[name]; }
+    // Both homes are fixtures under the temporary folder; a folder is always passed, so the real home is never looked at.
+    const signedIn = path.join(directory, 'signed-in'), empty = path.join(directory, 'empty');
+    await fs.mkdir(path.join(signedIn, '.codex'), { recursive: true }); await fs.writeFile(path.join(signedIn, '.codex/auth.json'), JSON.stringify({ tokens: { access_token: 'fixture' } })); await fs.mkdir(empty);
+    assert.deepEqual(await readALALogin(entry, signedIn, 'codex'), { login: { loggedIn: true, file: true, env: [], files: [path.join(signedIn, '.codex/auth.json')] } });
+    assert.deepEqual(await readALALogin(entry, empty, 'codex'), { login: { loggedIn: false, file: false, env: [], files: [path.join(empty, '.codex/auth.json')] } });
+    // The worker itself, with the caller's home (`-`) as a fixture and a credential variable instead of a file.
+    const run = (args, env) => new Promise(resolve => execFile(process.execPath, [worker, ...args], { env: { PATH: process.env.PATH, HOME: empty, ...env } }, (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr })));
+    const variable = await run([entry, '-', '--login', 'codex'], { OPENAI_API_KEY: 'fixture-value' });
+    assert.equal(variable.code, 0, variable.stderr); assert.deepEqual(JSON.parse(variable.stdout).login, { loggedIn: true, file: false, env: ['OPENAI_API_KEY'], files: [path.join(empty, '.codex/auth.json')] });
+    assert.equal(variable.stdout.includes('fixture-value'), false, 'the value of a credential variable is never printed');
+    // Misuse of the caller's side is refused before a process starts.
+    await assert.rejects(readALALogin(entry, undefined, 'codex'), { message: homeRequired });
+    await assert.rejects(readALALogin(entry, 'relative', 'codex'), /absolute path/);
+    await assert.rejects(readALALogin(entry, empty, '--login'), /Choose an installed coding agent/);
+    await assert.rejects(readALALogin(entry, empty, 'unknown-agent'), { status: 503, message: loginCheckUnavailable('unknown-agent') });
+    // A login module that cannot be used is named as such, not as a missing login.
+    const modulePath = path.join(ala, 'src/coding-agents/logins.mjs'), original = await fs.readFile(modulePath, 'utf8');
+    await fs.writeFile(modulePath, "throw new Error('simulated import failure');\n");
+    assert.deepEqual(await readALALogin(entry, empty, 'codex'), { problem: 'noModule' });
+    // A check that blocks (as ALA's own does on a login file swapped for a FIFO) is killed: the caller gets 503 and goes on.
+    await fs.writeFile(modulePath, "export const homeEnvironment = (env, home) => ({ ...env, HOME: home });\nexport const codingAgentLoginFiles = () => [];\nexport function detectCodingAgentLogin() { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0); }\nexport const detectCodingAgentLogins = () => [];\n");
+    const started = Date.now(); let ticks = 0; const ticking = setInterval(() => { ticks++; }, 20);
+    await assert.rejects(readALALogin(entry, empty, 'codex', { timeout: 400 }), { status: 503, message: loginCheckUnavailable('codex') });
+    clearInterval(ticking);
+    assert.ok(Date.now() - started < 4000, 'the blocked check ended at its timeout');
+    assert.ok(ticks >= 10, 'the caller kept running while the check was blocked');
+    await fs.writeFile(modulePath, original);
+    assert.equal((await readALALogin(entry, signedIn, 'codex')).login.loggedIn, true, 'a later check works again');
+  } finally { Object.assign(process.env, savedVariables); await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('the catalog worker needs a home folder or "-", and lists with the environment of the home a run would get', async () => {
   const { execFile } = await import('node:child_process');
   const worker = path.join(path.dirname(new URL(import.meta.url).pathname), 'ala-catalog-worker.mjs');
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ala-worker-')));
   try {
     const ala = await createFakeALA(path.join(directory, 'ala'), ''), entry = path.join(ala, 'bin/ala.mjs'), records = path.join(directory, 'records'), home = path.join(directory, 'home');
-    await fs.mkdir(records); await fs.mkdir(home, { mode: 0o700 });
-    const run = args => new Promise(resolve => execFile(process.execPath, [worker, ...args], { env: { PATH: process.env.PATH, FAKE_ALA_RECORDS: records, CODEX_HOME: '/must/not/be/used' } }, (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr })));
-    for (const args of [[entry], [entry, 'relative'], [entry, path.join(directory, 'missing'), 'codex']]) {
-      const result = await run(args); assert.equal(result.code, 1, args.join(' ')); assert.equal(result.stderr, 'An agent home is required.\n'); assert.equal(result.stdout, '');
-    }
+    // The caller's own home is a fixture under the temporary folder, never the real one.
+    const callerHome = path.join(directory, 'caller-home'), callerCodex = path.join(callerHome, '.codex');
+    await fs.mkdir(records); await fs.mkdir(home, { mode: 0o700 }); await fs.mkdir(callerHome);
+    const run = args => new Promise(resolve => execFile(process.execPath, [worker, ...args], { env: { PATH: process.env.PATH, ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}), HOME: callerHome, FAKE_ALA_RECORDS: records, CODEX_HOME: callerCodex } }, (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stdout, stderr })));
     await fs.symlink(home, path.join(directory, 'home-link'));
-    assert.equal((await run([entry, path.join(directory, 'home-link'), 'codex'])).code, 1, 'a link is not a real folder');
+    for (const args of [[entry], [entry, 'relative'], [entry, path.join(directory, 'missing'), 'codex'], [entry, path.join(directory, 'missing')], [entry, path.join(directory, 'home-link'), 'codex']]) {
+      const result = await run(args); assert.equal(result.code, 1, args.join(' ')); assert.equal(result.stderr, 'An agent home folder or "-" is required.\n'); assert.equal(result.stdout, '');
+    }
     assert.deepEqual(await fs.readdir(records), [], 'nothing of ALA was loaded or run');
-    // The agent list derives install paths from a home that need not exist; it is never created.
-    const never = path.join(directory, 'never-created');
-    const list = await run([entry, never]); assert.equal(list.code, 0, list.stderr);
+    const texts = async () => Promise.all((await fs.readdir(records)).sort().map(name => fs.readFile(path.join(records, name), 'utf8')));
+    const sha = value => (createHash('sha256').update(value).digest('hex'));
+    // `-`: your own home. Discovery sees the caller's HOME; the service gets no home and the caller's CODEX_HOME.
+    const list = await run([entry, '-']); assert.equal(list.code, 0, list.stderr);
     assert.deepEqual(JSON.parse(list.stdout).agents.map(a => a.id), ['codex', 'claude', 'pi']);
-    assert.equal(fsExists(never), false);
+    const own = await run([entry, '-', 'codex']); assert.equal(own.code, 0, own.stderr);
+    assert.equal(JSON.parse(own.stdout).models[0].id, 'test-codex-model');
+    let all = await texts();
+    const discovery = all.filter(text => text.startsWith('# Simulated discovery')), [service] = all.filter(text => text.startsWith('# Simulated coding-agent service'));
+    assert.equal(discovery.length, 2); for (const text of discovery) assert.ok(text.includes(`| Environment HOME | ${callerHome} |`), text);
+    assert.match(service, /\| Agent home \| none \|/); assert.ok(service.includes(`| Environment HOME | ${callerHome} |`));
+    assert.ok(service.includes('CODEX_HOME ' + sha(callerCodex)), "your own home: the caller's CODEX_HOME reaches ALA");
+    // A folder: the environment ALA derives from it, never the caller's.
+    await fs.rm(records, { recursive: true }); await fs.mkdir(records);
     const listed = await run([entry, home, 'codex']); assert.equal(listed.code, 0, listed.stderr);
     assert.equal(JSON.parse(listed.stdout).models[0].id, 'test-codex-model');
-    const texts = await Promise.all((await fs.readdir(records)).map(name => fs.readFile(path.join(records, name), 'utf8')));
-    const discovery = texts.filter(text => text.startsWith('# Simulated discovery')), service = texts.filter(text => text.startsWith('# Simulated coding-agent service'));
-    assert.equal(discovery.length, 2); assert.ok(discovery.some(text => text.includes(`| Environment HOME | ${never} |`)) && discovery.some(text => text.includes(`| Environment HOME | ${home} |`)));
-    assert.equal(service.length, 1);
-    assert.match(service[0], new RegExp(`\\| Agent home \\| ${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\|`)); assert.match(service[0], /\| Agent home exists \| yes \|/);
-    assert.match(service[0], new RegExp(`\\| Environment HOME \\| ${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\|`), 'the service gets homeEnvironment(env, home)');
-    const sha = value => (createHash('sha256').update(value).digest('hex'));
-    assert.ok(service[0].includes('CODEX_HOME ' + sha(path.join(home, '.codex'))), 'CODEX_HOME is derived from the home');
-    assert.ok(!service[0].includes(sha('/must/not/be/used')), "the caller's CODEX_HOME never reaches ALA");
+    all = await texts();
+    const [folderDiscovery] = all.filter(text => text.startsWith('# Simulated discovery')), [folderService] = all.filter(text => text.startsWith('# Simulated coding-agent service'));
+    assert.ok(folderDiscovery.includes(`| Environment HOME | ${home} |`), folderDiscovery);
+    assert.match(folderService, new RegExp(`\\| Agent home \\| ${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\|`)); assert.match(folderService, /\| Agent home exists \| yes \|/);
+    assert.match(folderService, new RegExp(`\\| Environment HOME \\| ${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\|`), 'the service gets homeEnvironment(env, home)');
+    assert.ok(folderService.includes('CODEX_HOME ' + sha(path.join(home, '.codex'))), 'CODEX_HOME is derived from the home');
+    assert.ok(!folderService.includes(sha(callerCodex)), "the caller's CODEX_HOME never reaches ALA");
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('the fake ALA refuses a --home outside the host temporary folder, before it reads or writes anything (A4)', async () => {
+  const { execFile } = await import('node:child_process');
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ala-fake-guard-')));
+  try {
+    const ala = await createFakeALA(path.join(directory, 'ala'), ''), entry = path.join(ala, 'bin/ala.mjs'), cwd = path.join(directory, 'run'), inside = path.join(directory, 'home');
+    await fs.mkdir(cwd); await fs.mkdir(inside); await fs.writeFile(path.join(cwd, 'task.md'), '# Task\n');
+    const repository = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+    const run = home => new Promise(resolve => execFile(process.execPath, [entry, '--ca', 'codex', '--cwd', cwd, ...(home === undefined ? [] : ['--home', home]), '--taskFile', path.join(cwd, 'task.md'), '--output', path.join(cwd, 'out.md')], { env: { PATH: process.env.PATH, ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}), HOME: inside } }, (error, stdout, stderr) => resolve({ code: error ? error.code : 0, stderr })));
+    // Never the developer's home: the repository and / stand for a folder outside the temporary folder.
+    for (const home of [repository, '/', '']) {
+      const refused = await run(home);
+      assert.equal(refused.code, 1, home); assert.equal(refused.stderr, 'ala: the test fixture refuses a --home outside the temporary folder\n', home);
+      assert.deepEqual(await fs.readdir(cwd), ['task.md'], 'nothing was recorded');
+    }
+    for (const home of [inside, undefined]) assert.equal((await run(home)).code, 0, String(home));
+    const { createCodingAgentService } = await import(path.join(ala, 'src/coding-agents/service.mjs'));
+    assert.throws(() => createCodingAgentService({ home: repository }), /refuses a home outside the temporary folder/);
+    assert.equal(typeof createCodingAgentService({ home: inside }).listModels, 'function');
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 
@@ -239,7 +312,7 @@ async function probeFixture() {
   fx.probe = async (overrides = {}, env = {}) => {
     const script = path.join(check, 'codex'); await fs.writeFile(script, m.probeScript({ run, root, check, id, python, lean, sentinel, home, helper, reader, state, marker, ...overrides }), { mode: 0o755 });
     const stdout = await new Promise((resolve, reject) => execFile('/bin/sh', [script, 'exec', '--json', 'ignored prompt'], { cwd: run, env: { ...process.env, HOME: fakeHome, ...env } }, (error, out) => error ? reject(error) : resolve(out)));
-    const tsv = await fs.readFile(path.join(run, 'probe-results.tsv'), 'utf8'), checks = m.evaluate(tsv);
+    const tsv = await fs.readFile(path.join(run, 'probe-results.tsv'), 'utf8'), checks = m.evaluate(tsv, { mode: overrides.mode ?? 'folder' });
     return { stdout, tsv, checks, result: Object.fromEntries(checks.map(c => [c.key, c])) };
   };
   fx.close = async () => {
@@ -254,12 +327,13 @@ const { existsSync } = await import('node:fs');
 function fsExists(file) { try { return Boolean(existsSync(file)); } catch { return false; } }
 
 test('the sandbox probe reports writes outside the run folder as failures when no sandbox confines it', async () => {
-  const fx = await probeFixture(), { PROBE_MESSAGE, CHECKS, CONFINEMENT, evaluate, deniedProbes } = fx.m;
+  const fx = await probeFixture(), { PROBE_MESSAGE, CHECKS, checksFor, confinementFor, evaluate, deniedProbes } = fx.m, CONFINEMENT = confinementFor('folder');
   try {
     // Run deliberately without ALA: every write and read succeeds, so the probe must report every confinement check as failed.
-    const { stdout, checks, result } = await fx.probe();
+    const { stdout, tsv, checks, result } = await fx.probe();
     assert.equal(JSON.parse(stdout.trim()).item.text, PROBE_MESSAGE, 'ALA needs one Codex agent_message on stdout');
-    assert.deepEqual(checks.map(c => c.key), CHECKS.map(([key]) => key));
+    assert.deepEqual(checks.map(c => c.key), checksFor('folder').map(([key]) => key));
+    assert.equal(result.agent_state_shared, undefined, 'folder mode has no agent_state_shared row'); assert.doesNotMatch(tsv, /agent_state_shared/, 'the folder-mode probe does not even write one');
     for (const key of ['cwd', 'run_write', 'repo_read']) assert.equal(result[key].status, 'pass', key);
     assert.deepEqual(CONFINEMENT.filter(key => CHECKS.find(([k]) => k === key)[2] !== true), [], 'every confinement check is required');
     for (const key of CONFINEMENT) { assert.equal(result[key].status, 'fail', key); assert.equal(result[key].ok, false, key); }
@@ -268,7 +342,7 @@ test('the sandbox probe reports writes outside the run folder as failures when n
     assert.match(result.other_process_environment.detail, /^visible: .*other=found own=found/, 'the unconfined reader sees the helper');
     for (const key of ['helper_import', 'lean_version', 'lean_check']) assert.equal(result[key].status, 'fail', key + ' has no helper or toolchain in the stub repository');
     assert.match(result.python.status, /^(pass|fail)$/); assert.equal(result.extractors.status, 'info'); assert.equal(result.extractors.ok, true);
-    assert.deepEqual(evaluate('').filter(c => c.required).map(c => [c.status, c.ok]), CHECKS.filter(([, , required]) => required).map(() => ['missing', false]), 'a missing probe never passes');
+    assert.deepEqual(evaluate('').filter(c => c.required).map(c => [c.status, c.ok]), checksFor('folder').filter(([, , required]) => required).map(() => ['missing', false]), 'a missing probe never passes');
     assert.throws(() => fx.m.probeScript({ run: "/a'b", root: fx.root, check: fx.check, id: fx.id, sentinel: fx.sentinel, home: fx.home, helper: fx.helper, reader: fx.reader }), /does not support/);
     // A private HOME alone is not enough: the entry of the real home is still readable.
     const privateHome = path.join(fx.root, 'private-home'); await fs.mkdir(privateHome);
@@ -320,8 +394,62 @@ test('real_agent_state_denied passes when the real folder is refused (permission
   } finally { await fs.chmod(path.join(fx.fakeHome, '.codex'), 0o700).catch(() => {}); await fx.close(); }
 });
 
+test('own mode: agent_state_shared passes only when $HOME/.codex is the fixture folder, and a marker is written only into that folder', async () => {
+  const fx = await probeFixture(), { evaluate, checksFor } = fx.m, fixture = path.join(fx.fakeHome, '.codex'), markerFile = path.join(fixture, fx.marker.name);
+  try {
+    // HOME is the fixture home that stands in for yours: the shared state folder, as ALA's default without --home.
+    const own = await fx.probe({ mode: 'own' });
+    assert.deepEqual(own.checks.map(c => c.key), checksFor('own').map(([key]) => key));
+    assert.equal(own.result.real_agent_state_denied, undefined, 'own mode has no real_agent_state_denied row'); assert.doesNotMatch(own.tsv, /real_agent_state_denied/);
+    assert.equal(own.result.agent_state_shared.status, 'pass', own.result.agent_state_shared.detail);
+    assert.equal(own.result.agent_state_shared.detail, `shared: $HOME/.codex (HOME=${fx.fakeHome}) is the folder ${fx.fakeHome}/.codex, and a marker written into it`);
+    assert.equal(await fs.readFile(markerFile, 'utf8'), fx.marker.value + '\n', 'the marker is in the fixture .codex');
+    assert.equal(fsExists(path.join(fx.fakeHome, fx.marker.name)), false, 'own mode never writes the marker into $HOME itself');
+    await fs.rm(markerFile);
+    // A private HOME without .codex, with another .codex folder, and without any state folder named by the host: not shared, nothing written.
+    const privateHome = path.join(fx.root, 'private-home'); await fs.mkdir(privateHome);
+    const missing = await fx.probe({ mode: 'own' }, { HOME: privateHome });
+    assert.equal(missing.result.agent_state_shared.status, 'fail'); assert.equal(missing.result.agent_state_shared.detail, `not shared: $HOME/.codex does not exist inside (HOME=${privateHome})`);
+    await fs.mkdir(path.join(privateHome, '.codex'));
+    const other = await fx.probe({ mode: 'own' }, { HOME: privateHome });
+    assert.equal(other.result.agent_state_shared.status, 'fail'); assert.equal(other.result.agent_state_shared.detail, `not shared: $HOME/.codex (HOME=${privateHome}) is not the folder ${fx.fakeHome}/.codex`);
+    assert.deepEqual([await fs.readdir(path.join(privateHome, '.codex')), await fs.readdir(fixture)], [[], ['auth.json']], 'a folder with another identity gets no marker, and the fixture none either');
+    const none = await fx.probe({ mode: 'own', state: { home: fx.fakeHome, folders: [] } });
+    assert.equal(none.result.agent_state_shared.status, 'fail'); assert.match(none.result.agent_state_shared.detail, /^not shared: the host found no \.codex in the fixture home$/);
+    // A .codex that is a link to the fixture folder is that folder (stat follows it): ALA's default without --home on macOS.
+    await fs.rm(path.join(privateHome, '.codex'), { recursive: true }); await fs.symlink(fixture, path.join(privateHome, '.codex'));
+    const linked = await fx.probe({ mode: 'own' }, { HOME: privateHome });
+    assert.equal(linked.result.agent_state_shared.status, 'pass', linked.result.agent_state_shared.detail); assert.equal(await fs.readFile(markerFile, 'utf8'), fx.marker.value + '\n');
+    // The same TSV evaluated for the other mode never shows the row, and a row the probe did not write is missing, not passing.
+    assert.equal(evaluate('agent_state_shared\tpass\tshared: x', { mode: 'folder' }).find(c => c.key === 'agent_state_shared'), undefined);
+    assert.deepEqual(evaluate('', { mode: 'own' }).filter(c => c.key === 'agent_state_shared').map(c => [c.required, c.status, c.ok]), [[true, 'missing', false]]);
+    assert.throws(() => evaluate('', { mode: 'both' }), /Unknown mode/); assert.throws(() => fx.m.probeScript({ run: fx.run, root: fx.root, check: fx.check, id: fx.id, sentinel: fx.sentinel, home: fx.home, helper: fx.helper, reader: fx.reader, mode: 'both' }), /Unknown mode/);
+  } finally { await fx.close(); }
+});
+
+test('the modes: checksFor and confinementFor list the rows of one mode, CHECKS is the union, and modeStatement names both modes', async () => {
+  const { CHECKS, checksFor, confinementFor, modeStatement, combineShared } = await import('./check-ala-sandbox.mjs'), keys = mode => checksFor(mode).map(([key]) => key);
+  assert.equal(keys('own').includes('real_agent_state_denied'), false); assert.equal(keys('own').includes('agent_state_shared'), true);
+  assert.equal(keys('folder').includes('real_agent_state_denied'), true); assert.equal(keys('folder').includes('agent_state_shared'), false);
+  assert.deepEqual([...new Set([...keys('own'), ...keys('folder')])].sort(), CHECKS.map(([key]) => key).sort(), 'CHECKS is the union');
+  assert.deepEqual(confinementFor('own'), ['repo_write_denied', 'tmp_write_denied', 'sibling_write_denied', 'outside_read_denied', 'home_private', 'other_process_environment']);
+  assert.deepEqual(confinementFor('folder'), [...confinementFor('own'), 'real_agent_state_denied']);
+  assert.equal(CHECKS.find(([key]) => key === 'home_private')[1], 'HOME is not the real home, and an entry of the real home is neither readable nor listed');
+  for (const [key, , required] of checksFor('own')) if (['agent_state_shared', 'home_private'].includes(key)) assert.equal(required, true, key);
+  assert.throws(() => checksFor('both'), /Unknown mode: both/); assert.throws(() => modeStatement('both', 'own'), /Unknown mode/);
+  assert.match(modeStatement('own', 'folder'), /^Configured mode: folder\. Mode checked: own home\.\n\nALA was started without `--home`; a fixture home stood in for yours\. .*can read and change the agent's state folder, including its login, and no row says otherwise\.$/);
+  assert.match(modeStatement('folder', 'folder'), /^Configured mode: folder\. Mode checked: folder\.\n\nALA was started with `--home`; an empty temporary folder stood in for the set folder\. All runs share that folder, including the login kept there, and no row says otherwise\.$/);
+  assert.match(modeStatement('own', null), /^Configured mode: unknown \(the setting could not be read\)\. Mode checked: own home\./);
+  // The host completes the probe's row: only a pass with the marker in the fixture folder is shared.
+  const row = (status, detail) => ({ key: 'agent_state_shared', status, detail, required: true, ok: status === 'pass' });
+  const passed = combineShared(row('pass', 'shared: x'), { marker: true }); assert.deepEqual([passed.status, passed.ok, passed.detail], ['pass', true, 'shared: x; its marker reached the fixture folder']);
+  const unseen = combineShared(row('pass', 'shared: x'), { marker: false }); assert.deepEqual([unseen.status, unseen.ok], ['fail', false]); assert.match(unseen.detail, /^not shared: the probe's marker is missing from the fixture's \.codex folder$/);
+  const refused = combineShared(row('fail', 'not shared: y'), { marker: true }); assert.deepEqual([refused.status, refused.detail], ['fail', 'not shared: y']);
+  const missing = combineShared(row('missing', 'The probe did not record this check.'), { marker: true }); assert.deepEqual([missing.status, missing.ok, missing.detail], ['fail', false, 'not shared: The probe did not record this check.']);
+});
+
 test('the host merges real_agent_state_denied with its positive control', async () => {
-  const { combineState, negativeControlOutcome } = await import('./check-ala-sandbox.mjs');
+  const { combineState } = await import('./check-ala-sandbox.mjs');
   const state = (status, detail = 'probe detail') => ({ key: 'real_agent_state_denied', status, detail, required: true, ok: status === 'pass' });
   const control = { status: 'pass', detail: 'HOME=/c is none of them ... /fixture/.codex', marker: true };
   assert.equal(combineState(state('pass'), { marker: true, control }).ok, true);
@@ -330,9 +458,6 @@ test('the host merges real_agent_state_denied with its positive control', async 
     for (const status of ['pass', 'na']) { const merged = combineState(state(status), options); assert.equal(merged.ok, false, pattern + status); assert.equal(merged.status, 'fail'); assert.match(merged.detail, pattern); }
   }
   assert.equal(combineState(state('fail', 'x is listable inside'), { marker: true, control }).ok, false);
-  // --negative-control: only a failure that names the shared folder counts.
-  assert.equal(negativeControlOutcome(state('fail', 'HOME=/n: $HOME/.codex is your real folder /n/.codex')).ok, true);
-  for (const recorded of [state('pass'), state('fail', 'x is listable inside'), state('na'), undefined]) assert.equal(negativeControlOutcome(recorded).ok, false, JSON.stringify(recorded));
 });
 
 test('other_process_environment is hidden only for an outside process, and a reader that cannot answer is a failure', async () => {
@@ -514,7 +639,7 @@ test('the model-free guard refuses a real agent binary, a populated agent home, 
     await assert.rejects(assertModelFree({ env, ...base, home: undefined }), /the agent home is not an existing folder/);
     await fs.mkdir(path.join(codexHome, '.codex')); await fs.writeFile(path.join(codexHome, '.codex/auth.json'), '{}');
     await assert.rejects(assertModelFree({ env, ...base }), /the agent home is not an empty folder/);
-    // The negative control's fixture home must hold exactly the fixture, with its content.
+    // The own-mode fixture home must hold exactly the fixture, with its content.
     await assertModelFree({ env: homeEnvironment(env, home), ...base, homeEnvironment: null, homeFiles: { '.codex/auth.json': '{}' } });
     await fs.writeFile(path.join(codexHome, '.codex/auth.json'), '{"tokens":1}');
     await assert.rejects(assertModelFree({ env: homeEnvironment(env, home), ...base, homeEnvironment: null, homeFiles: { '.codex/auth.json': '{}' } }), /does not hold the fixture content/);
@@ -525,6 +650,9 @@ test('the model-free guard refuses a real agent binary, a populated agent home, 
 
 // A temporary repository, a fake real home, a fake ALA that runs CODEX_BIN directly (so nothing confines the probe) and
 // ALA's discovery rule. `body` runs in the fake ALA before the probe; nothing here starts a real agent or touches the real home.
+// Every main() gets this fixture `homeDir`, so the setting and the logins it reads are the fixture's (addendum A4). run()
+// checks the folder mode unless a test says `mode` (undefined: read the setting at homeDir); `alaCli: null` leaves ALA_CLI
+// unset so that automatic detection runs; `environment` sets more variables for the run.
 // Like ALA, the fake gives the probe the environment it derives from --home (agentEnv), so the probe never sees the
 // caller's HOME; a body may replace it through globalThis.probeEnv.
 async function mainFixture({ body = '', helperOptions = {}, discovery = DISCOVERY } = {}) {
@@ -542,9 +670,11 @@ fs.writeFileSync(output, JSON.parse(result.stdout.trim().split('\\n').pop()).ite
   await fs.writeFile(path.join(ala, 'src/coding-agents/discovery.mjs'), discovery);
   const fx = { dir, root, homeDir, ala };
   fx.run = async (options = {}) => {
-    const saved = process.env.ALA_CLI, lines = []; process.env.ALA_CLI = ala;
-    try { fx.code = await main({ root, homeDir, timeout: 60000, helperOptions, log: line => lines.push(line), ...options }); } finally { if (saved === undefined) delete process.env.ALA_CLI; else process.env.ALA_CLI = saved; }
-    fx.output = lines.join('\n'); fx.report = await fs.readFile(/^Report: (.*)$/m.exec(fx.output)[1], 'utf8');
+    const { alaCli = ala, environment = {}, ...rest } = options, names = ['ALA_CLI', ...Object.keys(environment)], saved = Object.fromEntries(names.map(name => [name, process.env[name]])), lines = [], errors = [], savedError = console.error;
+    const set = (name, value) => { if (value == null) delete process.env[name]; else process.env[name] = value; };
+    set('ALA_CLI', alaCli); for (const [name, value] of Object.entries(environment)) set(name, value); console.error = (...args) => errors.push(args.join(' '));
+    try { fx.code = await main({ root, homeDir, timeout: 60000, helperOptions, log: line => lines.push(line), mode: 'folder', ...rest }); } finally { console.error = savedError; for (const name of names) set(name, saved[name]); }
+    fx.errors = errors.join('\n'); fx.output = lines.join('\n'); const reported = /^Report: (.*)$/m.exec(fx.output); fx.report = reported ? await fs.readFile(reported[1], 'utf8') : '';
     fx.rows = Object.fromEntries([...fx.report.matchAll(/^\| (.*?) \| (Yes|No) \| (\w+) \| (.*) \|$/gm)].map(([, label, , status, detail]) => [label, { status, detail }]));
     fx.row = key => fx.rows[fx.labels.get(key)]; return fx;
   };
@@ -555,15 +685,18 @@ fs.writeFileSync(output, JSON.parse(result.stdout.trim().split('\\n').pop()).ite
 const probeRow = async (fx, key) => { const [check] = await fs.readdir(path.join(fx.root, 'tmp/ala-sandbox-check')); return (await fs.readFile(path.join(fx.root, 'tmp/ala-sandbox-check', check, 'run/probe-results.tsv'), 'utf8')).split('\n').find(line => line.startsWith(key + '\t')); };
 const fixturesGone = async fx => {
   const base = await fs.realpath(os.tmpdir()), pid = Number(/helper process (\d+)/.exec(fx.report)[1]);
-  assert.match(fx.report, /\(removed: yes\), a helper process \d+ with the marker variable `\w+` \(stopped: yes\), and the temporary base `[^`]+` with the --home folders and the control home \(removed: yes\)/);
+  assert.match(fx.report, /\(removed: yes\), a helper process \d+ with the marker variable `\w+` \(stopped: yes\), and the temporary base `[^`]+` with the fixture homes \(removed: yes\)/);
   assert.deepEqual((await fs.readdir(base)).filter(name => name.startsWith('ala-sandbox-sentinel-') || name.startsWith('ala-sandbox-base-')), [], 'no sentinel folder and no temporary base is left');
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the helper process is gone');
 };
 
-test('main() end to end with nothing confining the probe: every confinement row fails, the exit code is 1 and nothing is left behind', async () => {
-  const fx = await mainFixture(), { CONFINEMENT } = await import('./check-ala-sandbox.mjs');
+test("main({mode: 'folder'}) end to end with nothing confining the probe: every confinement row fails, the exit code is 1 and nothing is left behind", async () => {
+  const fx = await mainFixture(), { confinementFor, modeStatement } = await import('./check-ala-sandbox.mjs'), CONFINEMENT = confinementFor('folder');
   try {
-    const before = (await fs.readdir(fx.homeDir)).sort(); await fx.run();
+    const before = (await fs.readdir(fx.homeDir)).sort(); await fx.run({ mode: 'folder' });
+    assert.ok(fx.row('real_agent_state_denied'), 'folder mode has the real_agent_state_denied row'); assert.equal(fx.row('agent_state_shared'), undefined, 'and no agent_state_shared row');
+    assert.match(fx.report, /^# ALA sandbox check\n\nConfigured mode: own home\. Mode checked: folder\.\n/); assert.ok(fx.report.includes(modeStatement('folder', 'own')));
+    assert.equal(fx.row('home_private').status, 'fail'); assert.equal(fx.labels.get('home_private'), 'HOME is not the real home, and an entry of the real home is neither readable nor listed');
     assert.equal(fx.code, 1); assert.match(fx.report, /\*\*Result: failed\.\*\* ALA exited with code 0 and returned the simulated final message\./);
     for (const key of CONFINEMENT) assert.equal(fx.row(key).status, 'fail', key);
     for (const key of ['cwd', 'run_write', 'repo_read']) assert.equal(fx.row(key).status, 'pass', key);
@@ -575,6 +708,7 @@ test('main() end to end with nothing confining the probe: every confinement row 
     assert.equal(invocation[invocation.indexOf('--cwd') + 2], '--home'); assert.match(invocation[invocation.indexOf('--home') + 1], /\/ala-sandbox-base-[^/]+\/homes\/check-home$/);
     assert.match(fx.report, /## Positive control of real_agent_state_denied/);
     assert.match(fx.report, /list of entries was unchanged while it ran/); assert.deepEqual((await fs.readdir(fx.homeDir)).sort(), before, 'the fake home is untouched');
+    assert.deepEqual(await fs.readdir(path.join(fx.homeDir, '.codex')), ['auth.json'], 'nothing was written into the fake real state folder');
     await fixturesGone(fx);
   } finally { await fx.close(); }
 });
@@ -660,23 +794,97 @@ test('main() refuses to start ALA when ALA would not run the probe script, and A
   } finally { await fx.close(); }
 });
 
-test('--negative-control exits 0 only when real_agent_state_denied fails with "is your real folder"', async () => {
-  // Without --home the fake passes the given environment on, as ALA's default mounts the caller's state folders: HOME is
-  // the fixture home, so $HOME/.codex is that folder.
-  const fx = await mainFixture();
+test("main({mode: 'own'}): ALA runs without --home, agent_state_shared passes on the fixture folder and there is no real_agent_state_denied row", async () => {
+  // The fake passes the given environment on, as ALA's default does: HOME is the fixture home, so $HOME/.codex is its folder.
+  const fx = await mainFixture(), { confinementFor, modeStatement } = await import('./check-ala-sandbox.mjs');
   try {
-    await fx.run({ negativeControl: true });
-    assert.equal(fx.code, 0, fx.report); assert.match(fx.report, /\*\*Result: passed\.\*\* .*is your real folder \S+\/negative-home\/\.codex/);
-    const invocation = /```sh\n(.*)\n```/.exec(fx.report)[1];
-    assert.equal(invocation.includes('--home'), false, 'the negative control runs ALA without --home');
-    assert.deepEqual((await fs.readdir(await fs.realpath(os.tmpdir()))).filter(name => name.startsWith('ala-sandbox-sentinel-') || name.startsWith('ala-sandbox-base-')), []);
+    const before = (await fs.readdir(fx.homeDir)).sort(); await fx.run({ mode: 'own' });
+    assert.equal(fx.code, 1, 'nothing confines the fake, so the confinement rows fail: ' + fx.report);
+    assert.match(fx.report, /^# ALA sandbox check\n\nConfigured mode: own home\. Mode checked: own home\.\n/); assert.ok(fx.report.includes(modeStatement('own', 'own')));
+    assert.equal(fx.row('real_agent_state_denied'), undefined, 'no real_agent_state_denied row in own mode'); assert.doesNotMatch(fx.report, /real_agent_state_denied|Positive control/);
+    const shared = fx.row('agent_state_shared');
+    assert.equal(shared.status, 'pass', shared.detail); assert.match(shared.detail, /^shared: \$HOME\/\.codex \(HOME=\S+\/ala-sandbox-base-[^/]+\/own-home\) is the folder \S+\/ala-sandbox-base-[^/]+\/own-home\/\.codex, and a marker written into it; its marker reached the fixture folder$/);
+    for (const key of confinementFor('own')) assert.equal(fx.row(key).status, 'fail', key);
+    for (const key of ['cwd', 'run_write', 'repo_read']) assert.equal(fx.row(key).status, 'pass', key);
+    assert.match(fx.row('home_private').detail, /readable inside: .*\.zshrc/, 'home_private is measured against the real home passed to main, not the fixture');
+    const invocation = /## ALA invocation\n\n```sh\n(.*)\n```/.exec(fx.report)[1].split(' ');
+    assert.equal(invocation.includes('--home'), false, 'own mode runs ALA without --home'); assert.equal(invocation[invocation.indexOf('--cwd') + 2], '--folder');
+    assert.match(fx.report, /`--home` was not passed, and `HOME` and the agent state variables pointed to the fixture home/); assert.doesNotMatch(fx.report, /--home` was an empty folder/);
+    assert.deepEqual((await fs.readdir(fx.homeDir)).sort(), before, 'the fake real home is untouched'); assert.deepEqual(await fs.readdir(path.join(fx.homeDir, '.codex')), ['auth.json'], 'no marker reached the fake real state folder');
+    await fixturesGone(fx);
   } finally { await fx.close(); }
-  // A sandbox that gives the agent a private HOME although no --home was passed: the row cannot see a shared folder.
-  const isolated = await mainFixture({ body: "globalThis.probeEnv = { ...agentEnv, HOME: fs.mkdtempSync(path.join(cwd, 'private-')) };" });
+});
+
+test("main({mode: 'own'}) fails agent_state_shared with 'not shared:' when the probe gets a private HOME", async () => {
+  // A sandbox that gives the agent a private HOME although no --home was passed: the default mode would not find a login.
+  const fx = await mainFixture({ body: "globalThis.probeEnv = { ...agentEnv, HOME: fs.mkdtempSync(path.join(cwd, 'private-')) };" });
   try {
-    await isolated.run({ negativeControl: true });
-    assert.equal(isolated.code, 1); assert.match(isolated.report, /\*\*Result: failed\.\*\* .*did not fail with "is your real folder"/);
-  } finally { await isolated.close(); }
+    await fx.run({ mode: 'own' });
+    const shared = fx.row('agent_state_shared');
+    assert.equal(shared.status, 'fail'); assert.match(shared.detail, /^not shared: \$HOME\/\.codex does not exist inside \(HOME=\S+\/run\/private-\w+\)$/);
+    assert.equal(fx.code, 1); assert.match(fx.report, /\*\*Result: failed\.\*\*/);
+    assert.deepEqual(await fs.readdir(path.join(fx.homeDir, '.codex')), ['auth.json']);
+    await fixturesGone(fx);
+  } finally { await fx.close(); }
+});
+
+test('main() without a mode checks the configured one: own without a setting file, folder with one; the report names both modes', async () => {
+  const fx = await mainFixture(), { modeStatement } = await import('./check-ala-sandbox.mjs'), { writeAgentHome } = await import('./agent-home.mjs');
+  try {
+    await fx.run({ mode: undefined });
+    assert.equal(fx.code, 1); assert.match(fx.report, /^# ALA sandbox check\n\nConfigured mode: own home\. Mode checked: own home\.$/m); assert.ok(fx.report.includes(modeStatement('own', 'own')));
+    assert.ok(fx.row('agent_state_shared')); assert.equal(fx.row('real_agent_state_denied'), undefined); assert.equal(/## ALA invocation\n\n```sh\n(.*)\n```/.exec(fx.report)[1].includes('--home'), false);
+    await fixturesGone(fx);
+    // A setting (written into the fixture home, never the real one) makes the folder mode the configured one.
+    const folder = path.join(fx.dir, 'set-folder'); writeAgentHome(folder, { root: fx.root, home: fx.homeDir });
+    const settingBefore = await fs.readFile(path.join(fx.homeDir, '.lean-documents/agent-home.json'), 'utf8');
+    await fx.run({ mode: undefined });
+    assert.match(fx.report, /^Configured mode: folder\. Mode checked: folder\.$/m); assert.ok(fx.report.includes(modeStatement('folder', 'folder')));
+    assert.ok(fx.row('real_agent_state_denied')); assert.equal(fx.row('agent_state_shared'), undefined);
+    assert.match(/## ALA invocation\n\n```sh\n(.*)\n```/.exec(fx.report)[1], / --home \S+\/ala-sandbox-base-[^/]+\/homes\/check-home /, 'the check uses its own empty folder, never the set one');
+    assert.deepEqual(await fs.readdir(await fs.realpath(folder)), [], 'nothing was written into the set folder'); await fixturesGone(fx);
+    // --mode checks the other mode on demand; the configured one is still named.
+    await fx.run({ mode: 'own' });
+    assert.match(fx.report, /^Configured mode: folder\. Mode checked: own home\.$/m); assert.ok(fx.row('agent_state_shared'));
+    assert.equal(await fs.readFile(path.join(fx.homeDir, '.lean-documents/agent-home.json'), 'utf8'), settingBefore, 'the check never changes the setting');
+    await fixturesGone(fx);
+  } finally { await fx.close(); }
+});
+
+test('main() exits 2 for an unreadable setting without a mode, an unknown mode and an ALA inside the set folder, and leaves nothing behind', async () => {
+  const fx = await mainFixture(), { writeAgentHome } = await import('./agent-home.mjs'), base = await fs.realpath(os.tmpdir());
+  const leftovers = async () => (await fs.readdir(base)).filter(name => name.startsWith('ala-sandbox-sentinel-') || name.startsWith('ala-sandbox-base-'));
+  try {
+    await fs.mkdir(path.join(fx.homeDir, '.lean-documents')); await fs.writeFile(path.join(fx.homeDir, '.lean-documents/agent-home.json'), 'not json');
+    await fx.run({ mode: undefined });
+    assert.equal(fx.code, 2); assert.match(fx.errors, /not a usable agent-home setting \(not JSON\)/); assert.equal(fx.output, '');
+    await fx.run({ mode: 'bogus' }); assert.equal(fx.code, 2); assert.match(fx.errors, /^Usage: node tools\/check-ala-sandbox\.mjs \[--mode own\|folder\]$/);
+    assert.equal(await fs.stat(path.join(fx.root, 'tmp')).catch(() => null), null, 'no check folder was created'); assert.deepEqual(await leftovers(), []);
+    // An explicit mode still runs when the setting is unreadable; the configured mode is then unknown.
+    await fx.run({ mode: 'own' });
+    assert.match(fx.report, /^Configured mode: unknown \(the setting could not be read\)\. Mode checked: own home\.$/m); await fixturesGone(fx);
+    // ALA placed inside the set folder is refused, as it is inside tmp/: automatic detection moves on, and finds nothing.
+    await fs.rm(path.join(fx.homeDir, '.lean-documents/agent-home.json'));
+    const folder = path.join(fx.dir, 'set-folder'); writeAgentHome(folder, { root: fx.root, home: fx.homeDir });
+    await fs.rename(fx.ala, path.join(folder, 'ala')); await fs.symlink(path.join(folder, 'ala'), fx.ala);
+    const detect = { alaCli: null, environment: { PATH: '/nonexistent' } };
+    await fx.run({ ...detect, mode: undefined });
+    assert.equal(fx.code, 2); assert.match(fx.errors, /^ALA was not found\. Checked: .*lies inside .*set-folder.*Run "npm install" in this repository, or set ALA_CLI to the AdvancedLanguageAgent checkout\.$/s);
+    assert.doesNotMatch(fx.errors, /Agent settings/); assert.deepEqual(await leftovers(), []);
+    await fs.rm(path.join(fx.homeDir, '.lean-documents/agent-home.json'));
+    await fx.run({ ...detect, mode: undefined }); assert.match(fx.report, /Configured mode: own home\./, 'without the setting the same location is found'); await fixturesGone(fx);
+  } finally { await fx.close(); }
+});
+
+test('the command line takes only --mode own|folder; any other argument, including a removed option, exits 2 before anything runs', async () => {
+  const { execFile } = await import('node:child_process'), home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ala-cli-home-')));
+  try {
+    for (const args of [['--bogus'], ['--mode'], ['--mode', 'both'], ['--mode=own'], ['own'], ['--mode', 'own', 'extra']]) {
+      const result = await new Promise(resolve => execFile(process.execPath, [fileURLToPath(new URL('./check-ala-sandbox.mjs', import.meta.url)), ...args], { env: { ...process.env, HOME: home } }, (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr })));
+      assert.equal(result.code, 2, args.join(' ')); assert.match(result.stderr, /^Usage: node tools\/check-ala-sandbox\.mjs \[--mode own\|folder\]\n$/); assert.equal(result.stdout, '');
+    }
+    assert.deepEqual(await fs.readdir(home), [], 'nothing was created in the home');
+  } finally { await fs.rm(home, { recursive: true, force: true }); }
 });
 
 test('main() refuses the run when the fake ALA ignores --home: the marker is missing from the --home folder', async () => {

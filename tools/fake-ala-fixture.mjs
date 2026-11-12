@@ -7,20 +7,26 @@ import path from 'node:path';
 const recording = `const listEntries=folder=>{const out=[];const walk=(dir,prefix)=>{let entries;try{entries=fs.readdirSync(dir,{withFileTypes:true});}catch{return;}for(const e of entries.sort((a,b)=>a.name.localeCompare(b.name))){out.push(prefix+e.name+(e.isDirectory()?'/':''));if(e.isDirectory())walk(path.join(dir,e.name),prefix+e.name+'/');}};walk(folder,'');return out;};
 const isFolder=folder=>{try{return fs.statSync(folder).isDirectory();}catch{return false;}};
 const valueHashes=env=>Object.keys(env||{}).sort().map(key=>key+' '+crypto.createHash('sha256').update(String(env[key])).digest('hex'));
-const fence=lines=>'\\n\`\`\`text\\n'+lines.join('\\n')+'\\n\`\`\`\\n';`;
+const fence=lines=>'\\n\`\`\`text\\n'+lines.join('\\n')+'\\n\`\`\`\\n';
+const realOrNearest=file=>{const rest=[];let current=path.resolve(file);for(;;){try{return path.join(fs.realpathSync(current),...rest);}catch{const parent=path.dirname(current);if(parent===current)return path.resolve(file);rest.unshift(path.basename(current));current=parent;}}};
+const insideTemporary=file=>{const temporary=fs.realpathSync(os.tmpdir()),real=realOrNearest(file);return real===temporary||real.startsWith(temporary+path.sep);};`;
 
 // The prelude gives each simulated executor the parsed ALA arguments and an event writer, and records the actual
 // invocation in Markdown so tests can check the arguments, environment, agent home and working folder the server
-// supplied. Like ALA it refuses a --home that is not an existing folder, and `agentEnv` is the environment ALA derives
-// with --home (homeEnvironment of the fixture's login module), so a simulated agent never sees the caller's HOME.
+// supplied. Like ALA it refuses a --home that is not an existing folder. `agentEnv` is the environment ALA gives the
+// agent: with --home the one it derives (homeEnvironment of the fixture's login module), without --home the caller's
+// own, as ALA's default. A test must never hand a fixture the developer's real home, so a --home outside the host
+// temporary folder is refused before anything else happens.
 const prelude = `#!${process.execPath}
 // Explicit simulation: this fake ALA never runs a coding agent, an audit, a proof or a model.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 ${recording}
 const argv=process.argv.slice(2),value=flag=>{const i=argv.indexOf(flag);return i<0?undefined:argv[i+1];};
 const cwd=value('--cwd'),taskFile=value('--taskFile'),output=value('--output'),agent=value('--ca'),home=value('--home');
+if(argv.includes('--home')&&!insideTemporary(home||'/')){process.stderr.write('ala: the test fixture refuses a --home outside the temporary folder\\n');process.exit(1);}
 const prompt=fs.readFileSync(taskFile,'utf8');
 process.chdir(cwd);
 const event=e=>{if(process.env.ALA_EVENT_STREAM==='1')process.stderr.write('@@ALA_EVENT@@'+JSON.stringify(e)+'\\n');};
@@ -33,8 +39,9 @@ event({type:'coding-agent-selected',agent,permissionMode:'full-access',...(value
 `;
 
 // Hand-authored stand-ins for ALA's discovery and service modules. When FAKE_ALA_RECORDS names a folder, each records
-// the home and environment it was given (names and hashes only) there, so tests can show that the server always passes
-// an agent home. Catalog metadata is hand-authored, never an AI agent or model response.
+// the home and environment it was given (names and hashes only) there, so tests can show which home the server passed
+// (`none` for your own home). The service refuses a home outside the host temporary folder, as the prelude does.
+// Catalog metadata is hand-authored, never an AI agent or model response.
 const discoveryModule = `import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -44,10 +51,12 @@ export async function discoverCodingAgents({env=process.env}={}){
 }
 `;
 const serviceModule = `import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 ${recording}
 export function createCodingAgentService(options={}){
+ if(options.home&&!insideTemporary(options.home))throw new Error('the test fixture refuses a home outside the temporary folder');
  if(process.env.FAKE_ALA_RECORDS){
   const home=options.home||null,exists=!!home&&isFolder(home);
   fs.writeFileSync(path.join(process.env.FAKE_ALA_RECORDS,'service-'+process.pid+'-'+crypto.randomBytes(4).toString('hex')+'.md'),'# Simulated coding-agent service\\n\\n| Check | Value |\\n| --- | --- |\\n| Agent home | '+(home||'none')+' |\\n| Agent home exists | '+(exists?'yes':'no')+' |\\n| Environment HOME | '+(options.env?.HOME||'unset')+' |\\n| Working folder | '+(options.cwd||'unset')+' |\\n\\n## Agent home entries\\n'+fence(exists?listEntries(home):[])+'\\n## Environment value hashes\\n'+fence(valueHashes(options.env)));

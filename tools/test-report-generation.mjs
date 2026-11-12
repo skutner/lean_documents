@@ -7,7 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import os from 'node:os';
-import { noLogin } from './agent-home.mjs';
+import { OWN_HOME, noLogin } from './agent-home.mjs';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,30 +53,33 @@ const fsp=fs.promises;
 })();
 `;
 
-// Each server gets an agent-home base in the host temporary folder (never the real one) whose template holds a fixture
-// Codex login with a random token; the token never reaches the repository. Bases are removed at exit by guarded path.
+// Each server gets a fixture HOME in the host temporary folder, never the real one: without a set folder the server starts
+// ALA without --home, so that HOME is the agent's own. It holds a fixture Codex login with a random token, which never
+// reaches the repository. The fixtures are removed at exit by guarded path.
 const TEMPORARY = fsSync.realpathSync.native(os.tmpdir()), TOKEN = `fixture-token-${randomBytes(12).toString('hex')}`, fixtures = [];
-process.on('exit', () => { for (const dir of fixtures) if (path.dirname(dir) === TEMPORARY && path.basename(dir).startsWith('report-generation-base-')) fsSync.rmSync(dir, { recursive: true, force: true }); });
-async function fixtureBase(login) {
-  const dir = await fs.realpath(await fs.mkdtemp(path.join(TEMPORARY, 'report-generation-base-'))); fixtures.push(dir);
-  const base = path.join(dir, 'base');
-  for (const folder of [base, path.join(base, 'template'), ...(login ? [path.join(base, 'template/.codex')] : [])]) { await fs.mkdir(folder, { mode: 0o700 }); await fs.chmod(folder, 0o700); }
-  if (login) { const file = path.join(base, 'template/.codex/auth.json'); await fs.writeFile(file, JSON.stringify({ tokens: { access_token: TOKEN } }), { mode: 0o600 }); await fs.chmod(file, 0o600); }
-  return base;
+process.on('exit', () => { for (const dir of fixtures) if (path.dirname(dir) === TEMPORARY && path.basename(dir).startsWith('report-generation-home-')) fsSync.rmSync(dir, { recursive: true, force: true }); });
+async function fixtureHome(login) {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(TEMPORARY, 'report-generation-home-'))); fixtures.push(dir);
+  const home = path.join(dir, 'home');
+  await fs.mkdir(home, { mode: 0o700 });
+  if (login) { await fs.mkdir(path.join(home, '.codex'), { mode: 0o700 }); await fs.writeFile(path.join(home, '.codex/auth.json'), JSON.stringify({ tokens: { access_token: TOKEN } }), { mode: 0o600 }); }
+  assert.ok(home.startsWith(TEMPORARY + path.sep), 'a test server gets a fixture HOME, never the real home');
+  return home;
 }
-// Test servers never inherit credential variables or an agent-home location from the runner's shell.
-const cleanEnvironment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(OPENAI|ANTHROPIC|CLAUDE_CODE|CLAUDE|CODEX|OPENCODE|PI_CODING|OMP|GEMINI|GOOGLE|OPENROUTER|XAI|MISTRAL|GROQ|DEEPSEEK|AZURE_OPENAI)_|^AUDIT_AGENT_HOME$|^ALA_CLI$/.test(key)));
+// Test servers never inherit credential variables, agent state locations or ALA_CLI from the runner's shell; AUDIT_AGENT_HOME
+// would stop them.
+const cleanEnvironment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(OPENAI|ANTHROPIC|CLAUDE_CODE|CLAUDE|CODEX|OPENCODE|PI_CODING|OMP|GEMINI|GOOGLE|OPENROUTER|XAI|MISTRAL|GROQ|DEEPSEEK|AZURE_OPENAI|XDG)_|^AUDIT_AGENT_HOME$|^ALA_CLI$/.test(key)));
 
 async function start(name, { missing = false, auditWait = false, login = true } = {}) {
   const directory = path.join(suite, name), examples = path.join(directory, 'examples'), runs = path.join(directory, 'runs'), jobs = path.join(directory, 'report-jobs');
   await fs.mkdir(examples, { recursive: true });
-  const base = await fixtureBase(login);
+  const home = await fixtureHome(login);
   // A missing ALA location must refuse new work; otherwise a simulated ALA checkout outside the server folder runs.
   const ala = missing ? path.join(suite, name + '-missing-ala') : await createFakeALA(path.join(suite, name + '-fake-ala'), stub);
   const probe = net.createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
   const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
   const child = spawn(process.execPath, [path.join(ROOT, 'tools/audit-ui.mjs')], { cwd: ROOT,
-    env: { ...cleanEnvironment(), PORT: String(port), AUDIT_RUNS_ROOT: runs, AUDIT_EXAMPLES_ROOT: examples, AUDIT_DOCUMENT_PILOT: '1', AUDIT_TEST_MODE: '1', AUDIT_CONCURRENCY: '1', ALA_CLI: ala, AUDIT_AGENT_HOME: base, AUDIT_PYTHON: pythonShim, STUB_AUDIT_WAIT: auditWait ? '1' : '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    env: { ...cleanEnvironment(), PORT: String(port), AUDIT_RUNS_ROOT: runs, AUDIT_EXAMPLES_ROOT: examples, AUDIT_DOCUMENT_PILOT: '1', AUDIT_TEST_MODE: '1', AUDIT_CONCURRENCY: '1', ALA_CLI: ala, HOME: home, AUDIT_PYTHON: pythonShim, STUB_AUDIT_WAIT: auditWait ? '1' : '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = ''; child.stdout.on('data', b => output += b); child.stderr.on('data', b => output += b);
   for (let n = 0; n < 100 && !output.includes('Audit laboratory:'); n++) { if (child.exitCode !== null) throw Error(output); await pause(20); }
   assert.match(output, /Audit laboratory:/);
@@ -89,7 +92,7 @@ async function start(name, { missing = false, auditWait = false, login = true } 
     for (let n = 0; n < 200; n++) { assert.equal(child.exitCode, null, output); const value = await request(route); if (predicate(value)) return value; await pause(25); }
     throw Error(`Timed out waiting for ${route}`);
   }
-  return { directory, examples, runs, jobs, request, homes: () => path.join(fsSync.realpathSync.native(base), 'homes'),
+  return { directory, examples, runs, jobs, request, home,
     terminal: id => waitFor(`/api/report-jobs/${id}`, v => ['finished', 'failed', 'stopped'].includes(v.status)),
     auditTerminal: id => waitFor(`/api/runs/${id}`, v => !['queued', 'running', 'finalizing'].includes(v.status)),
     async waitMarker(base) { for (let n = 0; n < 150; n++) { try { await fs.access(path.join(base, 'stub-waiting.md')); return; } catch {} await pause(20); } throw Error('Waiting stub did not start'); },
@@ -117,11 +120,12 @@ await test('drafts preserve sources, honor mode/language and publish only the re
       assert.deepEqual(await fs.readFile(path.join(directory, 'sources/terms.md')), sourceBytes);
       const records = JSON.parse(await fs.readFile(path.join(directory, 'internal/sources.json'), 'utf8'));
       assert.equal(records[0].sha256, digest(sourceBytes));
-      // The draft's ALA process got its own agent home, directly after --cwd and inside <base>/homes; it is gone now.
+      // Without a set folder the draft's ALA process starts without --home: the agent uses its own home (the fixture HOME).
       const stubInput = await fs.readFile(path.join(directory, 'stub-input.md'), 'utf8'), journal = await fs.readFile(path.join(directory, 'execution.md'), 'utf8');
-      const command = JSON.parse(await fs.readFile(path.join(directory, 'internal/job.json'), 'utf8')).command.split(' '), home = command[command.indexOf('--home') + 1];
-      assert.equal(command[command.indexOf('--cwd') + 2], '--home'); assert.equal(path.dirname(home), server.homes()); assert.equal(fsSync.existsSync(home), false);
-      assert.match(journal, /Agent home prepared/i); assert.match(journal, /Agent home removed/i); assert.ok(stubInput.length > 0);
+      const command = JSON.parse(await fs.readFile(path.join(directory, 'internal/job.json'), 'utf8')).command.split(' ');
+      assert.equal(command.includes('--home'), false); assert.equal(command[command.indexOf('--cwd') + 2], '--folder'); assert.equal(job.agentHome, OWN_HOME);
+      assert.match(journal, /\| agent home \| agent home \|/); assert.doesNotMatch(journal, /Agent home (prepared|removed)/i); assert.ok(stubInput.length > 0);
+      assert.match(await fs.readFile(path.join(directory, 'generation.md'), 'utf8'), /\| agent Home \| your own home \(ALA started without --home\) \|/);
       const instructions = await fs.readFile(path.join(directory, 'instructions.md'), 'utf8');
       assert.ok(instructions.includes(`Language: ${language === 'ro' ? 'Romanian' : 'English'}`)); assert.ok(instructions.includes(`Mode: ${mode}`));
       assert.ok(instructions.includes('investment-report-writer/SKILL.md'));
@@ -152,12 +156,12 @@ await test('drafts preserve sources, honor mode/language and publish only the re
   } finally { await server.close(); }
 });
 
-await test('a draft needs a pilot login; without it the draft is refused and no job folder is created', { timeout: 15000 }, async () => {
+await test('a draft needs a login; without it the draft is refused with the exact text and no job folder is created', { timeout: 15000 }, async () => {
   const server = await start('draft-refusals', { login: false });
   try {
     const { id } = await example(server);
     const refused = await server.request(`/api/examples/${id}/reports/generate`, { title: 'Draft', mode: 'grounded' }, 400);
-    assert.equal(refused.error, noLogin('codex', path.dirname(server.homes())));
+    assert.equal(refused.error, noLogin('codex', { mode: 'own', folder: null }, [path.join(server.home, '.codex/auth.json')]));
     assert.deepEqual(await fs.readdir(server.jobs), [], 'no job folder is created');
   } finally { await server.close(); }
 });

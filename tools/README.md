@@ -7,9 +7,9 @@ npm install
 npm run start
 ```
 
-The root `package.json` names two commands and one dependency. `npm run start` is `node tools/pilot.mjs` and `npm test` is `node tools/verify.mjs`; either form works. `npm install` fetches ALA from GitHub at the pinned commit into `node_modules/advanced-language-agent`; see [Coding agents through ALA](#coding-agents-through-ala). The server itself uses only built-in Node.js modules, so it starts without the install, but then finds ALA only through `ALA_CLI`, a saved location, a checkout beside or inside the repository, or `PATH`. npm prints `skipping integrity check for git dependency` during the install; the pin is the commit.
+The root `package.json` names three commands and one dependency. `npm run start` is `node tools/pilot.mjs`, `npm test` is `node tools/verify.mjs` and `npm run set-home` is `node tools/set-home.mjs` (see [Agent home](#agent-home)); either form works. `npm install` fetches ALA from GitHub at the pinned commit into `node_modules/advanced-language-agent`; see [Coding agents through ALA](#coding-agents-through-ala). The server itself uses only built-in Node.js modules, so it starts without the install, but then finds ALA only through `ALA_CLI`, a checkout beside or inside the repository, or `PATH`. npm prints `skipping integrity check for git dependency` during the install; the pin is the commit.
 
-The server prints `Audit laboratory: http://127.0.0.1:8787`. Open that address; see [The address](#the-address). The current examples are in `examples/pilot/`; execution artifacts are retained under `tmp/readable-pilot/`. The server uses built-in Node.js modules. Real writing and auditing run through [ALA (Advanced Language Agent)](https://github.com/AssistOS-AI/AdvancedLanguageAgent) with an installed coding agent that has a pilot login, plus Python 3.12 or later and the repository-local Lean toolchain. See [Platforms and toolchain](#platforms-and-toolchain), [Coding agents through ALA](#coding-agents-through-ala) and [Dedicated agent home](#dedicated-agent-home).
+The server prints `Audit laboratory: http://127.0.0.1:8787`. Open that address; see [The address](#the-address). The current examples are in `examples/pilot/`; execution artifacts are retained under `tmp/readable-pilot/`. The server uses built-in Node.js modules. Real writing and auditing run through [ALA (Advanced Language Agent)](https://github.com/AssistOS-AI/AdvancedLanguageAgent) with an installed coding agent that is signed in, plus Python 3.12 or later and the repository-local Lean toolchain. See [Platforms and toolchain](#platforms-and-toolchain), [Coding agents through ALA](#coding-agents-through-ala) and [Agent home](#agent-home).
 
 ## Platforms and toolchain
 
@@ -23,7 +23,7 @@ What a host needs for real audits:
 | Python 3.12 or later | Resolved as described below. The tools refuse an older interpreter. |
 | Lean 4.24.0 | `tmp/toolchains/<folder>/bin/lean`, installed by `node tools/setup-toolchain.mjs`. |
 | ALA | See [Coding agents through ALA](#coding-agents-through-ala). |
-| A coding agent with a pilot login | See [Dedicated agent home](#dedicated-agent-home). |
+| A coding agent that is signed in | See [Agent home](#agent-home). |
 
 Optional `pdftotext`, `pdftoppm` and `tesseract` extractors must be installed system-wide to be visible inside the sandbox.
 
@@ -106,101 +106,123 @@ Each finding retains its own source review, reasoning, formalization, executed c
 
 Current audits live under `tmp/readable-pilot/runs/`. Report-writing jobs live under `tmp/readable-pilot/report-jobs/`; their `generation-notes.md` and execution records are kept separate from the source corpus. Example metadata is in `example.md`. Source digests are checked before a generated report is published, so an input change during drafting cannot silently publish a result against different documents.
 
-The server binds to loopback, accepts only the Host `127.0.0.1:<port>`, checks Origin, and confines file access to the selected example, audit or drafting job. Uploads are limited to 90 MB per request. These variables change its behaviour: `PORT` the port; `ALA_CLI` the ALA location; `AUDIT_AGENT_HOME` the [agent-home base](#dedicated-agent-home); `AUDIT_PYTHON` the interpreter. Agent binary variables such as `CODEX_BIN` or `CLAUDE_BIN` are read by ALA's own agent discovery. Explicit test executors are labelled simulated and use isolated directories.
+The server binds to loopback, accepts only the Host `127.0.0.1:<port>`, checks Origin, and confines file access to the selected example, audit or drafting job. Uploads are limited to 90 MB per request. These variables change its behaviour: `PORT` the port; `ALA_CLI` the ALA location; `AUDIT_PYTHON` the interpreter. `AUDIT_AGENT_HOME` is no longer used; a server started with it set refuses to start (see [Agent home](#agent-home)). Agent binary variables such as `CODEX_BIN` or `CLAUDE_BIN` are read by ALA's own agent discovery. Explicit test executors are labelled simulated and use isolated directories.
 
 ## Coding agents through ALA
 
 The server never starts Codex directly. Every verification and report draft runs `node <ALA>/bin/ala.mjs` with the coding agent chosen in **Agent settings** (header button): Codex, Claude Code, OpenCode, Pi or OMP, as reported installed by ALA. Codex with its own default model remains the default until another selection is saved. Every agent runs inside ALA's sandbox on both platforms (see [Platforms and toolchain](#platforms-and-toolchain)).
 
-ALA is located in this order: the `ALA_CLI` environment variable, then a location saved in Agent settings, then `../AdvancedLanguageAgent` next to this repository, `./AdvancedLanguageAgent`, the copy that `npm install` puts in `node_modules/advanced-language-agent`, and an `ala` executable on `PATH`. The installed copy is the commit pinned in `package.json` and recorded in `package-lock.json`; to move to another ALA commit, change the commit there and run `npm install` again. A checkout beside or inside the repository, a saved location and `ALA_CLI` all come before it, so you can still run another ALA. A location is accepted only when it contains `bin/ala.mjs`, `src/coding-agents/discovery.mjs` and a `package.json` named `advanced-language-agent`, and the pilot also needs `src/coding-agents/logins.mjs` in it. Except for `ALA_CLI`, a location inside this repository's `tmp/` or inside the agent-home base is refused, because the server imports ALA's modules without confinement and runs can write there. An invalid saved location is reported, never silently replaced. While ALA is missing, a banner links to Agent settings and new verifications or drafts are refused with an explanation.
+ALA is located in this order: the `ALA_CLI` environment variable, then `../AdvancedLanguageAgent` next to this repository, `./AdvancedLanguageAgent`, the copy that `npm install` puts in `node_modules/advanced-language-agent`, and an `ala` executable on `PATH`. The installed copy is the commit pinned in `package.json` and recorded in `package-lock.json`; to move to another ALA commit, change the commit there and run `npm install` again. A checkout beside or inside the repository and `ALA_CLI` come before it, so you can still run another ALA. Neither the page nor the API can set where ALA is. A location is accepted only when it contains `bin/ala.mjs`, `src/coding-agents/discovery.mjs` and a `package.json` named `advanced-language-agent`, and the pilot also needs `src/coding-agents/logins.mjs` in it. Except for `ALA_CLI`, a location inside this repository's `tmp/` or inside the folder set with `set-home` is refused, because the server imports ALA's modules without confinement and runs can write there. While ALA is missing, a banner says so and new verifications or drafts are refused with an explanation.
 
-Agent settings lists installed agents and the models and effort levels ALA reports for each one. The agent list uses a home that is never created and sends no prompt. A model list starts ALA's catalog modules in a separate process with a fresh [dedicated agent home](#dedicated-agent-home) of the selected agent, so it needs that agent's pilot login; it never sends a prompt either. Only an installed agent and a model it reports can be saved; Agent default leaves the model or effort to the coding agent. The selection is stored in the readable `agent-settings.md` record beside the run folder (for the pilot, `tmp/readable-pilot/agent-settings.md`). Each run and draft records the agent, model and effort it was queued with, so changing the settings never alters queued or running work.
+Agent settings lists installed agents and the models and effort levels ALA reports for each one. The agent list and a model list start ALA's catalog modules in a separate process with the same [agent home](#agent-home) a run would get, so they show what a run would find; neither sends a prompt. The server makes no login check for them: a model list without a login is answered with `Could not load the ALA catalog. Check the ALA installation and coding-agent login, then retry.` Only an installed agent and a model it reports can be saved; Agent default leaves the model or effort to the coding agent. The selection is stored in the readable `agent-settings.md` record beside the run folder (for the pilot, `tmp/readable-pilot/agent-settings.md`). Each run and draft records the agent, model and effort it was queued with, so changing the settings never alters queued or running work.
 
 Each task is invoked as follows. The retained `instructions.md` is the task file and `final-message.md` receives ALA's final message.
 
 ```sh
 node ALA/bin/ala.mjs --ca AGENT [--model MODEL [--effort EFFORT]] --config RUN/no-ala-config.json \
-  --cwd RUN --home HOME --folder REPOSITORY --taskFile RUN/instructions.md --output RUN/final-message.md
+  --cwd RUN [--home FOLDER] --folder REPOSITORY --taskFile RUN/instructions.md --output RUN/final-message.md
 ```
 
-- `--cwd` is the run or draft folder, the only repository folder the agent can write. Besides it the agent has `--home`, a fresh agent home made for this one process and destroyed afterwards, and a private temporary folder (on macOS a private `TMPDIR`). `--folder` mounts this repository read-only at its own path, so the skill, helpers and Lean toolchain keep their absolute paths while originals, examples and other runs cannot be modified.
-- `--home` is always passed; there is no call without it, so ALA never falls back to your own agent folders. See [Dedicated agent home](#dedicated-agent-home).
+- `--cwd` is the run or draft folder, the only repository folder the agent can write. Besides it the agent can write its [agent home](#agent-home) (your own agent state folder by default, or the folder set with `set-home`) and a private temporary folder (on macOS a private `TMPDIR`). `--folder` mounts this repository read-only at its own path, so the skill, helpers and Lean toolchain keep their absolute paths while originals, examples and other runs cannot be modified.
+- `--home` is passed only after `npm run set-home -- <folder>`, and then on every start; without a set folder ALA uses your own agent folders. Each run and draft records which it got: its record has an `Agent home` field and its journal an `agent home` entry, holding the folder or `your own home (ALA started without --home)`.
 - `--config` deliberately names a file that is never created. ALA treats a missing configuration as empty, so personal `~/.ala/config.json` defaults cannot change the recorded model.
 - ALA shares the host network with its sandbox and enables the coding agent's web search (for Codex, `--search`). The audit and drafting prompts forbid web search and network resources and name the supplied documents as the only evidence; this instruction is not a network sandbox guarantee.
-- `PLOINKY_*` variables are removed. The login is the pilot login copied into the run's agent home, or a credential variable of the server's environment that ALA passes to the agent. `ALA_EVENT_STREAM=1` lets the execution journal record the coding agent's messages, tool output and ALA diagnostics. ALA does not report individual command lines or exit codes, so the journal no longer lists them; finding documents and retained Lean logs remain the evidence for each check.
+- `PLOINKY_*` variables are removed. The login is the agent's own, or the one in the set folder, or a credential variable of the server's environment that ALA passes to the agent. `ALA_EVENT_STREAM=1` lets the execution journal record the coding agent's messages, tool output and ALA diagnostics. ALA does not report individual command lines or exit codes, so the journal no longer lists them; finding documents and retained Lean logs remain the evidence for each check.
 - Stop sends SIGTERM to the ALA process group. ALA cancels its coding agent and the run or draft is recorded as stopped. Any other non-zero exit, including ALA's interrupted code 130 without a requested stop, is recorded as failed with ALA's last error line.
 
-Inside the sandbox ALA sets `PATH` itself (runtime folders, system folders and, on macOS, the Homebrew and `/usr/local` `bin` folders); the folders of your home are not on it. Every audit prompt therefore names the resolved absolute Python interpreter, which must be visible inside the sandbox: a system installation, or the one under `tmp/toolchains`. An interpreter or package under your home folder is not visible. ALA finds the agent program through `PATH` and the agent's binary variable (`CODEX_BIN`, `CLAUDE_BIN`, ...) of the server's environment; under a dedicated home it no longer looks in `~/.local/bin` by itself, so an agent that is installed there must be named by one of those. `node tools/setup-agent-home.mjs status` shows what a run started from the current shell would find.
+Inside the sandbox ALA sets `PATH` itself (runtime folders, system folders and, on macOS, the Homebrew and `/usr/local` `bin` folders); the folders of your home are not on it. Every audit prompt therefore names the resolved absolute Python interpreter, which must be visible inside the sandbox: a system installation, or the one under `tmp/toolchains`. An interpreter or package under your home folder is not visible. ALA finds the agent program through `PATH` and the agent's binary variable (`CODEX_BIN`, `CLAUDE_BIN`, ...) of the server's environment; by default it also looks in the agent's install folder under your home (`~/.local/bin`; for OpenCode `~/.opencode/bin`), and with a set folder in the same place under `<folder>` instead, so an agent installed only under your own home must then be on `PATH` or named by its binary variable. `node node_modules/advanced-language-agent/bin/ala.mjs status [--home <folder>]` shows what a run started from the current shell would find.
 
-## Dedicated agent home
+## Agent home
 
-Why it exists: ALA's default gives the coding agent write access to your own agent state (`~/.codex`, `~/.claude` and the others), so a sandboxed run could change what your own agent later reads or executes there. The pilot therefore never uses those folders. Every coding agent process it starts (audit, report draft, model listing) gets `--home` with a fresh folder made for that one process, holding only a copy of a login made for the pilot.
+The agent home is the folder a coding agent gets as its home inside ALA's sandbox. It holds the agent's login, settings and session history. There are two modes.
 
-**The base.** `~/.lean-documents/agent-home`, or the absolute path in `AUDIT_AGENT_HOME`; an explicit value is authoritative, and its parent folder must already exist. Every folder under it has mode 0700 and every file 0600. Layout:
+| Mode | How ALA is started | What it means |
+| --- | --- | --- |
+| Your own home (default) | Without `--home` | The agent uses the login and state you already have (`~/.codex`, `~/.claude` and the others). There is nothing to set up. A run can read and change that state. |
+| A set folder | With `--home <folder>` | Every agent start gets that one folder. Your own agent folders are out of reach of a run. You sign in once inside the folder. |
 
-| Folder or file | Content |
-| --- | --- |
-| `template/` | The login files ALA names for each agent, nothing else. Only `setup-agent-home.mjs login` writes it. |
-| `homes/` | `home-<server pid>-<16 hex>` for each process in use (and `gone-...` while one is being removed), with a `home-<...>.owner` record beside it that holds the pids and process group of the ALA process. |
-| `staging/` | `login-<pid>-<16 hex>` scratch homes of a sign-in. |
-| `template.lock` | The pid of the process that is adopting a login. |
+In both modes all runs share one home, and nothing in it is ever removed by the pilot. See [Limits](#limits).
 
-The base is created at the first `login` or at the first server start; for the default location `~/.lean-documents` is created as well. `status`, `logout` and `sweep` do not create the base.
-
-**What is refused.** A relative `AUDIT_AGENT_HOME`, a base inside this repository (which every run can read), a base inside the Node installation that ALA makes readable to every run, and a base that is a link or not a real folder of yours with no access for group or others. The server then does not start: it prints `The pilot server did not start: <reason>` and exits 1; it does the same for a `PORT` that is not a TCP port. `status`, `login` and `logout` print `The dedicated agent home could not be prepared, so no coding agent was started: <reason>` and exit 4. `status`, `login` and `logout` also check the folders inside the base (the template, `homes/` and `staging/`), and refuse a template that holds anything but login files (below). The server does not check the template: a refused template does not stop the server, but new work is refused with that same text (status 503), and the page shows `The dedicated agent home cannot be used.` `sweep` refuses only a relative `AUDIT_AGENT_HOME`.
-
-**The template.** It holds the login files ALA names for the agents, such as `.codex/auth.json` for Codex, and nothing else. Any other entry (another file, a link, a special file, a file over 16777216 bytes, an entry that is not yours or that others can access, a stray `.DS_Store`) makes every agent unavailable until you remove it by hand; the message names the entry. A `-shm` file beside an agent's `.db` login file is tolerated. The template is only ever written by `login`, from the sign-in's scratch home, never from your own agent folders, so a pilot run does not see your personal agent configuration. What a login file contains is the client's own business: for Claude Code, `.claude.json` is both a login file and its configuration file, and for OpenCode and OMP the whole database is the login.
-
-**One fresh home per agent process.** For each process the server creates `homes/home-<server pid>-<16 hex>`, copies only the selected agent's login files from the template into it, starts ALA with it as `--home`, and after the ALA process has ended unlinks the copies and removes the home. Nothing a run wrote is ever copied back to the template, and the home's name is never reused. If the client rewrote its login file during the run (for example a refreshed token), the new file is discarded, the run's journal records `login_files_rewritten` in its `agent home removed` entry, Agent settings shows `login rewritten by a run`, and the next run starts again from the template: you may have to sign in again. A static credential (an API-key login or a token variable) is not affected. On macOS the removal runs in a child confined by Seatbelt to the folder being removed; if that child cannot run, the home is left and reported, because there is no unconfined fallback. At start-up, before each new home and on `sweep`, homes whose server has gone are removed, unless their recorded ALA process group is still running. At exit the server signals its open homes' groups, waits up to 5 seconds, removes the homes, and reports any it had to leave.
-
-A server that queues work for an agent without a pilot login refuses it, creates no run folder, and answers with this text (also shown as a banner in the page):
-
-```text
-No pilot login for <agent>. The pilot never uses your own <agent> folder; it starts <agent> with a dedicated agent home under <base>. Sign in there once: node tools/setup-agent-home.mjs login <agent> -- <sign-in command>. Or start the server with a credential variable that ALA passes to <agent>. See tools/README.md, "Dedicated agent home".
-```
-
-**The command.** ALA is found as the server finds it (`ALA_CLI`, then a saved location, then automatic detection; a location inside `tmp/` or the base is refused unless it comes from `ALA_CLI`). `sweep` needs no ALA.
+**The command.**
 
 ```sh
-node tools/setup-agent-home.mjs status [--json]
-node tools/setup-agent-home.mjs login <agent> -- <sign-in command> [argument...]
-node tools/setup-agent-home.mjs logout <agent>
-node tools/setup-agent-home.mjs sweep
+npm run set-home                 # show the setting
+npm run set-home -- <folder>     # use <folder>, created with mode 0700 when missing
+npm run set-home -- --reset      # back to your own home; the folder is left as it is
 ```
 
-- `status` prints the base, whether the template is usable, and for each agent ALA names whether a run would find it installed and whether it has a pilot login (a login file, or the names, never the values, of credential variables in the current environment), then the number of leftover homes. `--json` prints the same as JSON.
-- `login <agent> -- <command>` runs your sign-in command, without a shell, with the terminal attached, in an empty scratch home (`staging/login-...`); `HOME` and the agent state variables point there. The command is the agent's own program and runs without a sandbox, as every sign-in does; the script hardcodes no agent's sign-in command. Afterwards it requires that ALA finds a login file for that agent in the scratch home, adopts only the login files ALA names (by write-then-rename, replacing that agent's earlier files and leaving other agents' alone), prints their names, never their content, and removes the scratch home. The template lock is held only while files are adopted (`logout` and the copy of a login into a new home take it briefly too).
-- `logout <agent>` removes that agent's files from the template. The token itself stays valid until you revoke it with the provider.
-- `sweep` removes leftover homes and scratch homes as described above and prints how many it removed and which it kept and why. It refuses the same base locations as the other commands (exit 4) and needs no ALA; a base that does not exist yet has nothing to sweep (exit 0).
+The setting is the file `~/.lean-documents/agent-home.json`, which holds `{"home": "<absolute real path>"}`. Only this command writes it; no route of the API can. The server reads it at every agent start, so a change applies to the next start without a restart. An absent file is the default. A file that cannot be used, or that names a folder that is gone, is an error: new work is refused and nothing is started, so a broken setting never falls back to your own home.
+
+`<folder>` must be an absolute path. The command refuses, and changes nothing, when the folder:
+
+- lies inside this repository, which every run can read;
+- contains this repository, because a run could then change the tools the server runs;
+- is or contains `~/.lean-documents` (your home folder, a folder above it, `/`), because a run could then rewrite the setting;
+- is the setting file itself (in any letter case) or lies below it;
+- exists and is not a folder;
+- exists but is not owned by you, or gives group or others any access (`chmod 700 <folder>` first).
+
+A link to an acceptable folder is accepted and its real path is saved. A Node, a Python or an `ALA_CLI` checkout that you place inside the folder is your own responsibility: runs can change it.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Done. |
-| 1 | An unexpected error. |
-| 2 | Usage error, or an agent that ALA does not name. |
-| 3 | ALA not found or refused, or it has no login module. |
-| 4 | The base or the template is refused (`status` also exits 4 when the template is refused). |
-| 5 | The sign-in command could not start or exited non-zero (including when a signal of its own ended it); the template is unchanged. |
-| 6 | The sign-in ended, but no login file in the scratch home could be adopted (none exists, or one is a link, not a regular file, or too large); the template is unchanged. A login kept only in the macOS Keychain ends here. |
-| 7 | The template is locked by a live process. |
-| 128 + n | Signal n (SIGINT, SIGTERM or SIGHUP) interrupted the sign-in, after its scratch home was removed. The signal is passed on to the sign-in command. If it arrived after the login was already adopted, the message says `Interrupted by <signal> after the login was adopted.` and the template has changed; otherwise the template is unchanged. |
+| 0 | Done (shown, set or reset). |
+| 2 | Usage error: an unknown option, more than one argument, or a path that is not absolute. |
+| 3 | The folder is refused. |
+| 1 | Anything else, including a setting file that cannot be read or written. |
 
-**Claude Code on macOS.** Its subscription login is kept in the Keychain, which the sandbox cannot read, so a Keychain-only login is unusable inside the sandbox: if a sign-in keeps its login only there, `login` exits 6 and adopts nothing. Put a token variable in the server's environment instead (ALA passes `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` to Claude Code); `status` then reports `variable from the server's environment`.
+**Signing in inside a set folder.** Run the agent's own sign-in with its state variable pointing into the folder. ALA derives the same paths from `--home`.
+
+| Agent | Variable for the sign-in | Login ALA looks for |
+| --- | --- | --- |
+| Codex | `CODEX_HOME=<folder>/.codex` | `<folder>/.codex/auth.json` |
+| Claude Code | `CLAUDE_CONFIG_DIR=<folder>/.claude` | `<folder>/.claude/.credentials.json` or `.claude.json` |
+| OpenCode | `XDG_DATA_HOME=<folder>/.local/share XDG_CONFIG_HOME=<folder>/.config` | `<folder>/.local/share/opencode/auth.json`, `opencode.db` |
+| Pi | `PI_CODING_AGENT_DIR=<folder>/.pi/agent` | `<folder>/.pi/agent/auth.json` |
+| OMP | `OMP_DIR=<folder>/.omp` | `<folder>/.omp/agent/agent.db` |
+
+For example:
+
+```sh
+mkdir -p <folder>/.codex && CODEX_HOME=<folder>/.codex codex login
+node node_modules/advanced-language-agent/bin/ala.mjs status --home <folder>
+```
+
+The second command is ALA's own report of which agents it finds and which are signed in; without `--home` it reports your own home. The Agent home panel of Agent settings shows the same for the selected agent.
+
+**When no login is found.** Before it queues or starts a verification or a draft, the server asks ALA's login module whether the selected agent has a login in the configured home. Without one it creates no run folder and answers with one of these texts, which the page also shows as a banner:
+
+```text
+No login found for <agent>. ALA looked for <files> and for a credential variable in the server's environment. Sign in with <agent>'s own command, then try again. A login kept only in the macOS Keychain is not visible inside ALA's sandbox. See tools/README.md, "Agent home".
+No login found for <agent> in the agent home <folder>. ALA looked for <files> and for a credential variable in the server's environment. Sign in inside that folder: see tools/README.md, "Agent home".
+```
+
+A setting that cannot be used is answered with status 503 and `The agent home cannot be used, so no coding agent was started: <reason>`. A login check that fails or does not finish within 10 seconds is stopped and answered with status 503 and `The login check for <agent> failed or did not finish, so no coding agent was started. …` (see [Limits](#limits)). A server started with such a setting does not start: it prints `The pilot server did not start: <reason>` and exits 1; it does the same for a `PORT` that is not a TCP port.
+
+**Claude Code on macOS, in both modes.** Its subscription login is kept in the Keychain, which the sandbox cannot read, so a Keychain-only login is unusable inside the sandbox. Put a token variable in the environment of the shell that starts the server instead: ALA passes `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` to Claude Code. The panel then reports `variable from the server's environment`.
 
 **Credential variables still reach the sandbox.** ALA passes each agent's credential variables from the server's environment into the sandbox (for Codex `OPENAI_API_KEY`; the list for every agent is in ALA's agent descriptors). A variable counts as a login, the pilot does not change this, and a run can read it.
+
+**Leftovers of the earlier design.** Earlier versions kept a separate login for the pilot and per-run homes under `~/.lean-documents/agent-home` (a folder; the setting file `agent-home.json` lies beside it). That folder is no longer read or written, and nothing removes it: delete it by hand when you no longer need it. To reuse the login kept there in a set folder, copy it: `cp -R ~/.lean-documents/agent-home/template/. <folder>/`. `AUDIT_AGENT_HOME` is no longer used; a server started with it set does not start and says so.
 
 ## Check the sandbox without a model
 
 Before the first real audit on a host, run:
 
 ```sh
-ALA_CLI=<ALA checkout> node tools/check-ala-sandbox.mjs
-ALA_CLI=<ALA checkout> node tools/check-ala-sandbox.mjs --negative-control
+node tools/check-ala-sandbox.mjs                 # the mode that is configured
+node tools/check-ala-sandbox.mjs --mode own      # your own home (the default)
+node tools/check-ala-sandbox.mjs --mode folder   # a set folder
 ```
 
-The check resolves ALA as the server does (`ALA_CLI`, then a saved location, then automatic detection), and starts it with the server's own arguments, including a dedicated `--home`. `CODEX_BIN` points to a simulated Codex shell script and `--home` to an empty folder in the host temporary folder; `OPENAI_*`, `ANTHROPIC_*`, `CLAUDE_CODE_OAUTH_TOKEN`, `PLOINKY_*` and the agent state variables are removed, and the check refuses to start ALA if a credential is left or ALA would run any other Codex than the script. No model, prompt or network request is involved. The check also puts a sentinel folder and a temporary agent-home base in the host temporary folder, outside this repository and your home, and starts a helper process; they are removed on a normal exit, on an error and on SIGINT, SIGTERM or SIGHUP, and the report says whether your real home's list of entries changed while it ran. The readable report, probe results and run folder stay under `tmp/ala-sandbox-check/<timestamp>/`.
+The check resolves ALA as the server does and starts it with the server's own arguments for the mode it checks. Its report begins with `Configured mode: … Mode checked: …` and a paragraph that says what that mode does and does not protect. Neither mode touches your real agent state or login:
 
-The simulation records one row per check. Required rows must pass; the other three are informational.
+- **`own`**: ALA is started without `--home`. `HOME` and every agent state variable point to a fixture home that holds only `.codex/auth.json` containing `{}`; the fixture stands in for your home.
+- **`folder`**: ALA is started with `--home` on an empty folder in the host temporary folder, which stands in for the set folder, followed by a positive control.
+
+`CODEX_BIN` points to a simulated Codex shell script; `OPENAI_*`, `ANTHROPIC_*`, `CLAUDE_CODE_OAUTH_TOKEN`, `PLOINKY_*` and the agent state variables are removed, and the check refuses to start ALA if a credential is left or ALA would run any other Codex than the script. No model, prompt or network request is involved. The check also puts a sentinel folder and its fixture folders in the host temporary folder, outside this repository and your home, and starts a helper process; they are removed on a normal exit, on an error and on SIGINT, SIGTERM or SIGHUP, and the report says whether your real home's list of entries changed while it ran. The readable report, probe results and run folder stay under `tmp/ala-sandbox-check/<timestamp>/`.
+
+The simulation records one row per check. Required rows must pass; the last three are informational. Two rows exist in one mode only, so that no row claims a protection the mode does not give.
 
 | Row | What it shows |
 | --- | --- |
@@ -208,18 +230,17 @@ The simulation records one row per check. Required rows must pass; the other thr
 | `repo_read` | It can read the repository (the audit skill). |
 | `repo_write_denied`, `tmp_write_denied`, `sibling_write_denied` | It cannot write at the repository root, in `tmp/`, or next to its run folder; the host also checks that no refused file exists. |
 | `outside_read_denied` | A sentinel file in the host temporary folder can be neither read nor listed. A control read in the run folder must work first, and the host must still read the sentinel afterwards, or a refusal proves nothing. |
-| `home_private` | `HOME` is not your real home, and an entry of your real home that the host picked (never read; names that look like secrets or agent and runtime state are skipped) can neither be read nor appears in a listing of it. |
+| `home_private` | `HOME` is not your real home, and an entry of your real home that the host picked (never read; names that look like secrets or agent and runtime state are skipped) can neither be read nor appears in a listing of it. In `own` mode ALA's own `HOME` is the fixture; the row still checks only that the sandbox `HOME` is not your real home and that the picked entry is out of reach, and it does not measure what ALA would do with your real `HOME`. |
 | `other_process_environment` | The host starts an outside Node process with a random marker variable. A reader inside (a `/usr/bin/perl` call of `kern.procargs2` on macOS, `/proc/<pid>/environ` on Linux) must be refused for that process while it sees its own. The host confirms with the same reader that the marker is visible; if the reader cannot run, the row fails. |
-| `real_agent_state_denied` | For each coding-agent state folder that exists in your real home, `$HOME/<same folder>` inside is absent or another folder, and the real folder cannot be listed and its login files cannot be read. It passes only together with a positive control, a second ALA run with a fixture home that holds `.codex`, which must pass and whose marker file written in `$HOME` must reach its `--home` folder. If no state folder exists in your home, the row's result is the control's. |
+| `real_agent_state_denied` (`folder` only) | For each coding-agent state folder that exists in your real home, `$HOME/<same folder>` inside is absent or another folder, and the real folder cannot be listed and its login files cannot be read. It passes only together with a positive control, a second ALA run with a fixture home that holds `.codex`, which must pass and whose marker file written in `$HOME` must reach its `--home` folder. If no state folder exists in your home, the row's result is the control's. |
+| `agent_state_shared` (`own` only) | Without a separate agent home the agent's state folder inside is the real one: `$HOME/.codex` inside is the fixture's `.codex` by device and inode, and a marker the probe writes there is found by the host in the fixture. It states and measures the exposure; it passes when the default mode would find your login, and fails with `not shared: …` otherwise. |
 | `python`, `helper_import` | The resolved absolute Python is 3.12 or later inside the sandbox, and `<python> -B tools/document_audit.py --help` loads. Without a qualifying interpreter on the host both rows fail with the resolver's text. |
 | `lean_version`, `lean_check` | The repository Lean toolchain reports version 4.24.0 and checks a small theorem written in the run folder. Without Lean installed both rows fail. |
 | `extractors` (informational) | Which of `pdftotext`, `pdftoppm` and `tesseract` are on the sandbox `PATH`. |
 | `home` (informational) | The sandbox `HOME`, temporary folder and `PATH`. |
 | `launchd_residual` (informational) | On macOS a fixed statement: `Known residual on macOS: a confined process can start or unload existing launchd jobs in your login session; see ALA DS006.` On Linux `not applicable`. It is stated, not measured; the check creates no launchd job. |
 
-Exit codes: 0 when ALA succeeded, every required row passed and the fixtures were removed; 1 when the check failed; 2 for a usage error, ALA not found or refused, or ALA without its login module. ALA is stopped after 120 seconds.
-
-`--negative-control` runs ALA once without `--home`, with `HOME` and the agent state variables pointing at a fixture home that holds only `.codex/auth.json` containing `{}`. It exits 0 only when `real_agent_state_denied` fails with `is your real folder`, which shows that the row can detect a shared state folder. Its report is written next to the others.
+Exit codes: 0 when ALA succeeded, every required row of the checked mode passed and the fixtures were removed; 1 when the check failed; 2 for a usage error, ALA not found or refused, ALA without its login module, or, when no `--mode` is given, an agent-home setting that cannot be read. ALA is stopped after 120 seconds.
 
 ## Run the checks
 
@@ -227,7 +248,7 @@ Exit codes: 0 when ALA succeeded, every required row passed and the fixtures wer
 node tools/verify.mjs [--require-lean] [--only <suite>[,<suite>]] [--list]
 ```
 
-`verify.mjs` runs every check that needs no model, coding agent or internet: it resolves Python and Lean, runs each suite and prints a table of passes, failures and skips per suite, with the logs in `tmp/verify/<timestamp>/<suite>.log`. `--list` prints the suites and their commands without running them; the suites are `toolchain`, `verify`, `remote-verify`, `agent-home`, `ala`, `markdown-server`, `report-generation` and `python-tests` (the only one that needs Python 3.12 or later). With `ALA_CLI` set, the agent-home suite also compares its fixture's login-file lists with the real ALA; without it that test is skipped with the reason `ALA_CLI is not set`.
+`verify.mjs` runs every check that needs no model, coding agent or internet: it resolves Python and Lean, runs each suite and prints a table of passes, failures and skips per suite, with the logs in `tmp/verify/<timestamp>/<suite>.log`. `--list` prints the suites and their commands without running them; the suites are `toolchain`, `verify`, `remote-verify`, `agent-home`, `ala`, `markdown-server`, `report-generation` and `python-tests` (the only one that needs Python 3.12 or later). The agent-home suite covers the setting and `set-home`. It also compares its fixture's login-file lists with a real ALA: the one in `ALA_CLI`, else the installed copy; with neither, that test is skipped with a reason.
 
 - A suite passes only if it exits 0 and prints a readable summary in which at least one test passed. A suite that cannot be started, exits non-zero, prints no summary, runs no test or skips every test fails.
 - `NOT RUN` means a suite needed Python 3.12 or later and none was found. It is a failure, not a skip: the script says so, runs the suites that need no Python, marks the others `NOT RUN`, and exits 1. It never reports a pass for a suite it did not run.
@@ -263,14 +284,18 @@ Server tests use controlled isolated inputs and an explicitly simulated ALA chec
 
 ## Limits
 
-- The token. A compromised run can read the login in its own home and any credential variable ALA passes to it, and send it out over the shared network; it works on your account until it expires or you revoke it. A pilot login does not narrow that; it only keeps your own client's login undisturbed.
+- The login. By default the agent runs with your own login and state folder. A run can read that login and any credential variable ALA passes to it, send it out over the shared network, and change or delete it. A sent login works on your account until it expires or you revoke it.
+- By default a run can change your own agent state. ALA mounts the selected agent's state folder writable (`~/.codex` or `CODEX_HOME`, `~/.claude` or `CLAUDE_CONFIG_DIR`, the XDG folders of OpenCode, `~/.pi/agent`, `~/.omp`). A run can read your own session history there and change settings that your agent later reads and may execute outside any sandbox (hooks, MCP servers, notification commands). On Linux it can also retarget the link through which a standalone agent selects its program; ALA guards those links on macOS only (ALA DS006).
+- Runs share one home in both modes. A run can read what earlier runs and your own sessions left in the agent's state and change what later runs read. In a set folder this includes a program at `<folder>/.local/bin/<agent>`, which ALA would start, inside the sandbox, for later runs. Pilot results are therefore not blind against earlier runs; a blind evaluation goes through `evalsuite/run_blind.py`.
+- What `set-home` restores and what it does not. With a set folder your own agent folders are out of reach again (row `real_agent_state_denied` of the sandbox check). It does not isolate runs from each other, does not protect the login kept in the folder, and never removes anything: the folder and what runs wrote in it stay until you delete them.
+- To check for a login, the server asks ALA's login module, in a separate process, to read the selected agent's login files in the agent home. A run can write those files. A file that blocks the read (a named pipe in place of the login file, for example) blocks only that process: it is stopped after 10 seconds and new work is refused with `The login check for <agent> failed or did not finish, …`. A run can also make the check wrong, for example by replacing the state folder with a link: a verification may then be queued, which removes the report's previous verification, and fail when ALA starts.
 - The run folder stays under `tmp/` inside the repository, so it remains writable by its run and readable by later runs.
 - On macOS a sandboxed process can ask launchd to start, stop or unload jobs that already exist in your login session. This is accepted and documented in ALA's `docs/specs/DS006-macos-seatbelt-sandbox.md`.
 - On macOS do not move, replace or recreate a granted folder (the run folder, the repository, the agent home), or a folder above one, while a run is active: Seatbelt rules follow paths, so the rule would then point at whatever lies at the old path.
-- On macOS ALA starts the agent in a process group of its own, so the group the server records and waits for does not cover the agent; the confined removal is what protects a home in that case. A process that left its group can outlive a run, still confined. A later sweep removes anything left.
-- A server that is killed leaves the homes it had in use, with their login copies, under the private base until the next server start or `sweep`, and an orphaned ALA keeps running until it ends.
-- The API has no sign-in, and a sandboxed run shares the host network. A run can therefore call the pilot's API as you do: read examples, runs and drafts, start or stop work, upload files and change Agent settings, the saved ALA location included. The server imports ALA's modules without confinement, and the only guard left on a saved location is the refusal of one inside `tmp/` or the agent-home base. A server, `setup-agent-home.mjs` or `check-ala-sandbox.mjs` started with `ALA_CLI` set ignores the saved location.
-- A page of another site open in your browser can make it send GET requests to the pilot's API. It cannot read the answers, but some of those requests start a process: a refreshed agent list, a model list, which opens an agent home with a copy of the pilot login and sends no prompt, and the inspection of a run whose id the page would have to know. At most four such reads wait at a time.
+- On macOS ALA starts the agent in a process group of its own, so Stop and the server's exit signal ALA's group, not the agent's; a process that left its group can outlive a run, still confined.
+- A server that is killed leaves an orphaned ALA, which keeps running until it ends and keeps using your login and agent state.
+- The API has no sign-in, and a sandboxed run shares the host network. A run can therefore call the pilot's API as you do: read examples, runs and drafts, start or stop work, upload files and change the agent, model and effort in Agent settings. Two things it cannot change through the API: the agent home, which only `npm run set-home` writes to `~/.lean-documents/agent-home.json`, outside everything a run can write; and where ALA is, which comes from `ALA_CLI`, a checkout beside or inside the repository, `npm install`, or `PATH`.
+- A page of another site open in your browser can make it send GET requests to the pilot's API. It cannot read the answers, but some of those requests start a process: a refreshed agent list and a model list, which starts the agent's catalog query in the sandbox with the same home as a run and sends no prompt (at most four such reads wait at a time); the Agent settings status, which starts the login check (one at a time per agent and home, at most every 10 seconds while it succeeds); and the inspection of a run whose id the page would have to know.
 
 ## Current examples
 

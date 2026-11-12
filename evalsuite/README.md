@@ -82,7 +82,7 @@ Limits that the tool cannot remove:
 - The agent roots are declared by whoever runs the scorer. The tool does not observe what a sandbox mounted. The status is therefore `isolated_as_attested`, never "verified".
 - Folders are compared by location. A hard link to a key file placed inside an agent root is not detected.
 - File names under `sources` are staged unchanged. A fixture must not name a source after the variant.
-- The pilot launcher mounts the whole repository read-only for the agent (`tools/ala.mjs`). A run made that way is exposed to anything stored in the repository, including `examples/evaluator/` and `validation/runs/`. A blind run goes through `run_blind.py`, which mounts only the staged folder, a private home and the Lean toolchain.
+- The pilot launcher mounts the whole repository read-only for the agent (`tools/ala.mjs`). A run made that way is exposed to anything stored in the repository, including `examples/evaluator/` and `validation/runs/`. A blind run goes through `run_blind.py`, which mounts only the staged folder, a private home and the Lean toolchain. Pilot runs also share the agent's state (session history) with earlier runs and with your own sessions, so a pilot run is not blind against them.
 - A clean scan shows that no key wording was copied. It does not show that the keys were never read.
 - Runs that were audited with the keys readable cannot be made blind afterwards.
 

@@ -1,6 +1,9 @@
 /** Model-free check of the ALA sandbox layout the audit server uses. ALA runs a simulated Codex inside its real
  * sandbox (Bubblewrap on Linux, Seatbelt through sandbox-exec on macOS) with the server's own arguments; the simulation
- * probes what the coding agent can read, write and execute. No model, prompt or network request is involved. Results
+ * probes what the coding agent can read, write and execute. No model, prompt or network request is involved. The check
+ * tests one of two modes, the configured one unless --mode says otherwise: `own` (ALA without --home, a fixture home
+ * standing in for yours) or `folder` (ALA with --home on an empty temporary folder). Neither mode reads or writes the
+ * owner's real agent state or login. Results
  * stay under tmp/ala-sandbox-check/. Two host fixtures live outside it and are removed on normal exit, on an error and on
  * SIGINT, SIGTERM or SIGHUP: a sentinel file in the host temporary folder and a helper process that carries a marker
  * variable (a SIGKILL ends the helper through its standard input but leaves the sentinel folder). */
@@ -11,9 +14,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawn,execFile,spawnSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
-import {resolveALA,createSettingsStore,alaArguments,alaEnvironment,ALA_EVENT_PREFIX,ABSENT_CONFIG} from './ala.mjs';
+import {resolveALA,alaArguments,alaEnvironment,ALA_EVENT_PREFIX,ABSENT_CONFIG} from './ala.mjs';
 import {leanExecutable,resolvePython} from './toolchain.mjs';
-import {agentHomeLocation,loadALALogins} from './agent-home.mjs';
+import {readAgentHome,loadALALogins} from './agent-home.mjs';
 
 // Keep in step with the Lean pin in toolchain.json and the Lean version named in the audit prompt in audit-ui.mjs.
 export const LEAN_VERSION='4.24.0';
@@ -26,9 +29,10 @@ export const CHECKS=[
  ['tmp_write_denied','It cannot write in the repository tmp folder',true],
  ['sibling_write_denied','It cannot write next to its run folder, where other runs live',true],
  ['outside_read_denied','A sentinel file in the host temporary folder is neither readable nor listed',true],
- ['home_private','HOME is private, and an entry of the real home is neither readable nor listed',true],
+ ['home_private','HOME is not the real home, and an entry of the real home is neither readable nor listed',true],
  ['other_process_environment','The environment of an outside process is unreadable, while a reader sees its own',true],
  ['real_agent_state_denied','The real coding-agent state folders are not the sandbox home\'s, and neither listable nor their login files readable',true],
+ ['agent_state_shared','Without a separate agent home the agent\'s state folder inside is the real one: the agent uses your login, and a run can read and change that folder (measured on a fixture home)',true],
  ['python','The resolved Python is version 3.12 or later',true],
  ['helper_import','The audit helper loads: <python> tools/document_audit.py --help',true],
  ['lean_version',`The repository Lean toolchain reports version ${LEAN_VERSION}`,true],
@@ -37,8 +41,30 @@ export const CHECKS=[
  ['home','Sandbox home, temporary folder and PATH',false],
  ['launchd_residual','Known macOS residual: existing launchd jobs (stated, not measured)',false],
 ];
-// The checks that must fail when nothing confines the probe. cwd, run_write and repo_read pass unconfined.
-export const CONFINEMENT=['repo_write_denied','tmp_write_denied','sibling_write_denied','outside_read_denied','home_private','other_process_environment','real_agent_state_denied'];
+// CHECKS is the union of both modes' rows (label lookups); a run uses only checksFor(its mode). real_agent_state_denied
+// exists only with a separate agent home (folder), agent_state_shared only without one (own): in own the first cannot
+// pass by design and is not listed, in folder the second cannot hold.
+export const MODES=['own','folder'];
+const ROW_OF_OTHER_MODE={own:'real_agent_state_denied',folder:'agent_state_shared'};
+export function checksFor(mode){
+ if(!MODES.includes(mode))throw Error('Unknown mode: '+mode);
+ return CHECKS.filter(([key])=>key!==ROW_OF_OTHER_MODE[mode]);
+}
+// The checks that must fail when nothing confines the probe. cwd, run_write and repo_read pass unconfined, and so does
+// agent_state_shared, which measures an exposure instead of a refusal.
+const CONFINEMENT_ROWS=['repo_write_denied','tmp_write_denied','sibling_write_denied','outside_read_denied','home_private','other_process_environment','real_agent_state_denied'];
+export const confinementFor=mode=>checksFor(mode).map(([key])=>key).filter(key=>CONFINEMENT_ROWS.includes(key));
+const MODE_NAMES={own:'own home',folder:'folder'};
+const MODE_TEXT={
+ own:'ALA was started without `--home`; a fixture home stood in for yours. In this mode a run can read and change the agent\'s state folder, including its login, and no row says otherwise.',
+ folder:'ALA was started with `--home`; an empty temporary folder stood in for the set folder. All runs share that folder, including the login kept there, and no row says otherwise.'
+};
+/** The two lines every report opens with: the configured mode against the mode checked (`configured` is a mode, or null
+ * when the setting could not be read), then the fixed statement of what the checked mode does and does not give. */
+export function modeStatement(mode,configured){
+ if(!MODES.includes(mode))throw Error('Unknown mode: '+mode);
+ return `Configured mode: ${configured?MODE_NAMES[configured]:'unknown (the setting could not be read)'}. Mode checked: ${MODE_NAMES[mode]}.\n\n${MODE_TEXT[mode]}`;
+}
 export const deniedProbes=({root,check,id})=>({repo_write_denied:path.join(root,`ala-sandbox-write-probe-${id}.txt`),tmp_write_denied:path.join(root,'tmp',`ala-sandbox-write-probe-${id}.txt`),sibling_write_denied:path.join(check,'outside-run-probe.txt')});
 // A fixed statement, not a measurement: the check creates no launchd job (ALA DS006, decision Q5).
 export const launchdResidual=(platform=process.platform)=>platform==='darwin'?'Known residual on macOS: a confined process can start or unload existing launchd jobs in your login session; see ALA DS006.':'not applicable';
@@ -67,16 +93,37 @@ const BENIGN_FILES=['.CFUserTextEncoding','.DS_Store','.hushlogin','.zshrc','.zp
 // folder would be), and (b) the real folder must not be listable and none of its login files readable, under the read
 // control CTL. Nothing is ever written there, and
 // nothing read is printed. The marker goes into $HOME only when HOME is neither the real home nor the state home.
+const identFunction=platform=>`ident() { ${platform==='darwin'?`stat -L -f '%d:%i'`:`stat -L -c '%d:%i'`} "$1" 2>/dev/null; }`;
+
+// agent_state_shared, inside (own mode, where `state` describes the fixture home that stands in for yours): $HOME/.codex
+// must have the device and inode of the fixture's .codex (the identity comparison of check_state, stat following a link),
+// and only then is a marker written into it, so a marker can only ever reach the fixture, never another .codex. The host
+// then looks for the marker in the fixture folder (see combineShared).
+function sharedSection({state,marker,platform}){
+ const folder=state?.folders.find(f=>f.relative==='.codex');
+ if(!folder||!marker)return `record agent_state_shared fail 'not shared: the host found no .codex in the fixture home'`;
+ return `SREAL='${state.home}'
+${identFunction(platform)}
+IN="$HOME/.codex"; ID='${folder.dev}:${folder.ino}'
+if [ ! -e "$IN" ]; then record agent_state_shared fail "not shared: \\$HOME/.codex does not exist inside (HOME=$HOME)"
+else
+ I=$(ident "$IN")
+ if [ -z "$I" ]; then record agent_state_shared fail "not shared: cannot tell the identity of \\$HOME/.codex (HOME=$HOME)"
+ elif [ "$I" != "$ID" ]; then record agent_state_shared fail "not shared: \\$HOME/.codex (HOME=$HOME) is not the folder $SREAL/.codex"
+ elif printf '%s\\n' '${marker.value}' > "$IN/${marker.name}" 2>/dev/null; then record agent_state_shared pass "shared: \\$HOME/.codex (HOME=$HOME) is the folder $SREAL/.codex, and a marker written into it"
+ else record agent_state_shared fail "not shared: \\$HOME/.codex is the folder $SREAL/.codex, but a marker cannot be written into it"; fi
+fi`;
+}
+
 function stateSection({state,marker,platform}){
  const writeMarker=marker?`SP=; [ -n "$SREAL" ] && SP=$(cd "$SREAL" 2>/dev/null && pwd -P)
 if [ -n "$HP" ] && [ "$HP" != "$HREAL" ] && [ "$HP" != "$SP" ]; then printf '%s\\n' '${marker.value}' > "$HOME/${marker.name}" 2>/dev/null; fi`:'';
  if(!state)return `SREAL=
 ${writeMarker}
 record real_agent_state_denied fail 'The host named no real home whose state folders the probe should check'`;
- const ident=platform==='darwin'?`stat -L -f '%d:%i'`:`stat -L -c '%d:%i'`;
  return `SREAL='${state.home}'
 ${writeMarker}
-ident() { ${ident} "$1" 2>/dev/null; }
+${identFunction(platform)}
 SFAIL=; SOK=
 check_state() {
  R="$SREAL/$1"; IN="$HOME/$1"; ID="$2"; shift 2
@@ -97,10 +144,12 @@ ${state.folders.map(f=>` check_state '${f.relative}' '${f.dev}:${f.ino}'${f.file
 fi`;
 }
 
-/** --negative-control: without --home, with HOME holding .codex, the row must fail because $HOME/.codex is that folder. */
-export function negativeControlOutcome(row){
- const ok=row?.status==='fail'&&/is your real folder/.test(row.detail||'');
- return {ok,detail:ok?`real_agent_state_denied failed as it must without --home: ${row.detail}`:`real_agent_state_denied did not fail with "is your real folder" without --home (${row?.status||'missing'}: ${row?.detail||'no detail'}), so the check could not tell a shared state folder`};
+/** Completes agent_state_shared (own mode) on the host. `marker`: the probe's marker was found in the fixture's .codex
+ * folder. The row passes only with it; any other outcome is `not shared: …`. */
+export function combineShared(row,{marker=false}={}){
+ if(row.status==='pass'&&marker)return Object.assign(row,{detail:row.detail+'; its marker reached the fixture folder'});
+ if(row.status==='pass')return failCheck(row,'not shared: the probe\'s marker is missing from the fixture\'s .codex folder');
+ return failCheck(row,/^not shared:/.test(row.detail||'')?row.detail:'not shared: '+(row.detail||'the probe did not record this check'));
 }
 
 /** Completes real_agent_state_denied on the host. `hostProblem`: a host control failed; `marker`: the probe's marker was
@@ -120,8 +169,11 @@ export function combineState(row,{hostProblem=null,marker=false,control=null}={}
 // absolute paths (or null when the host could not resolve them; the host then reports the two checks itself).
 // `sentinel`, `home` and `helper` describe the host fixtures: see makeSentinel, pickHomeEntry and startHelper.
 // `state` ({home, folders: [{relative, path, ino, files}]}, see agentStateFolders) names the coding-agent state folders of
-// a real home and `marker` ({name, value}) is written into $HOME so the host can tell which folder HOME was.
-export function probeScript({run,root,check,id,python=null,lean=null,platform=process.platform,sentinel,home,helper,reader,state=null,marker=null}){
+// a real home (folder mode) or of the fixture home (own mode), and `marker` ({name, value}) is written into $HOME (folder)
+// or into $HOME/.codex when that is the fixture's (own) so the host can tell which folder HOME was. `mode` picks the row:
+// real_agent_state_denied in folder, agent_state_shared in own.
+export function probeScript({run,root,check,id,python=null,lean=null,platform=process.platform,sentinel,home,helper,reader,state=null,marker=null,mode='folder'}){
+ if(!MODES.includes(mode))throw Error('Unknown mode: '+mode);
  const values=[run,root,check,id,python||'',lean||'',sentinel.file,sentinel.dir,sentinel.marker,sentinel.base,home.real,home.entry||'',helper.name,helper.value,String(helper.pid),reader,
   ...(state?[state.home,...state.folders.flatMap(f=>[f.relative,String(f.dev),String(f.ino),...f.files])]:[]),...(marker?[marker.name,marker.value]:[])];
  for(const value of values)if(/['\r\n\\]/.test(value))throw Error('This check does not support quotes, backslashes or line breaks in paths: '+value);
@@ -187,7 +239,7 @@ case "$OE" in
  "other=denied"*" own=found") record other_process_environment pass "hidden: the environment of outside process ${helper.pid} is refused, while the reader sees its own ($OE)";;
  *) record other_process_environment fail "The reader did not give a usable answer (exit $OR): $OE";;
 esac
-${stateSection({state,marker,platform})}
+${mode==='own'?sharedSection({state,marker,platform}):stateSection({state,marker,platform})}
 ${python?`PY='${python}'
 V=$("$PY" -c 'import sys; print(sys.version.split()[0])' 2>&1)
 if "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then record python pass "$PY $V"; else record python fail "$PY $V; 3.12 or later is required"; fi
@@ -219,14 +271,14 @@ exit 0
 
 // `overrides` replaces rows the host knows better than the probe: a Python or Lean location that did not resolve, and
 // the launchd line, which is stated rather than measured. `pythonWarning` is the resolver's note on a home-folder interpreter.
-export function evaluate(tsv,{platform=process.platform,pythonError=null,pythonWarning=null,leanError=null}={}){
+export function evaluate(tsv,{mode='folder',platform=process.platform,pythonError=null,pythonWarning=null,leanError=null}={}){
  const rows=new Map();
  for(const line of String(tsv||'').split('\n')){if(!line)continue;const [key,status,...detail]=line.split('\t');rows.set(key,{status,detail:detail.join(' ')});}
  for(const key of pythonError?['python','helper_import']:[])rows.set(key,{status:'fail',detail:pythonError});
  for(const key of leanError?['lean_version','lean_check']:[])rows.set(key,{status:'fail',detail:leanError});
  rows.set('launchd_residual',{status:'info',detail:launchdResidual(platform)});
  if(pythonWarning&&rows.get('python')&&!pythonError)rows.get('python').detail+=' Warning: '+pythonWarning;
- return CHECKS.map(([key,label,required])=>{const row=rows.get(key);return {key,label,required,status:row?.status||'missing',detail:row?.detail||'The probe did not record this check.',ok:!required||row?.status==='pass'};});
+ return checksFor(mode).map(([key,label,required])=>{const row=rows.get(key);return {key,label,required,status:row?.status||'missing',detail:row?.detail||'The probe did not record this check.',ok:!required||row?.status==='pass'};});
 }
 // A host-side finding overrides whatever the probe reported for the check.
 export const failCheck=(check,detail)=>Object.assign(check,{status:'fail',ok:false,detail});
@@ -240,8 +292,8 @@ const withoutCredentials=env=>Object.fromEntries(Object.entries(env).filter(([ke
 const withoutAgentState=(env,logins)=>{const names=new Set(Object.keys(logins.homeEnvironment({},'/')).filter(key=>key!=='HOME'));return Object.fromEntries(Object.entries(env).filter(([key])=>!names.has(key)));};
 // ALA's own discovery, imported from the ALA folder that will run, answers which binaries it would start.
 export const alaDiscovery=entry=>async env=>(await import(pathToFileURL(path.join(path.dirname(path.dirname(entry)),'src/coding-agents/discovery.mjs')).href)).discoverCodingAgents({env});
-// Last look before ALA starts: no model credential is in the environment, the agent home is an empty folder (or, for
-// the negative control, holds exactly the fixture `homeFiles`), and ALA will really run this check's probe script. ALA
+// Last look before ALA starts: no model credential is in the environment, the agent home is an empty folder (or, in own
+// mode, holds exactly the fixture `homeFiles`), and ALA will really run this check's probe script. ALA
 // skips a CODEX_BIN that is not executable and then falls back to <HOME>/.local/bin/codex and to `codex` on PATH, so
 // the value of the variable proves nothing: discovery, with the environment ALA derives (`homeEnvironment(env, home)`
 // for a --home run), must return a Codex record whose binary is the real path of the probe. Only names are reported.
@@ -292,11 +344,11 @@ export function removeSentinel({base,dir}){
 
 const BASE_PREFIX='ala-sandbox-base-';
 /** The check's own agent-home base, beside the sentinel in the host temporary folder (outside the repository and the
- * real home), laid out as the server's: homes/check-home is the --home of the run. Also the positive and negative control
- * homes. */
+ * real home), laid out as the server's: homes/check-home is the --home of the run in folder mode. Also the positive control
+ * homes, and ownHome, the fixture that stands in for your home in own mode. */
 export async function makeTemporaryBase(sentinel){
  const dir=await fs.realpath(await fs.mkdtemp(path.join(sentinel.base,BASE_PREFIX)));
- const base={base:sentinel.base,dir,homes:path.join(dir,'homes'),checkHome:path.join(dir,'homes','check-home'),controlHome:path.join(dir,'homes','control-home'),controlReal:path.join(dir,'control-real-home'),negativeHome:path.join(dir,'negative-home'),neverCreated:path.join(dir,'never-created-home')};
+ const base={base:sentinel.base,dir,homes:path.join(dir,'homes'),checkHome:path.join(dir,'homes','check-home'),controlHome:path.join(dir,'homes','control-home'),controlReal:path.join(dir,'control-real-home'),ownHome:path.join(dir,'own-home'),neverCreated:path.join(dir,'never-created-home')};
  try{for(const folder of [base.homes,base.checkHome,base.controlHome])await fs.mkdir(folder,{mode:0o700});}catch(error){removeTemporaryBase(base);throw error;}
  return base;
 }
@@ -415,17 +467,27 @@ async function exists(file){try{await fs.lstat(file);return true;}catch{return f
 
 const markerFound=async(home,marker)=>(await fs.readFile(path.join(home,marker.name),'utf8').catch(()=>null))===marker.value+'\n';
 const INSTRUCTIONS='# Sandbox check\n\nModel-free ALA sandbox check. The simulated Codex ignores this text and never contacts a model.\n';
+const USAGE='Usage: node tools/check-ala-sandbox.mjs [--mode own|folder]';
 
 // `homeDir` (the real home), `helperOptions` and `log` are inputs so that tests never read the real home or start a real
-// helper. With `negativeControl`, ALA runs once without --home, with HOME set to a fixture home that holds .codex: the
-// check then exits 0 only when real_agent_state_denied fails with "is your real folder".
-export async function main({root,timeout=120000,helperOptions={},homeDir=os.homedir(),log=console.log,negativeControl=false}={}){
+// helper. `mode` is `own` or `folder`; without it the configured mode is checked, read with readAgentHome at `homeDir`
+// (AUDIT_AGENT_HOME is ignored). The setting is also read when `mode` is given, for the report's "Configured mode" line
+// and the set folder that ALA must not be inside; an unreadable setting then only leaves the configured mode unknown.
+// own: ALA runs without --home (the server's arguments with home null), HOME and every agent state variable pointing
+// to a fixture home that holds only .codex/auth.json with {}, and the row agent_state_shared measures that the agent's
+// state folder inside is the fixture's. folder: ALA runs with --home on an empty temporary folder, plus the positive
+// control of real_agent_state_denied. Neither mode reads or writes the real agent state or login.
+export async function main({root,timeout=120000,helperOptions={},homeDir=os.homedir(),log=console.log,mode}={}){
  root??=await fs.realpath(path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'));
- // ALA is located as the server does, and never inside tmp/ or the
- // agent-home base, because this check imports ALA's modules unconfined. ALA_CLI is the operator's own statement.
- let homeBase=null;try{homeBase=agentHomeLocation({env:process.env,home:homeDir}).base;}catch{}
- const ala=resolveALA(root,createSettingsStore(path.join(root,'tmp/readable-pilot/agent-settings.md')).read(),{refused:[path.join(root,'tmp'),homeBase].filter(Boolean)});
- if(!ala.found){console.error('ALA was not found. Checked: '+ala.checked.map(c=>c.location+' ('+c.reason+')').join(', ')+'. Run "npm install" in this repository, set ALA_CLI or save the ALA location in Agent settings.');return 2;}
+ if(mode!==undefined&&!MODES.includes(mode)){console.error(USAGE);return 2;}
+ let setting=null,settingError=null;
+ try{setting=readAgentHome({root,home:homeDir});}catch(error){settingError=error;}
+ if(mode===undefined){if(settingError){console.error(settingError.message);return 2;}mode=setting.mode;}
+ const own=mode==='own',configured=setting?.mode??null;
+ // ALA is located as the server does, and never inside tmp/ or the set agent-home folder, because this check imports
+ // ALA's modules unconfined. ALA_CLI is the operator's own statement.
+ const ala=resolveALA(root,{refused:[path.join(root,'tmp'),setting?.folder].filter(Boolean)});
+ if(!ala.found){console.error('ALA was not found. Checked: '+ala.checked.map(c=>c.location+' ('+c.reason+')').join(', ')+'. Run "npm install" in this repository, or set ALA_CLI to the AdvancedLanguageAgent checkout.');return 2;}
  let logins;try{logins=await loadALALogins(ala.entry);}catch(error){console.error(error.message);return 2;}
  let python=null,pythonError=null,lean=null,leanError=null;
  try{python=resolvePython();}catch(error){pythonError=error.message;}
@@ -445,16 +507,16 @@ export async function main({root,timeout=120000,helperOptions={},homeDir=os.home
  const cleanup=async()=>cleaned??={helperStopped:helper?await helper.stop():null,sentinelRemoved:removeSentinel(sentinel),baseRemoved:removeTemporaryBase(temporary)};
  const clean=withoutAgentState(withoutCredentials(process.env),logins);
  const marker={name:'.ala-sandbox-check-marker-'+crypto.randomBytes(4).toString('hex'),value:crypto.randomBytes(12).toString('hex')};
- // One probe run through ALA. `home` is the --home folder (null for the negative control, whose arguments are built
- // without alaArguments, which requires one). Returns the evaluated rows and ALA's result.
+ // One probe run through ALA. `home` is the --home folder (null in own mode, whose fixture home `homeFiles` is
+ // {home, files}). Returns the evaluated rows of this mode and ALA's result.
  async function probeRun({name,runDir,codexFile,state,home,homeFiles=null,env,args}){
   await fs.mkdir(runDir,{recursive:true});
-  await fs.writeFile(codexFile,probeScript({run:runDir,root,check,id:name,python:python?.path,lean,sentinel,home:homeEntry,helper,reader,state,marker}),{mode:0o755});
+  await fs.writeFile(codexFile,probeScript({run:runDir,root,check,id:name,python:python?.path,lean,sentinel,home:homeEntry,helper,reader,state,marker,mode}),{mode:0o755});
   await fs.chmod(codexFile,0o755); // a restrictive umask must not clear the execute bit
   await fs.writeFile(path.join(runDir,'instructions.md'),INSTRUCTIONS);
   await assertModelFree({env,codex:codexFile,home:home||homeFiles.home,homeFiles:homeFiles?.files||null,homeEnvironment:home?logins.homeEnvironment:null,discover:alaDiscovery(ala.entry)});
   const result=await runALA(args,env,runDir,timeout);
-  const checks=evaluate(await fs.readFile(path.join(runDir,'probe-results.tsv'),'utf8').catch(()=>''),{pythonError,pythonWarning:python?.warning,leanError});
+  const checks=evaluate(await fs.readFile(path.join(runDir,'probe-results.tsv'),'utf8').catch(()=>''),{mode,pythonError,pythonWarning:python?.warning,leanError});
   const finalMessage=await fs.readFile(path.join(runDir,'final-message.md'),'utf8').catch(()=>'');
   const diagnostics=result.stderr.split('\n').filter(line=>line.trim()&&!line.startsWith(ALA_EVENT_PREFIX));
   return {result,checks,byKey:Object.fromEntries(checks.map(c=>[c.key,c])),finalMessage,diagnostics,args};
@@ -463,59 +525,64 @@ export async function main({root,timeout=120000,helperOptions={},homeDir=os.home
  let homeEntry;
  try{
   helper=await startHelper(helperOptions);
+  // home_private is measured against the real home in both modes (the fixture home has no eligible entry).
   homeEntry=await pickHomeEntry({home:homeDir,avoid:[root,check,ala.entry,path.dirname(path.dirname(ala.entry)),process.execPath,python?.path,lean],above:[os.tmpdir()]});
-  if(negativeControl){
-   const files=await makeCodexFixture(temporary.negativeHome),state=await agentStateFolders({logins,home:temporary.negativeHome,probeHome:temporary.neverCreated});
-   const args=[ala.entry,'--ca','codex','--config',path.join(run,ABSENT_CONFIG),'--cwd',run,'--folder',root,'--taskFile',path.join(run,'instructions.md'),'--output',path.join(run,'final-message.md')];
-   // No --home: ALA's default, with every agent state variable pointing into the fixture home.
-   const env=alaEnvironment({...logins.homeEnvironment(clean,temporary.negativeHome),CODEX_BIN:codex});
-   log(`ALA: ${ala.entry}\nCheck folder: ${check}\nNegative control: no --home, HOME=${temporary.negativeHome} (holds only .codex/auth.json with {})\nRunning the simulated Codex through ALA…`);
-   const probe=await probeRun({name:id,runDir:run,codexFile:codex,state,home:null,homeFiles:{home:temporary.negativeHome,files},env,args});
-   const outcome=negativeControlOutcome(probe.byKey.real_agent_state_denied);
-   const done=await cleanup();
-   const report='# ALA sandbox check: negative control\n\nThis model-free run started ALA without `--home`, with `HOME` and every agent state variable pointing to a fixture home that holds only `.codex/auth.json` with `{}`. The row `real_agent_state_denied` must then fail with "is your real folder", which shows the row can detect a shared state folder.\n\n'+
-    `**Result: ${outcome.ok?'passed':'failed'}.** ${alaLineOf(probe)} ${outcome.detail}\n\n## ALA invocation\n\n\`\`\`sh\n${[process.execPath,...args].join(' ')}\n\`\`\`\n`+(probe.diagnostics.length?'\n## ALA diagnostics\n\n```text\n'+probe.diagnostics.slice(-40).join('\n')+'\n```\n':'');
-   await fs.writeFile(path.join(check,'report.md'),report);
-   log('\n'+report+`\nReport: ${path.join(check,'report.md')}`);
-   return outcome.ok&&done.helperStopped&&done.sentinelRemoved&&done.baseRemoved?0:1;
+  let state,args,env,description,homeFiles=null;
+  if(own){
+   homeFiles={home:temporary.ownHome,files:await makeCodexFixture(temporary.ownHome)};
+   state=await agentStateFolders({logins,home:temporary.ownHome,probeHome:temporary.neverCreated});
+   // The server's own arguments with home null (no --home); every agent state variable points into the fixture home.
+   args=alaArguments({entry:ala.entry,selection:{agent:'codex'},cwd:run,home:null,root,taskFile:path.join(run,'instructions.md'),output:path.join(run,'final-message.md')});
+   env=alaEnvironment({...logins.homeEnvironment(clean,temporary.ownHome),CODEX_BIN:codex});
+   description=`CODEX_BIN=${codex} (the simulated Codex)  no --home, HOME=${temporary.ownHome} (the fixture home: only .codex/auth.json with {})`;
+  }else{
+   state=await agentStateFolders({logins,home:homeDir,probeHome:temporary.neverCreated});
+   args=alaArguments({entry:ala.entry,selection:{agent:'codex'},cwd:run,home:temporary.checkHome,root,taskFile:path.join(run,'instructions.md'),output:path.join(run,'final-message.md')});
+   // The simulated Codex replaces the real binary. ALA derives every agent state variable from the empty --home.
+   env=alaEnvironment({...clean,CODEX_BIN:codex});
+   description=`CODEX_BIN=${codex} (the simulated Codex)  --home ${temporary.checkHome} (empty)`;
   }
-  const state=await agentStateFolders({logins,home:homeDir,probeHome:temporary.neverCreated});
-  const args=alaArguments({entry:ala.entry,selection:{agent:'codex'},cwd:run,home:temporary.checkHome,root,taskFile:path.join(run,'instructions.md'),output:path.join(run,'final-message.md')});
-  // The simulated Codex replaces the real binary. ALA derives every agent state variable from the empty --home.
-  const env=alaEnvironment({...clean,CODEX_BIN:codex});
-  log(`ALA: ${ala.entry}\nCheck folder: ${check}\nCODEX_BIN=${codex} (the simulated Codex)  --home ${temporary.checkHome} (empty)\nHost helper: process ${helper.pid}, environment variable ${helper.name}\nReal agent state folders checked: ${state.folders.map(f=>f.path).join(', ')||'none'}\nRunning the simulated Codex through ALA…`);
+  log(`ALA: ${ala.entry}\nCheck folder: ${check}\nMode checked: ${MODE_NAMES[mode]}\n${description}\nHost helper: process ${helper.pid}, environment variable ${helper.name}\n${own?`Fixture agent state folders: ${state.folders.map(f=>f.path).join(', ')||'none'}`:`Real agent state folders checked: ${state.folders.map(f=>f.path).join(', ')||'none'}`}\nRunning the simulated Codex through ALA…`);
   const before=await confirmOnHost({helper,reader});
-  const main=await probeRun({name:id,runDir:run,codexFile:codex,state,home:temporary.checkHome,env,args});
+  const main=await probeRun({name:id,runDir:run,codexFile:codex,state,home:own?null:temporary.checkHome,homeFiles,env,args});
   const after=await confirmOnHost({helper,reader,attempts:1});
   const {checks,byKey}=main;
-  // Host-side confirmation: the run-folder file must reach the host and no refused write may exist.
+  // Host-side confirmations, in both modes: the run-folder file must reach the host and no refused write may exist.
   if(byKey.run_write.status==='pass'&&!await exists(path.join(run,'write-probe.txt')))failCheck(byKey.run_write,'The write succeeded inside the sandbox but the file is missing on the host.');
   for(const [key,file] of Object.entries(deniedProbes({root,check,id})))if(await exists(file)){failCheck(byKey[key],'The probe file exists on the host: '+file);await fs.rm(file,{force:true});}
   // The refusals above only mean something if the host can read the sentinel, the home entry and the helper's marker.
   if(await fs.readFile(sentinel.file,'utf8').catch(()=>null)!==sentinel.marker)failCheck(byKey.outside_read_denied,'The host can no longer read the sentinel '+sentinel.file+', so a refusal inside proves nothing.');
   if(homeEntry.entry&&await fs.access(path.join(homeEntry.real,homeEntry.entry),fs.constants.R_OK).then(()=>false,()=>true))failCheck(byKey.home_private,'The host cannot read '+path.join(homeEntry.real,homeEntry.entry)+', so a refusal inside proves nothing.');
   for(const confirmation of [before,after])if(!confirmation.ok)failCheck(byKey.other_process_environment,confirmation.detail);
-  const mainMarker=await markerFound(temporary.checkHome,marker);
-  // Positive control [review 4]: the same probe through ALA with --home and a fixture real home that holds .codex/.
-  // It must pass naming the fixture folder, and its marker must reach its own --home folder.
-  await makeCodexFixture(temporary.controlReal);
-  const controlState=await agentStateFolders({logins,home:temporary.controlReal,probeHome:temporary.neverCreated});
-  const controlRun=path.join(check,'control-run'),controlCodex=path.join(bin,'codex-control');
-  const controlArgs=alaArguments({entry:ala.entry,selection:{agent:'codex'},cwd:controlRun,home:temporary.controlHome,root,taskFile:path.join(controlRun,'instructions.md'),output:path.join(controlRun,'final-message.md')});
-  log('Running the positive control of real_agent_state_denied through ALA…');
-  const control=await probeRun({name:id+'-control',runDir:controlRun,codexFile:controlCodex,state:controlState,home:temporary.controlHome,env:alaEnvironment({...clean,CODEX_BIN:controlCodex}),args:controlArgs});
-  for(const file of Object.values(deniedProbes({root,check,id:id+'-control'})))await fs.rm(file,{force:true});
-  const controlRow=control.byKey.real_agent_state_denied;
-  combineState(byKey.real_agent_state_denied,{hostProblem:stateHostProblem(state),marker:mainMarker,control:{status:controlRow.status,detail:controlRow.detail,marker:await markerFound(temporary.controlHome,marker)}});
+  let control=null,controlArgs=null,controlSection='';
+  if(own){
+   // The marker the probe wrote into $HOME/.codex must be in the fixture's folder.
+   combineShared(byKey.agent_state_shared,{marker:await markerFound(path.join(temporary.ownHome,'.codex'),marker)});
+  }else{
+   const mainMarker=await markerFound(temporary.checkHome,marker);
+   // Positive control [review 4]: the same probe through ALA with --home and a fixture real home that holds .codex/.
+   // It must pass naming the fixture folder, and its marker must reach its own --home folder.
+   await makeCodexFixture(temporary.controlReal);
+   const controlState=await agentStateFolders({logins,home:temporary.controlReal,probeHome:temporary.neverCreated});
+   const controlRun=path.join(check,'control-run'),controlCodex=path.join(bin,'codex-control');
+   controlArgs=alaArguments({entry:ala.entry,selection:{agent:'codex'},cwd:controlRun,home:temporary.controlHome,root,taskFile:path.join(controlRun,'instructions.md'),output:path.join(controlRun,'final-message.md')});
+   log('Running the positive control of real_agent_state_denied through ALA…');
+   control=await probeRun({name:id+'-control',runDir:controlRun,codexFile:controlCodex,state:controlState,home:temporary.controlHome,env:alaEnvironment({...clean,CODEX_BIN:controlCodex}),args:controlArgs});
+   for(const file of Object.values(deniedProbes({root,check,id:id+'-control'})))await fs.rm(file,{force:true});
+   const controlRow=control.byKey.real_agent_state_denied;
+   combineState(byKey.real_agent_state_denied,{hostProblem:stateHostProblem(state),marker:mainMarker,control:{status:controlRow.status,detail:controlRow.detail,marker:await markerFound(temporary.controlHome,marker)}});
+   controlSection='\n## Positive control of real_agent_state_denied\n\n'+alaLineOf(control)+' Row: '+controlRow.status+' — '+cell(controlRow.detail)+'\n\n```sh\n'+[process.execPath,...controlArgs].join(' ')+'\n```\n';
+  }
   const alaOk=main.result.code===0&&!main.result.timedOut&&main.finalMessage.includes(PROBE_MESSAGE);
   const passed=alaOk&&checks.every(c=>c.ok);
   const done=await cleanup(),homeAfter=await homeNames(),homeChanged=homeAfter.filter(name=>!homeBefore.includes(name)).length+homeBefore.filter(name=>!homeAfter.includes(name)).length;
-  const report='# ALA sandbox check\n\nThis model-free check ran a simulated Codex through ALA with the same arguments the audit server uses, including a dedicated `--home`. No model, prompt or network request was involved.\n\n'+
+  const report='# ALA sandbox check\n\n'+modeStatement(mode,configured)+'\n\n'+
+   (own?'This model-free check ran a simulated Codex through ALA with the same arguments the audit server uses without a separate agent home, so without `--home`. No model, prompt or network request was involved.':'This model-free check ran a simulated Codex through ALA with the same arguments the audit server uses, including a dedicated `--home`. No model, prompt or network request was involved.')+'\n\n'+
    `**Result: ${passed?'passed':'failed'}.** ${alaLineOf(main)}\n\n| Check | Required | Result | Detail |\n| --- | --- | --- | --- |\n`+
    checks.map(c=>`| ${cell(c.label)} | ${c.required?'Yes':'No'} | ${c.status} | ${cell(c.detail)} |`).join('\n')+
-   '\n\n## ALA invocation\n\n```sh\n'+[process.execPath,...args].join(' ')+'\n```\n\nThe environment set `CODEX_BIN` to the simulated Codex (`'+codex+'`) and `ALA_EVENT_STREAM=1`; `--home` was an empty folder (`'+temporary.checkHome+'`); `PLOINKY_*`, `OPENAI_*`, `ANTHROPIC_*`, `CLAUDE_CODE_OAUTH_TOKEN` and the agent state variables were removed.\n'+
-   '\n## Positive control of real_agent_state_denied\n\n'+alaLineOf(control)+' Row: '+controlRow.status+' — '+cell(controlRow.detail)+'\n\n```sh\n'+[process.execPath,...controlArgs].join(' ')+'\n```\n'+
-   `\n## Host fixtures\n\nA sentinel file in \`${sentinel.dir}\` (removed: ${done.sentinelRemoved?'yes':'NO'}), a helper process ${helper.pid} with the marker variable \`${helper.name}\` (stopped: ${done.helperStopped?'yes':'NO'}), and the temporary base \`${temporary.dir}\` with the --home folders and the control home (removed: ${done.baseRemoved?'yes':'NO'}). The check writes nothing in the real home (${homeDir}); its list of entries was ${homeChanged?`seen to change by ${homeChanged} entries while it ran, which another program must have done`:'unchanged while it ran'}.\n`+
+   '\n\n## ALA invocation\n\n```sh\n'+[process.execPath,...args].join(' ')+'\n```\n\nThe environment set `CODEX_BIN` to the simulated Codex (`'+codex+'`) and `ALA_EVENT_STREAM=1`; '+(own?'`--home` was not passed, and `HOME` and the agent state variables pointed to the fixture home (`'+temporary.ownHome+'`, holding only `.codex/auth.json` with `{}`)':'`--home` was an empty folder (`'+temporary.checkHome+'`)')+'; `PLOINKY_*`, `OPENAI_*`, `ANTHROPIC_*`, `CLAUDE_CODE_OAUTH_TOKEN` and the agent state variables of the caller were removed.\n'+
+   controlSection+
+   `\n## Host fixtures\n\nA sentinel file in \`${sentinel.dir}\` (removed: ${done.sentinelRemoved?'yes':'NO'}), a helper process ${helper.pid} with the marker variable \`${helper.name}\` (stopped: ${done.helperStopped?'yes':'NO'}), and the temporary base \`${temporary.dir}\` with the fixture homes (removed: ${done.baseRemoved?'yes':'NO'}). The check writes nothing in the real home (${homeDir}); its list of entries was ${homeChanged?`seen to change by ${homeChanged} entries while it ran, which another program must have done`:'unchanged while it ran'}.\n`+
    (main.diagnostics.length?'\n## ALA diagnostics\n\n```text\n'+main.diagnostics.slice(-40).join('\n')+'\n```\n':'');
   await fs.writeFile(path.join(check,'report.md'),report);
   log('\n'+report+`\nReport: ${path.join(check,'report.md')}`);
@@ -527,7 +594,7 @@ export async function main({root,timeout=120000,helperOptions={},homeDir=os.home
 }
 
 if(process.argv[1]&&import.meta.url===pathToFileURL(await fs.realpath(process.argv[1])).href){
- const argv=process.argv.slice(2);
- if(argv.some(arg=>arg!=='--negative-control')){console.error('Usage: node tools/check-ala-sandbox.mjs [--negative-control]');process.exitCode=2;}
- else process.exitCode=await main({negativeControl:argv.includes('--negative-control')});
+ const argv=process.argv.slice(2),chosen=argv.length===2&&argv[0]==='--mode'?argv[1]:undefined;
+ if(argv.length!==0&&!MODES.includes(chosen)){console.error(USAGE);process.exitCode=2;}
+ else process.exitCode=await main({mode:chosen});
 }
