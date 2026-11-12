@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('markdown_audit_tested', ROOT / 'skills/evidence-to-proof-review/scripts/markdown_audit.py')
 md = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(md)
-LEAN = ROOT / 'tmp/toolchains/lean-4.24.0-linux/bin/lean'
+from lean_location import lean_path
+LEAN = lean_path()
 
 
 class MarkdownAuditTests(unittest.TestCase):
@@ -187,7 +188,7 @@ class MarkdownAuditTests(unittest.TestCase):
             md.validate(self.root)
         self.assertFalse(list(self.root.rglob('*.json')) + list(self.root.rglob('*.jsonl')))
 
-    @unittest.skipUnless(LEAN.is_file(), 'Repository-local Lean unavailable')
+    @unittest.skipUnless(LEAN.is_file(), 'Repository-local Lean unavailable; run "node tools/setup-toolchain.mjs"')
     def test_real_lean_markdown_only_end_to_end(self):
         (self.root / 'models/Count.lean').write_text('import Std\nnamespace Count\ntheorem total : (1 + 2 : Nat) = 3 := by decide\nend Count\n')
         self.finding_sections['Formal status'] = 'proved'

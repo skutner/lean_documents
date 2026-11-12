@@ -9,12 +9,13 @@ import unittest
 from unittest.mock import patch
 
 from contract_fixture import annotate_synthetic_finding, register_synthetic_report
+from lean_location import lean_path
 
 MODULE = Path(__file__).resolve().parents[1] / 'skills/evidence-to-proof-review/scripts/audit.py'
 spec = importlib.util.spec_from_file_location('audit', MODULE)
 audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)
-LEAN = os.environ.get('AUDIT_TEST_LEAN', '/home/salboaie/.local/share/evidence-to-proof/toolchains/lean-4.24.0-linux/bin/lean')
+LEAN = str(lean_path())
 TEST_ROOT = MODULE.parents[3] / 'tmp'
 TEST_ROOT.mkdir(exist_ok=True)
 TEST_RUN = Path(tempfile.mkdtemp(prefix='audit-tests-', dir=TEST_ROOT))

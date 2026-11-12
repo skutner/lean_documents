@@ -7,10 +7,11 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from test_audit import audit, TEST_ROOT
+from lean_location import lean_path
 from contract_fixture import annotate_synthetic_finding, register_synthetic_report
 
 RUN = Path(tempfile.mkdtemp(prefix='general-method-tests-', dir=TEST_ROOT))
-LEAN = os.environ.get('AUDIT_TEST_LEAN', '/home/salboaie/.local/share/evidence-to-proof/toolchains/lean-4.24.0-linux/bin/lean')
+LEAN = str(lean_path())
 
 
 class GeneralMethodTests(unittest.TestCase):

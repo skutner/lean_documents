@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """Audit one supplied report with internal data and readable narrative documents."""
 from __future__ import annotations
+import sys
+# The 3.12 floor stays. This guard and the syntax of the whole file (Python 3.9 grammar) let an older interpreter report
+# the problem instead of failing with a SyntaxError. Run directly, it exits with status 1; imported, it raises ImportError.
+if sys.version_info < (3, 12):
+    _message = ('Python 3.12 or later is required (tools/document_audit.py). Found: %s %d.%d.%d. Run "node tools/setup-toolchain.mjs" to install a pinned interpreter into tmp/toolchains, or set AUDIT_PYTHON to an absolute path. Other interpreters under your home folder are not visible inside the ALA sandbox.'
+                % (sys.executable or 'python', *tuple(sys.version_info)[:3]))
+    if __name__ == '__main__':
+        sys.stderr.write(_message + '\n')
+        raise SystemExit(1)
+    raise ImportError(_message)
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -641,7 +651,8 @@ def report_content(data, root=None):
         summary = finding['executive_summary']; ident = finding['claim_id']
         title = finding.get('title') or ' '.join(finding['report_quote'].split())
         if len(title) > 85: title = title[:82].rsplit(' ', 1)[0] + '…'
-        text += f'## {ident} — {title}\n\n' + summary['conclusion'] + tr(root, '\n\n### How this was checked\n\n') + summary['how_verified'] + tr(root, '\n\n### Limits\n\n') + summary['limits'] + f"{tr(root, '\n\n[Full individual analysis](findings/')}{ident}.md)\n\n"
+        link = tr(root, '\n\n[Full individual analysis](findings/')  # Computed apart: a backslash inside an f-string expression needs Python 3.12.
+        text += f'## {ident} — {title}\n\n' + summary['conclusion'] + tr(root, '\n\n### How this was checked\n\n') + summary['how_verified'] + tr(root, '\n\n### Limits\n\n') + summary['limits'] + f"{link}{ident}.md)\n\n"
     text += tr(root, '## Audit records\n\n[Input inventory](input-inventory.md) · [Claim coverage](claims.md) · [Executed validation](validation.md)\n')
     return text
 

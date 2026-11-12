@@ -10,8 +10,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'skills/evidence-to-proof-review/scripts'))
 import markdown_proofs as runner
+from lean_location import lean_path
 
-LEAN = os.environ.get('AUDIT_TEST_LEAN', '/home/salboaie/.local/share/evidence-to-proof/toolchains/lean-4.24.0-linux/bin/lean')
+LEAN = str(lean_path())
 
 
 class MarkdownProofTests(unittest.TestCase):

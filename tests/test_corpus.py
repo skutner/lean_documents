@@ -20,7 +20,8 @@ import audit
 import corrections
 from test_extractors import write_pdf, write_docx
 from contract_fixture import annotate_synthetic_finding, register_synthetic_report
-LEAN=Path(os.environ.get('AUDIT_TEST_LEAN', '/home/salboaie/.local/share/evidence-to-proof/toolchains/lean-4.24.0-linux/bin/lean'))
+from lean_location import lean_path
+LEAN=lean_path()
 
 
 class CorpusTests(unittest.TestCase):

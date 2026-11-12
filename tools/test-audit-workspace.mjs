@@ -1,15 +1,104 @@
 import {spawn} from 'node:child_process';
 import fs from 'node:fs/promises';
+import {existsSync} from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 
-// Read-only browser regression against the existing local audit server.
+// Read-only browser regression against the existing local audit server. The API needs the server's key, read from its
+// key file (AUDIT_AGENT_HOME or the default base). The browser profile stores the key, so it lives in the host temporary
+// folder, which no run can read, and is removed afterwards; results stay under tmp/ and never hold the key.
+// Chrome speaks its debugging protocol over a pipe (--remote-debugging-pipe), never over a TCP port: a debugging port
+// listens on loopback without credentials, where a confined run could attach and read the key or drive the browser.
+//
+//   node tools/test-audit-workspace.mjs [<example id> [<report path>]]
+//   node tools/test-audit-workspace.mjs --smoke
+//
+// --smoke needs no pilot server: it starts Chrome the same way with a throwaway profile, evaluates one expression on
+// about:blank, checks that no TCP debugging endpoint exists, removes the profile and exits 0.
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const PROFILE_PREFIX='workspace-browser-profile-';
+
+/** A fresh profile folder in the host temporary folder, and its guarded removal (only a folder of that name there). */
+const makeProfileRoot=async()=>fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),PROFILE_PREFIX)));
+async function removeProfileRoot(profileRoot){
+ if(profileRoot&&path.dirname(profileRoot)===await fs.realpath(os.tmpdir())&&path.basename(profileRoot).startsWith(PROFILE_PREFIX))await fs.rm(profileRoot,{recursive:true,force:true,maxRetries:3});
+}
+async function stopChrome(chrome){
+ if(chrome.pid===undefined||chrome.exitCode!==null||chrome.signalCode!==null)return;
+ chrome.kill('SIGTERM');
+ await new Promise(resolve=>{if(chrome.exitCode!==null||chrome.signalCode!==null)return resolve();chrome.once('exit',resolve);setTimeout(resolve,5000);});
+ if(chrome.exitCode===null&&chrome.signalCode===null)chrome.kill('SIGKILL');
+}
+
+/** Starts Chrome with the debugging protocol on descriptors 3 (commands to Chrome) and 4 (answers and events from it),
+ * each message JSON followed by a NUL byte. Over the pipe the connection is attached to the browser target, so the page
+ * target is attached with flatten:true and its sessionId goes with every page command. Fails, after stopping Chrome,
+ * when the profile holds a DevToolsActivePort file, which Chrome writes only for a TCP debugging endpoint. */
+async function startChrome(profileRoot){
+ const profile=path.join(profileRoot,'profile');
+ const chrome=spawn('google-chrome',['--headless','--no-sandbox','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-dev-shm-usage','--remote-debugging-pipe','--user-data-dir='+profile,'--disk-cache-dir='+path.join(profileRoot,'cache'),'about:blank'],{cwd:root,stdio:['ignore','ignore','pipe','pipe','pipe']});
+ let log='',buffer='',seq=0,ended=null;const pending=new Map(),listeners=new Set();
+ const end=error=>{ended??=error;for(const p of pending.values()){clearTimeout(p.timer);p.reject(ended);}pending.clear();};
+ chrome.stderr.on('data',c=>{log+=c;});
+ chrome.once('error',error=>end(Error('Chrome could not start: '+error.message)));
+ chrome.once('exit',(code,signal)=>end(Error('Chrome exited ('+(signal||code)+'): '+log.slice(-4000))));
+ const commands=chrome.stdio[3],answers=chrome.stdio[4];
+ commands.on('error',error=>end(Error('The debugging pipe to Chrome failed: '+error.message)));answers.on('error',()=>{});
+ answers.setEncoding('utf8');
+ answers.on('data',chunk=>{
+  buffer+=chunk;let at;
+  while((at=buffer.indexOf('\0'))>=0){
+   const text=buffer.slice(0,at);buffer=buffer.slice(at+1);let m;try{m=JSON.parse(text);}catch{end(Error('Chrome sent an unreadable protocol message'));return;}
+   if(m.id){const p=pending.get(m.id);if(!p)continue;pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result);}
+   else for(const listener of listeners)listener(m);
+  }
+ });
+ function send(method,params={},sessionId){
+  if(ended)return Promise.reject(ended);
+  return new Promise((resolve,reject)=>{const id=++seq,timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP timeout: '+method));},20000);pending.set(id,{resolve,reject,timer});commands.write(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})+'\0');});
+ }
+ const noPort=()=>assert.equal(existsSync(path.join(profile,'DevToolsActivePort')),false,'Chrome must not open a TCP debugging endpoint: the profile holds DevToolsActivePort');
+ try{
+  let target;
+  for(let i=0;i<100&&!target;i++){target=(await send('Target.getTargets')).targetInfos.find(t=>t.type==='page');if(!target)await sleep(100);}
+  assert(target,'Chrome opened no page: '+log);
+  const {sessionId}=await send('Target.attachToTarget',{targetId:target.targetId,flatten:true});
+  noPort();
+  return {chrome,profile,noPort,log:()=>log,
+   page:(method,params={})=>send(method,params,sessionId),
+   on(listener){listeners.add(m=>{if(m.sessionId===sessionId)listener(m);});},
+   async close(){if(!ended)await Promise.race([send('Browser.close').catch(()=>{}),sleep(3000)]);await stopChrome(chrome);}};
+ }catch(error){await stopChrome(chrome);throw error;}
+}
+
+if(process.argv[2]==='--smoke'){
+ if(process.argv.length>3){console.error('Usage: node tools/test-audit-workspace.mjs --smoke');process.exit(2);}
+ let profileRoot=null,browser=null;
+ try{
+  profileRoot=await makeProfileRoot();
+  browser=await startChrome(profileRoot);
+  await browser.page('Page.enable');await browser.page('Page.navigate',{url:'about:blank'});
+  const evaluated=await browser.page('Runtime.evaluate',{expression:'[location.href,6*7,typeof document.createElement]',returnByValue:true});
+  assert.deepEqual(evaluated.result.value,['about:blank',42,'function'],'the page evaluated the expression');
+  browser.noPort();
+  console.log('PASS browser smoke: Chrome '+(await browser.page('Runtime.evaluate',{expression:'navigator.userAgent',returnByValue:true})).result.value.replace(/^.*(HeadlessChrome\/\S+).*$/,'$1')+' answered over --remote-debugging-pipe; no DevToolsActivePort in the profile.');
+ }finally{await browser?.close();await removeProfileRoot(profileRoot);}
+ assert.equal(existsSync(profileRoot),false,'the throwaway profile was removed');
+ console.log('The throwaway profile '+profileRoot+' was removed.');
+ process.exit(0);
+}
+
+// The pilot modules are loaded only here: --smoke reads no key file and no agent-home base.
+const {readApiKey}=await import('./api-auth.mjs');
+const {agentHomeLocation}=await import('./agent-home.mjs');
 const origin='http://127.0.0.1:8787';
 const dir=await fs.mkdtemp(path.join(root,'tmp/workspace-browser-'));
-const profile=path.join(dir,'profile');
+const key=await readApiKey({base:agentHomeLocation().base,port:8787});
+const authorized={headers:{Authorization:'Bearer '+key}};
 const sourceHTML=await fs.readFile(path.join(root,'tools/audit-ui.html'),'utf8');
 const renderer=vm.createContext({});
 vm.runInContext(sourceHTML.split('<script>')[1].split('async function catalog()')[0],renderer);
@@ -20,7 +109,7 @@ const anchored=vm.runInContext("markdown('## S01 — Chapter 1\\n\\nSource text\
 assert(anchored.includes('id="md-s01"')&&anchored.includes('id="md-r01"'),'Short source and report citations have stable section anchors');
 assert.equal(vm.runInContext("resolveDocumentLink('work/a/traces/step.md','../input/source.md').path",renderer),'work/a/input/source.md');
 assert.throws(()=>vm.runInContext("resolveDocumentLink('one.md','../../outside.md')",renderer));
-const catalogResponse=await fetch(origin+'/api/examples');
+const catalogResponse=await fetch(origin+'/api/examples',authorized);
 const catalog=await catalogResponse.json();
 assert(catalogResponse.ok&&Array.isArray(catalog),'Catalog unavailable: '+JSON.stringify(catalog));
 const requested=process.argv[2];
@@ -33,23 +122,16 @@ const source=example.files.find(f=>f.role==='source');
 const runs=example.runs.filter(r=>r.reportPath===report.path).sort((a,b)=>b.created.localeCompare(a.created));
 const finished=runs.find(r=>r.status==='finished');
 assert(source&&finished,'A source and a real finished verification are required');
-const runData=await (await fetch(origin+'/api/runs/'+finished.id)).json();
+const runData=await (await fetch(origin+'/api/runs/'+finished.id,authorized)).json();
 assert(runData.findings?.length,'The real run must contain findings');
 const claim=runData.findings.find(f=>f.proofs?.length)||runData.findings[0];
-const chrome=spawn('google-chrome',['--headless','--no-sandbox','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-dev-shm-usage','--remote-debugging-port=0','--user-data-dir='+profile,'--disk-cache-dir='+path.join(dir,'cache'),'about:blank'],{cwd:root,stdio:['ignore','ignore','pipe']});
-let chromeLog='',ws;
-chrome.stderr.on('data',c=>chromeLog+=c);
-const sleep=ms=>new Promise(r=>setTimeout(r,ms)),errors=[],mutations=[];
+const errors=[],mutations=[];let profileRoot=null,browser=null;
 try{
- let port;
- for(let i=0;i<100;i++){try{port=Number((await fs.readFile(path.join(profile,'DevToolsActivePort'),'utf8')).split('\n')[0]);if(port)break;}catch{}await sleep(100);}
- assert(port,'Chrome debugging endpoint unavailable: '+chromeLog);
- const targets=await (await fetch('http://127.0.0.1:'+port+'/json')).json();
- ws=new WebSocket(targets.find(t=>t.type==='page').webSocketDebuggerUrl);
- await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true});});
- let seq=0;const pending=new Map();
- ws.addEventListener('message',event=>{const m=JSON.parse(event.data);if(m.id){const p=pending.get(m.id);if(!p)return;pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result);}else if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails);else if(m.method==='Network.requestWillBeSent'&&m.params.request.url.startsWith(origin)&&!['GET','HEAD'].includes(m.params.request.method))mutations.push(m.params.request);});
- function cdp(method,params={}){return new Promise((resolve,reject)=>{const id=++seq,timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP timeout: '+method));},20000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}));});}
+ // The profile is created inside the try, so an early failure leaves nothing behind.
+ profileRoot=await makeProfileRoot();
+ browser=await startChrome(profileRoot);
+ const cdp=browser.page;
+ browser.on(m=>{if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails);else if(m.method==='Network.requestWillBeSent'&&m.params.request.url.startsWith(origin)&&!['GET','HEAD'].includes(m.params.request.method)&&!(m.params.request.method==='POST'&&new URL(m.params.request.url).pathname==='/api/session'))mutations.push({method:m.params.request.method,url:m.params.request.url});});
  async function js(expression){const r=await cdp('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value;}
  async function until(expression){for(let i=0;i<150;i++){if(await js(expression))return;await sleep(100);}throw Error('Timed out: '+expression);}
  async function clickNode(expression){
@@ -63,7 +145,9 @@ try{
  const sourceButton=`${node}.querySelector('[data-input-files] .input-file[data-path="'+${quote(source.path)}+'"]')`;
  await cdp('Runtime.enable');await cdp('Page.enable');await cdp('Network.enable');
  await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
- await cdp('Page.navigate',{url:origin});await until(`${node}!==null`);
+ // The sign-in link goes through the debugging channel, never into the browser's arguments.
+ await cdp('Page.navigate',{url:origin+'/#key='+key});await until(`${node}!==null`);
+ assert.equal(await js('location.hash'),'','the page removed the key from the address');
  assert.equal(await js("document.querySelectorAll('dialog,[role=dialog],#refresh,#run-history,#expand-verification').length"),0,'No popups, history, refresh or fullscreen navigation');
  await js("document.getElementById('new-example').click()");
  assert.deepEqual(await js("[...document.querySelectorAll('#example-language option')].map(o=>o.value).sort()"),['en','ro']);
@@ -178,7 +262,8 @@ try{
  await checkToggle(`${node}.querySelector('summary')`,node,'Example');
  assert.deepEqual(errors,[],'No browser exceptions');assert.deepEqual(mutations,[],'This test must remain read-only');
  assert.equal(await js("document.getElementById('error')?.textContent.trim()||''"),'','No user-visible errors');
+ browser.noPort();
  await fs.writeFile(path.join(dir,'result.md'),'# Browser verification\n\nPassed: read-only real-server navigation, source preview, finding summary, Lean preview, Markdown links and responsive document bounds.\n\n- Example: '+example.id+'\n- Report: '+report.path+'\n- Run: '+finished.id+'\n- Claim: '+claim.claim_id+'\n\n## Viewports\n\n'+bounds.map(b=>'- '+b.viewportWidth+' × '+b.viewportHeight+': viewport '+b.width+' × '+b.height).join('\n')+'\n');
  console.log('PASS read-only audit workspace. Artifacts: '+dir);
-}catch(e){await fs.writeFile(path.join(dir,'failure.md'),'# Browser verification failed\n\n```text\n'+e.stack+'\n```\n\nBrowser exceptions: '+errors.length+'\n\nUnexpected writes: '+mutations.length+'\n');throw e;}
-finally{ws?.close();chrome.kill('SIGTERM');await fs.writeFile(path.join(dir,'chrome.md'),'# Browser diagnostics\n\n```text\n'+chromeLog+'\n```\n');}
+}catch(e){await fs.writeFile(path.join(dir,'failure.md'),'# Browser verification failed\n\n```text\n'+String(e.stack).split(key).join('<key>')+'\n```\n\nBrowser exceptions: '+errors.length+'\n\nUnexpected writes: '+mutations.length+'\n');throw e;}
+finally{await browser?.close();await fs.writeFile(path.join(dir,'chrome.md'),'# Browser diagnostics\n\n```text\n'+(browser?browser.log():'Chrome did not start; see failure.md.').split(key).join('<key>')+'\n```\n');await removeProfileRoot(profileRoot);}

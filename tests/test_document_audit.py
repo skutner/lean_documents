@@ -14,10 +14,18 @@ import tempfile
 import unittest
 
 repo = Path(__file__).resolve().parents[1]
+from lean_location import lean_path
 spec = importlib.util.spec_from_file_location('document_audit', repo / 'tools/document_audit.py')
 d = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(d)
-LEAN = repo / 'tmp/toolchains/lean-4.24.0-linux/bin/lean'
+try:
+    spec.loader.exec_module(d)
+    OLD_PYTHON = None
+except ImportError as error:
+    # tools/document_audit.py refuses to be imported below Python 3.12; the tests then skip with that reason.
+    if sys.version_info >= (3, 12):
+        raise
+    d, OLD_PYTHON = None, str(error)
+LEAN = lean_path()
 TEST_ROOT = repo / 'tmp/document-audit-tests'
 
 
@@ -45,16 +53,17 @@ def completed_fixture(language="en"):
      for step in d.STEPS:
       logs=[];command=None
       if step=='verification' and proof:
-       results=d.check_models(w,repo/'tmp/toolchains/lean-4.24.0-linux/bin/lean',[proof]);logs=[r['log'] for r in results if r.get('claim_id')==ident];command=str(Path(sys.executable))+' '+str(Path(__file__).resolve())
+       results=d.check_models(w,LEAN,[proof]);logs=[r['log'] for r in results if r.get('claim_id')==ident];command=str(Path(sys.executable))+' '+str(Path(__file__).resolve())
       document=w/f'claim-work/{ident}/{step}.json'
       d.write(document,{'title':ident+' '+step,'purpose':'Exercise this individual synthetic audit step with retained artifacts.','method':'Read the source and perform the specific arithmetic or documentary check described in the finding.','observations':[{'source':'input/sources/1/source.md','quote':source['S0'+str(index)],'use':'The recorded synthetic input for this individual claim.'}],'result':'The helper retained the actual individual work and its declared scope.','limits':'Synthetic functional test only; not independent semantic validation.',**({'command':command} if command else {})})
       outputs=[document,*logs]+([w/f'findings/{ident}.json'] if step=='verdict' else [])
       d.record(A(workspace=w,claim_id=ident,step=step,document=document,input=['input/report.md','claims.json','input/sources/1/source.md'],output=outputs))
-    d.check(A(workspace=w,lean=repo/'tmp/toolchains/lean-4.24.0-linux/bin/lean',lean_version='4.24.0',timeout=60));d.render(A(workspace=w))
+    d.check(A(workspace=w,lean=LEAN,lean_version='4.24.0',timeout=60));d.render(A(workspace=w))
     return w
 
 
-@unittest.skipUnless(LEAN.is_file(), 'Repository-local Lean 4.24.0 is required')
+@unittest.skipIf(OLD_PYTHON is not None, 'tools/document_audit.py needs Python 3.12 or later: ' + str(OLD_PYTHON))
+@unittest.skipUnless(LEAN.is_file(), 'Repository-local Lean 4.24.0 is required; run "node tools/setup-toolchain.mjs"')
 class DocumentAuditTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

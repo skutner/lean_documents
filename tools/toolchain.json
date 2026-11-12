@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "provenance": "UNVERIFIED. Asset names and URLs were written from memory when this file was created. No release listing was fetched and no digest was computed. Every sha256 is null on purpose: tools/setup-toolchain.mjs refuses to download an asset whose pin is null. The pins are added in a later step that fetches the release digests (and confirms the asset names) with the user's approval.",
+  "lean": {
+    "version": "4.24.0",
+    "provenance": "UNVERIFIED (from memory): leanprover/lean4 release v4.24.0. To confirm against the release asset list and the digest field of each asset in the GitHub release API.",
+    "platforms": {
+      "linux-x64": {
+        "asset": "lean-4.24.0-linux.tar.zst",
+        "url": "https://github.com/leanprover/lean4/releases/download/v4.24.0/lean-4.24.0-linux.tar.zst",
+        "folder": "lean-4.24.0-linux",
+        "topLevel": "lean-4.24.0-linux",
+        "sha256": null
+      },
+      "linux-arm64": {
+        "asset": "lean-4.24.0-linux_aarch64.tar.zst",
+        "url": "https://github.com/leanprover/lean4/releases/download/v4.24.0/lean-4.24.0-linux_aarch64.tar.zst",
+        "folder": "lean-4.24.0-linux_aarch64",
+        "topLevel": "lean-4.24.0-linux_aarch64",
+        "sha256": null
+      },
+      "darwin-x64": {
+        "asset": "lean-4.24.0-darwin.tar.zst",
+        "url": "https://github.com/leanprover/lean4/releases/download/v4.24.0/lean-4.24.0-darwin.tar.zst",
+        "folder": "lean-4.24.0-darwin",
+        "topLevel": "lean-4.24.0-darwin",
+        "sha256": null
+      },
+      "darwin-arm64": {
+        "asset": "lean-4.24.0-darwin_aarch64.tar.zst",
+        "url": "https://github.com/leanprover/lean4/releases/download/v4.24.0/lean-4.24.0-darwin_aarch64.tar.zst",
+        "folder": "lean-4.24.0-darwin_aarch64",
+        "topLevel": "lean-4.24.0-darwin_aarch64",
+        "sha256": null
+      }
+    }
+  },
+  "python": {
+    "version": "3.12.<PATCH>",
+    "minimum": [3, 12],
+    "provenance": "UNVERIFIED and NOT PINNED: astral-sh/python-build-standalone install_only builds. The patch version and the release date are placeholders (<PATCH>, <RELEASE>), so tools/setup-toolchain.mjs rejects every Python asset until they are replaced. The archive's top-level folder (topLevel) is believed to be python, from memory.",
+    "systemLocations": {
+      "linux": [
+        "/usr/bin/python3",
+        "/usr/local/bin/python3"
+      ],
+      "darwin": [
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
+        "/usr/bin/python3"
+      ]
+    },
+    "platforms": {
+      "linux-x64": {
+        "asset": "cpython-3.12.<PATCH>+<RELEASE>-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/<RELEASE>/cpython-3.12.<PATCH>+<RELEASE>-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "folder": "python-3.12.<PATCH>-linux-x64",
+        "topLevel": "python",
+        "sha256": null
+      },
+      "linux-arm64": {
+        "asset": "cpython-3.12.<PATCH>+<RELEASE>-aarch64-unknown-linux-gnu-install_only.tar.gz",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/<RELEASE>/cpython-3.12.<PATCH>+<RELEASE>-aarch64-unknown-linux-gnu-install_only.tar.gz",
+        "folder": "python-3.12.<PATCH>-linux-arm64",
+        "topLevel": "python",
+        "sha256": null
+      },
+      "darwin-x64": {
+        "asset": "cpython-3.12.<PATCH>+<RELEASE>-x86_64-apple-darwin-install_only.tar.gz",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/<RELEASE>/cpython-3.12.<PATCH>+<RELEASE>-x86_64-apple-darwin-install_only.tar.gz",
+        "folder": "python-3.12.<PATCH>-darwin-x64",
+        "topLevel": "python",
+        "sha256": null
+      },
+      "darwin-arm64": {
+        "asset": "cpython-3.12.<PATCH>+<RELEASE>-aarch64-apple-darwin-install_only.tar.gz",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/<RELEASE>/cpython-3.12.<PATCH>+<RELEASE>-aarch64-apple-darwin-install_only.tar.gz",
+        "folder": "python-3.12.<PATCH>-darwin-arm64",
+        "topLevel": "python",
+        "sha256": null
+      }
+    }
+  }
+}

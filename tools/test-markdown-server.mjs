@@ -1,56 +1,145 @@
 /** Isolated integration checks; all inputs, logs and runs stay under tmp/. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
 import net from 'node:net';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readExample } from './markdown-store.mjs';
+import { ALA_LOCATION_UNCONFIRMED } from './api-auth.mjs';
+import { createFakeALA } from './fake-ala-fixture.mjs';
+import { leanStatus, resolvePython } from './toolchain.mjs';
+import { API_UNAUTHORIZED, readApiKey } from './api-auth.mjs';
+import { noLogin, homeUnavailable, reasons } from './agent-home.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 await fs.mkdir(path.join(root, 'tmp/markdown-server-tests'), { recursive: true });
 const suite = await fs.mkdtemp(path.join(root, 'tmp/markdown-server-tests/run-'));
 console.log(`Retained isolated server checks: ${suite}`);
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Explicit simulation: the servers below never run a script. They get an interpreter that only answers the version
+// probe of the Python resolver (AUDIT_PYTHON), so these tests do not depend on the host having Python 3.12 or later.
+async function simulatedPython(name, version) {
+  const file = path.join(suite, name);
+  await fs.writeFile(file, `#!/bin/sh\nif [ "$1" = "-I" ]; then echo ${version}; exit 0; fi\necho "simulated python: no script is run in this test" >&2\nexit 97\n`);
+  await fs.chmod(file, 0o755);
+  return file;
+}
+const simulatedNewPython = await simulatedPython('simulated-python-3.12', '3.12.0');
+// Both audit prompts must run the helper through the named interpreter. A bare script path would run through its
+// shebang, which is whatever python3 the sandbox shows (3.9.6 on a Mac without the pinned interpreter).
+async function assertHelperRunsThroughInterpreter(prompt, helperRelative) {
+  const helper = path.join(await fs.realpath(root), helperRelative);
+  const parts = prompt.split(helper);
+  assert.ok(parts.length - 1 >= 3, `${helperRelative} is invoked for prepare, check and render`);
+  for (const before of parts.slice(0, -1)) assert.ok(before.endsWith(`${simulatedNewPython} `), `${helperRelative} must follow the interpreter, found "...${before.slice(-60)}"`);
+  assert.match(prompt, /Run every Python script with the absolute interpreter .* and never with bare python3/);
+  assert.match(prompt, /Never run a \.py file directly/);
+}
 
-async function startServer(name, mode, pilot = false) {
-  const directory = path.join(suite, name), examples = path.join(directory, 'examples'), runs = path.join(directory, 'runs');
-  await fs.mkdir(examples, { recursive: true });
-  await fs.mkdir(path.join(examples, 'builder-without-metadata'));
-  let executable = path.join(directory, 'missing-codex');
-  if (mode !== 'missing') {
-    executable = path.join(directory, 'stub-codex.mjs');
-    await fs.writeFile(executable, `#!${process.execPath}\n// Explicit simulation: this process never performs an audit.\nprocess.stdin.resume();\nprocess.stdin.on('end',()=>{console.log(JSON.stringify({type:'test.stub',item:{text:'Simulated executor; no audit was performed.'}}));console.error('Intentional test diagnostic');process.exit(${mode === 'failure' ? 7 : 0});});\n`, { mode: 0o700 });
+// Every server gets its own agent-home base in the host temporary folder, outside the repository, never the real one.
+// Its template holds fixture logins whose token is random and is never written into the repository: assertions look
+// for its absence. The bases are removed at exit (from Node, by guarded path).
+const TEMPORARY = fsSync.realpathSync.native(os.tmpdir());
+const TOKEN = `fixture-token-${crypto.randomBytes(12).toString('hex')}`;
+const sha = value => crypto.createHash('sha256').update(value).digest('hex');
+const fixtures = [];
+process.on('exit', () => { for (const dir of fixtures) if (path.dirname(dir) === TEMPORARY && path.basename(dir).startsWith('markdown-server-base-')) fsSync.rmSync(dir, { recursive: true, force: true }); });
+async function fixtureBase(kind = 'logins') {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(TEMPORARY, 'markdown-server-base-'))); fixtures.push(dir);
+  const base = path.join(dir, 'base'), template = path.join(base, 'template');
+  for (const folder of [base, template]) { await fs.mkdir(folder, { mode: 0o700 }); await fs.chmod(folder, 0o700); }
+  const files = kind === 'empty' ? {} : { '.codex/auth.json': JSON.stringify({ tokens: { access_token: TOKEN } }), '.claude/.credentials.json': JSON.stringify({ claudeAiOauth: { accessToken: TOKEN + '-claude' } }), ...(kind === 'foreign' ? { '.codex/config.toml': 'model = "fixture"\n' } : {}) };
+  for (const [relative, content] of Object.entries(files)) {
+    const folder = path.join(template, path.dirname(relative)); await fs.mkdir(folder, { recursive: true, mode: 0o700 }); await fs.chmod(folder, 0o700);
+    await fs.writeFile(path.join(template, relative), content, { mode: 0o600 }); await fs.chmod(path.join(template, relative), 0o600);
   }
-  const probe = net.createServer();
-  probe.listen(0, '127.0.0.1'); await once(probe, 'listening');
-  const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
-  const child = spawn(process.execPath, [path.join(root, 'tools/audit-ui.mjs')], {
-    cwd: root, env: { ...process.env, PORT: String(port), AUDIT_RUNS_ROOT: runs, AUDIT_EXAMPLES_ROOT: examples, CODEX_BIN: executable, AUDIT_TEST_MODE: '1', AUDIT_DOCUMENT_PILOT: pilot ? '1' : '0' },
+  return { dir, base };
+}
+// Test servers never inherit credential variables or an agent-home location from the runner's shell.
+const CREDENTIALS = /^(OPENAI|ANTHROPIC|CLAUDE_CODE|CLAUDE|CODEX|OPENCODE|PI_CODING|OMP|GEMINI|GOOGLE|OPENROUTER|XAI|MISTRAL|GROQ|DEEPSEEK|AZURE_OPENAI)_|^AUDIT_AGENT_HOME$|^ALA_CLI$/;
+const cleanEnvironment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !CREDENTIALS.test(key)));
+async function freePort() { const probe = net.createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve)); return port; }
+/** One raw HTTP request, so the Host header and repeated or unusual headers reach the server exactly as written. */
+function raw(port, lines, body = '', { host = `127.0.0.1:${port}`, wait = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1'); let data = '';
+    socket.on('data', chunk => { data += chunk; }); socket.on('error', error => (data ? resolve(parse()) : reject(error)));
+    const dechunk = text => { let out = '', at = 0; for (;;) { const end = text.indexOf('\r\n', at); if (end < 0) return out; const size = parseInt(text.slice(at, end), 16); if (!size) return out; out += text.slice(end + 2, end + 2 + size); at = end + 4 + size; } };
+    // The last response on the connection (after a possible "100 Continue"), with a chunked body decoded.
+    const parse = () => { const final = data.replace(/^HTTP\/1\.1 100 Continue\r\n\r\n/, ''); const [head, ...rest] = final.split('\r\n\r\n'); const body = rest.join('\r\n\r\n'); return { status: Number(/^HTTP\/1\.1 (\d+)/.exec(head)?.[1]), head, body: /^Transfer-Encoding: chunked$/mi.test(head) ? dechunk(body) : body, data }; };
+    socket.on('close', () => resolve(parse()));
+    socket.write([...lines, `Host: ${host}`, 'Connection: close', '', ''].join('\r\n'));
+    // No half-close: Node drops a half-closed connection before an asynchronous answer; Connection: close ends it.
+    if (wait === null) socket.write(body); else setTimeout(() => { if (!socket.destroyed) socket.write(body); }, wait);
+  });
+}
+
+async function startServer(name, mode, pilot = false, python = simulatedNewPython, options = {}) {
+  const { template = 'logins', alaCli = true, settings = null, env: extra = {}, port: fixedPort = null, fixture = null, home = null, nodeArgs = [] } = options;
+  const directory = path.join(suite, name), examples = path.join(directory, 'examples'), runs = path.join(directory, 'runs'), records = path.join(directory, 'fake-ala-records');
+  await fs.mkdir(examples, { recursive: true }); await fs.mkdir(records, { recursive: true });
+  await fs.mkdir(path.join(examples, 'builder-without-metadata'), { recursive: true });
+  if (settings !== null) await fs.writeFile(path.join(directory, 'agent-settings.md'), settings);
+  const { base } = home ? { base: path.join(home, '.lean-documents/agent-home') } : fixture || await fixtureBase(template);
+  // The simulated ALA checkout stays outside the server folder, whose persisted documents are checked for data files.
+  const fake = path.join(suite, name + '-fake-ala'), ala = mode === 'missing' ? path.join(suite, name + '-missing-ala') : fake;
+  if (mode !== 'missing' && !fsSync.existsSync(fake)) await createFakeALA(fake, `
+if(process.env.FAKE_ALA_WAIT)await new Promise(resolve=>setTimeout(resolve,Number(process.env.FAKE_ALA_WAIT)));
+// Error injection, chosen by the review notes of a run (the prompt carries them): what a hostile run might do to its home.
+const inject=/INJECT:(\\w+)/.exec(prompt)?.[1],login=home&&path.join(home,'.codex/auth.json');
+if(inject==='remove')fs.rmSync(home,{recursive:true,force:true});
+if(inject==='link'){const outside=path.join(cwd,'outside-target.md');fs.writeFileSync(outside,'# Outside file\\n');fs.rmSync(login);fs.symlinkSync(outside,login);}
+if(inject==='nested'){let folder=home;for(let i=0;i<200;i++){folder=path.join(folder,'n');fs.mkdirSync(folder);}fs.writeFileSync(path.join(folder,'deep.md'),'deep');}
+if(inject==='copy')fs.copyFileSync(login,path.join(home,'.codex/auth-backup.json'));
+if(inject==='mode')fs.chmodSync(home,0);
+event({type:'coding-agent-message',agent,message:'Simulated executor; ',outputKind:'assistant',outputComplete:false,outputId:'m1'});
+event({type:'coding-agent-message',agent,message:'no audit was performed.',outputKind:'assistant',outputComplete:true,outputId:'m1'});
+event({type:'coding-agent-message',agent,message:'simulated tool output\\n',outputKind:'output',outputComplete:false});
+process.stderr.write('Intentional test diagnostic\\n');
+${mode === 'failure' ? "process.stderr.write('ala: Simulated ALA failure\\n');process.exitCode=7;" : "event({type:'coding-agent-final',agent,message:'Simulated final message.'});fs.writeFileSync(output,'Simulated final message.\\n');"}
+`);
+  const port = fixedPort || await freePort();
+  const child = spawn(process.execPath, [...nodeArgs, path.join(root, 'tools/audit-ui.mjs')], {
+    cwd: root, env: { ...cleanEnvironment(), PORT: String(port), AUDIT_RUNS_ROOT: runs, AUDIT_EXAMPLES_ROOT: examples, ...(alaCli ? { ALA_CLI: ala } : {}), ...(home ? { HOME: home } : { AUDIT_AGENT_HOME: base }), FAKE_ALA_RECORDS: records, AUDIT_PYTHON: python, PLOINKY_TEST_ROUTER: 'must-not-reach-ala', AUDIT_TEST_MODE: '1', AUDIT_DOCUMENT_PILOT: pilot ? '1' : '0', ...extra },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
   child.stdout.on('data', bytes => { output += bytes; });
   child.stderr.on('data', bytes => { output += bytes; });
-  const origin = `http://127.0.0.1:${port}`;
-  async function request(route, data, expected = 200) {
-    const response = await fetch(origin + route, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(data) });
-    const body = await response.json();
-    assert.equal(response.status, expected, `${route}: ${JSON.stringify(body)}`);
-    return body;
-  }
+  const origin = `http://127.0.0.1:${port}`, answers = [];
   for (let index = 0; index < 100 && !output.includes('Audit laboratory:'); index++) {
     if (child.exitCode !== null) throw Error(`Server exited before startup: ${output}`);
     await pause(30);
   }
   assert.match(output, /Audit laboratory:/, 'isolated server started');
-  return { directory, examples, runs, child, request, origin,
+  // The key is read the way a same-user caller does: from the key file the server wrote after binding the port.
+  const key = await readApiKey({ base, port });
+  // Every request carries the key unless a test says otherwise; every answer is kept to show the key is in none.
+  async function request(route, data, expected = 200, { key: sent = key, headers = {} } = {}) {
+    const auth = sent ? { Authorization: `Bearer ${sent}` } : {};
+    const response = await fetch(origin + route, data === undefined ? { headers: { ...auth, ...headers } } : { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, ...auth, ...headers }, body: JSON.stringify(data) });
+    const text = await response.text(); answers.push(text);
+    const body = JSON.parse(text);
+    assert.equal(response.status, expected, `${route}: ${text}`);
+    return body;
+  }
+  const server = { directory, examples, runs, records, base, key, port, child, request, origin, answers, ala,
+    output: () => output,
+    homes: () => path.join(fsSync.realpathSync.native(base), 'homes'),
     async stop() {
       if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); }
       await fs.writeFile(path.join(directory, 'server-output.md'), '# Isolated server output\n\n```text\n' + output + '\n```\n');
+      // The key never reaches the output (a pipe gets the link command instead) nor an answer; the token neither.
+      assert.equal(output.includes(key), false, 'the key is not in the server output');
+      assert.equal(output.includes(TOKEN), false, 'the fixture token is not in the server output');
+      for (const answer of answers) { assert.equal(answer.includes(key), false, 'no answer holds the key'); assert.equal(answer.includes(TOKEN), false, 'no answer holds the fixture token'); }
     },
     async terminal(id) {
       for (let index = 0; index < 160; index++) {
@@ -62,6 +151,7 @@ async function startServer(name, mode, pilot = false) {
       throw Error('Run never reached a terminal state');
     },
   };
+  return server;
 }
 
 async function seed(server) {
@@ -76,6 +166,22 @@ async function seed(server) {
   const report = uploaded.reports[0];
   assert.deepEqual(await fs.readFile(path.join(server.examples, id, report.path)), bytes);
   return { id, report, bytes };
+}
+
+// Names under the simulated agent home, as the fake ALA recorded them (never contents).
+const homeEntries = text => text.split('## Agent home entries\n\n```text\n')[1].split('\n```')[0].split('\n').filter(Boolean);
+async function filesContaining(directory, needle) {
+  const found = [];
+  for (const entry of await fs.readdir(directory, { withFileTypes: true, recursive: true })) {
+    if (!entry.isFile()) continue;
+    const file = path.join(entry.parentPath ?? entry.path, entry.name);
+    if ((await fs.readFile(file)).includes(needle)) found.push(file);
+  }
+  return found;
+}
+async function records(server, kind) {
+  const names = (await fs.readdir(server.records)).filter(name => name.startsWith(kind + '-')).sort();
+  return Promise.all(names.map(name => fs.readFile(path.join(server.records, name), 'utf8')));
 }
 
 async function noDataDocuments(directory) {
@@ -104,7 +210,7 @@ await test('Markdown uploads preserve bytes, support concurrent catalog reads, p
       const relative = Object.keys(metadata.file_names).find(file => metadata.file_names[file] === source.name);
       assert.ok(relative?.startsWith('sources/document-'));
       assert.deepEqual(await fs.readFile(path.join(server.examples, id, relative)), source.bytes);
-      const download = await fetch(server.origin + '/api/file?' + new URLSearchParams({ example: id, path: relative, download: '1' }));
+      const download = await fetch(server.origin + '/api/file?' + new URLSearchParams({ example: id, path: relative, download: '1' }), { headers: { Authorization: `Bearer ${server.key}` } });
       assert.equal(download.status, 200); assert.deepEqual(Buffer.from(await download.arrayBuffer()), source.bytes);
     }
     const outside = path.join(server.directory, 'outside.md'); await fs.writeFile(outside, 'Outside selected example');
@@ -114,11 +220,17 @@ await test('Markdown uploads preserve bytes, support concurrent catalog reads, p
       await server.request('/api/file?' + new URLSearchParams({ example: id, path: relative }), undefined, 400);
     }
     await server.request('/api/file?' + new URLSearchParams({ example: '../bad', path: 'example.md' }), undefined, 400);
-    const invalidOrigin = await fetch(server.origin + '/api/examples', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://untrusted.invalid' }, body: '{}' });
-    assert.equal(invalidOrigin.status, 400);
+    // With a valid key, so that the Origin check and not the gate is measured.
+    const invalidOrigin = await fetch(server.origin + '/api/examples', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://untrusted.invalid', Authorization: `Bearer ${server.key}` }, body: '{}' });
+    assert.equal(invalidOrigin.status, 400); assert.deepEqual(await invalidOrigin.json(), { error: 'Invalid Origin' });
+    for (const origin of ['http://localhost:' + server.port, 'http://127.0.0.1:1']) {
+      const refused = await fetch(server.origin + '/api/examples', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, Authorization: `Bearer ${server.key}` }, body: '{}' });
+      assert.equal(refused.status, 400, origin);
+    }
     const run = await server.request('/api/runs', { exampleId: id, reportPath: report.path });
     const result = await server.terminal(run.id);
     assert.equal(result.status, 'failed'); assert.equal(result.exitCode, 7); assert.equal(result.reportAvailability.status, 'unavailable');
+    assert.equal(result.error, 'ALA exited with code 7: ala: Simulated ALA failure');
     assert.equal(result.auditReportPath, null); assert.deepEqual(result.findings, []);
     const runDirectory = path.join(server.runs, run.id);
     assert.deepEqual(await fs.readFile(path.join(runDirectory, 'inputs/report.md')), bytes);
@@ -132,17 +244,35 @@ await test('Markdown uploads preserve bytes, support concurrent catalog reads, p
   } finally { await server.stop(); }
 });
 
-await test('missing executor becomes a failed run without crashing the server', { timeout: 15000 }, async () => {
+await test('missing ALA refuses new verification with a clear message without crashing the server', { timeout: 15000 }, async () => {
   const server = await startServer('missing-executor', 'missing');
   try {
     const { id, report } = await seed(server);
-    const run = await server.request('/api/runs', { exampleId: id, reportPath: report.path });
-    const result = await server.terminal(run.id);
-    assert.equal(result.status, 'failed'); assert.match(result.error, /ENOENT|spawn/);
-    assert.equal(result.reportAvailability.status, 'unavailable');
+    const refused = await server.request('/api/runs', { exampleId: id, reportPath: report.path }, 400);
+    assert.match(refused.error, /ALA was not found/);
+    assert.deepEqual(await fs.readdir(server.runs), [], 'no run is created while ALA is missing');
+    const settings = await server.request('/api/agent-settings');
+    assert.equal(settings.ala.found, false); assert.equal(settings.ala.checked[0].source, 'environment');
+    assert.match((await server.request('/api/coding-agents', undefined, 503)).error, /ALA was not found/);
+    assert.equal(settings.python.found, true); assert.equal(settings.python.path, simulatedNewPython); assert.equal(settings.python.warning, null);
     assert.equal((await server.request('/api/examples')).length, 1);
     await noDataDocuments(server.directory);
   } finally { await server.stop(); }
+  // Without Python 3.12 or later, new work is refused with the resolver's text, before ALA is even considered.
+  const old = await startServer('missing-python', 'missing', false, await simulatedPython('simulated-python-3.9', '3.9.1'));
+  try {
+    const { id, report } = await seed(old);
+    const refused = await old.request('/api/runs', { exampleId: id, reportPath: report.path }, 400);
+    assert.match(refused.error, /^AUDIT_PYTHON is set to .*, which cannot be used\. Python 3\.12 or later is required \(tools\/document_audit\.py\)\. Found: .*simulated-python-3\.9 3\.9\.1\. Run "node tools\/setup-toolchain\.mjs"/);
+    assert.doesNotMatch(refused.error, /ALA was not found/);
+    assert.deepEqual(await fs.readdir(old.runs), [], 'no run is created without Python');
+    await old.request(`/api/examples/${id}/files`, { role: 'source', files: [{ name: 'Bill.md', data: Buffer.from('# Bill\n\nTotal 9.\n').toString('base64') }] });
+    const generation = await old.request(`/api/examples/${id}/reports/generate`, { mode: 'grounded' }, 400);
+    assert.match(generation.error, /Python 3\.12 or later is required/);
+    const settings = await old.request('/api/agent-settings');
+    assert.equal(settings.python.found, false); assert.match(settings.python.error, /Python 3\.12 or later is required/);
+    assert.equal((await old.request('/api/examples')).length, 1, 'browsing still works');
+  } finally { await old.stop(); }
 });
 
 await test('zero executor exit without an audit is incomplete, never verified', { timeout: 15000 }, async () => {
@@ -158,7 +288,88 @@ await test('zero executor exit without an audit is incomplete, never verified', 
   } finally { await server.stop(); }
 });
 
-await test('fresh controlled Lean audit exposes links, detects tampering, and repairs rendered reports', { timeout: 60000 }, async () => {
+await test('the selected coding agent is validated, snapshotted at queue time and passed to ALA with a read-only repository', { timeout: 30000 }, async () => {
+  const server = await startServer('agent-selection', 'success');
+  try {
+    const initial = await server.request('/api/agent-settings');
+    assert.deepEqual([initial.agent, initial.model, initial.effort], ['codex', '', ''], 'Codex with its own default model remains the default');
+    // The settings carry the dedicated agent home's state: a usable template with file logins for Codex and Claude.
+    const homes = server.homes(), base = path.dirname(homes);
+    assert.equal(initial.agentHome.base, base); assert.equal(initial.agentHome.ready, true); assert.equal(initial.agentHome.error, null);
+    assert.deepEqual(['codex', 'claude', 'pi'].map(name => [name, initial.agentHome.agents[name]?.loggedIn, initial.agentHome.agents[name]?.source]), [['codex', true, 'file'], ['claude', true, 'file'], ['pi', false, 'none']]);
+    assert.equal(initial.ala.found, true); assert.equal(initial.ala.source, 'environment');
+    const { agents } = await server.request('/api/coding-agents');
+    assert.deepEqual(agents.map(agent => [agent.id, agent.available]), [['codex', true], ['claude', true], ['pi', false]]);
+    assert.deepEqual((await server.request('/api/coding-agents/codex/models')).models, [{ id: 'test-codex-model', label: 'Test Codex Model', efforts: ['low', 'high'] }]);
+    // The agent list derives install paths from a home that is never created; the model listing got a home of its own,
+    // which existed while the service was created and is gone afterwards.
+    const [discovery] = await records(server, 'discovery'), [service] = await records(server, 'service');
+    assert.ok(discovery.includes(`| Environment HOME | ${path.join(homes, '.discovery')} |`), discovery); assert.equal(fsSync.existsSync(path.join(homes, '.discovery')), false);
+    const listingHome = /\| Agent home \| ([^|]+) \|/.exec(service)[1];
+    assert.equal(path.dirname(listingHome), homes); assert.match(service, /\| Agent home exists \| yes \|/); assert.ok(service.includes(`| Environment HOME | ${listingHome} |`));
+    assert.deepEqual(homeEntries(service), ['.codex/', '.codex/auth.json'], 'only the Codex login was copied for the Codex listing');
+    assert.equal(fsSync.existsSync(listingHome), false, 'the listing home is removed once the worker has ended');
+    assert.deepEqual(await fs.readdir(homes), [], 'nothing is left in homes/ after the model listing');
+    await server.request('/api/coding-agents/pi/models', undefined, 400);
+    for (const invalid of [{ agent: 'pi', model: '' }, { agent: 'unknown', model: '' }, { agent: 'claude', model: 'test-codex-model' }, { agent: 'codex', model: 'test-codex-model', effort: 'max' }, { agent: 'codex', model: '', effort: 'low' }, { agent: 'codex', model: 5 }]) {
+      await server.request('/api/agent-settings', invalid, 400);
+    }
+    const saved = await server.request('/api/agent-settings', { agent: 'codex', model: 'test-codex-model', effort: 'high' });
+    assert.deepEqual([saved.agent, saved.model, saved.effort], ['codex', 'test-codex-model', 'high']);
+    const record = await fs.readFile(path.join(server.directory, 'agent-settings.md'), 'utf8');
+    assert.match(record, /^\| Coding agent \| codex \|$/m); assert.match(record, /^\| Model \| `test-codex-model` \|$/m); assert.match(record, /^\| Effort \| high \|$/m);
+    await server.request('/api/agent-settings', { agent: 'claude', model: 'test-claude-model' });
+    const { id, report } = await seed(server);
+    const run = await server.request('/api/runs', { exampleId: id, reportPath: report.path });
+    assert.equal(run.agent, 'claude'); assert.equal(run.model, 'test-claude-model'); assert.equal(run.effort, undefined);
+    await server.request('/api/agent-settings', { agent: 'codex', model: '' });
+    const result = await server.terminal(run.id);
+    assert.equal(result.status, 'incomplete'); assert.equal(result.agent, 'claude', 'queued work keeps its agent'); assert.equal(result.model, 'test-claude-model');
+    const runDirectory = path.join(server.runs, run.id);
+    const invocation = await fs.readFile(path.join(runDirectory, 'fake-ala-invocation.md'), 'utf8');
+    const args = invocation.split('```text\n')[1].split('\n```')[0].split('\n'), value = flag => args[args.indexOf(flag) + 1];
+    // The run's own agent home: directly after --cwd, inside <base>/homes, existing during the run with exactly Claude's
+    // login file, and removed once the run ended.
+    const runHome = value('--home');
+    assert.equal(args[args.indexOf('--cwd') + 2], '--home'); assert.equal(path.dirname(runHome), homes); assert.match(path.basename(runHome), /^home-\d+-[0-9a-f]{16}$/);
+    assert.match(invocation, /\| Agent home exists \| yes \|/); assert.deepEqual(homeEntries(invocation), ['.claude/', '.claude/.credentials.json']);
+    assert.equal(fsSync.existsSync(runHome), false, 'the run home is gone after the terminal state');
+    for (const text of [invocation, discovery, service]) assert.equal(text.includes(path.join(base, 'template')), false, 'no invocation or catalog record names the template');
+    assert.equal(value('--ca'), 'claude'); assert.equal(value('--model'), 'test-claude-model'); assert.equal(args.includes('--effort'), false);
+    assert.equal(value('--cwd'), runDirectory); assert.equal(value('--folder'), await fs.realpath(root), 'the repository is mounted read-only');
+    assert.equal(value('--taskFile'), path.join(runDirectory, 'instructions.md')); assert.equal(value('--output'), path.join(runDirectory, 'final-message.md'));
+    await assertHelperRunsThroughInterpreter(await fs.readFile(path.join(runDirectory, 'instructions.md'), 'utf8'), 'skills/evidence-to-proof-review/scripts/markdown_audit.py');
+    assert.match(invocation, /\| Process folder \| [^|]+ \|/);
+    assert.match(invocation, /\| Event stream \| 1 \|/); assert.match(invocation, /\| Ploinky variables \| absent \|/); assert.match(invocation, /\| Configuration file exists \| no \|/);
+    assert.equal(await fs.readFile(path.join(runDirectory, 'final-message.md'), 'utf8'), 'Simulated final message.\n');
+    const runRecord = await fs.readFile(path.join(runDirectory, 'run.md'), 'utf8');
+    assert.match(runRecord, /## Coding agent\n\nclaude\n/); assert.match(runRecord, /## Model\n\ntest-claude-model\n/); assert.match(runRecord, /## ALA entrypoint\n\n\S+bin\/ala\.mjs\n/);
+    const journal = await fs.readFile(path.join(runDirectory, 'execution.md'), 'utf8');
+    assert.match(journal, /Simulated executor; no audit was performed\./, 'fragments sharing one output id form one record');
+    assert.match(journal, /simulated tool output/); assert.match(journal, /Intentional test diagnostic/); assert.match(journal, /Simulated final message\./);
+    assert.match(journal, /agent home prepared[\s\S]*### Agent\n\nclaude[\s\S]*### Login\n\nlogin file/);
+    assert.match(journal, /agent home removed[\s\S]*### Removed\n\nyes[\s\S]*### Login files rewritten\n\nnone/);
+    const second = await server.request('/api/runs', { exampleId: id, reportPath: report.path });
+    assert.equal(second.agent, 'codex'); assert.equal(second.model, undefined, 'new work uses the latest saved selection');
+    await server.terminal(second.id);
+    assert.deepEqual(await fs.readdir(homes), [], 'homes/ is empty after every run reached its terminal state');
+    // Neither the fixture token nor the key is in any file the server, its runs or the fake ALA wrote; the fake ALA's
+    // environment hashes do not include the key's.
+    assert.deepEqual(await filesContaining(server.directory, TOKEN), []); assert.deepEqual(await filesContaining(server.directory, server.key), []);
+    for (const text of await records(server, 'service')) assert.equal(text.includes(sha(server.key)), false);
+    assert.equal((await fs.readFile(path.join(server.runs, second.id, 'fake-ala-invocation.md'), 'utf8')).includes(sha(server.key)), false, 'ALA never receives the key in its environment');
+    await noDataDocuments(server.directory);
+  } finally { await server.stop(); }
+});
+
+// This test runs the real helper and real Lean, so it needs the repository Lean toolchain and a Python 3.12 or later.
+const lean = leanStatus(root);
+let realPython = null, pythonProblem = null;
+try { realPython = resolvePython().path; } catch (error) { pythonProblem = error.message; }
+const skipReasons = [];
+if (!lean.installed) skipReasons.push(`Lean is not installed at ${lean.path}; run "node tools/setup-toolchain.mjs"`);
+if (pythonProblem) skipReasons.push(pythonProblem);
+await test('fresh controlled Lean audit exposes links, detects tampering, and repairs rendered reports', { timeout: 60000, skip: skipReasons.length ? `Lean-dependent audit test (needs the Lean toolchain and Python 3.12 or later): ${skipReasons.join(' | ')}` : false }, async () => {
   // Build an explicit synthetic helper fixture now; no user audit or deleted
   // historical run is read, restored or required. Lean really executes here.
   const fixtureRoot = path.join(suite, 'controlled-fixture');
@@ -174,7 +385,7 @@ print('CONTROLLED_WORKSPACE=' + str(workspace))
 `);
   let execution;
   try {
-    execution = await promisify(execFile)('python3', [exercise, root, fixtureRoot], { cwd: root, timeout: 45000, maxBuffer: 4 * 1024 * 1024 });
+    execution = await promisify(execFile)(realPython, [exercise, root, fixtureRoot], { cwd: root, timeout: 45000, maxBuffer: 4 * 1024 * 1024 });
   } catch (error) {
     await fs.writeFile(path.join(fixtureRoot, 'execution.md'), '# Controlled fixture execution failed\n\n```text\n' + (error.stdout || '') + '\n' + (error.stderr || error.message) + '\n```\n');
     throw error;
@@ -184,7 +395,7 @@ print('CONTROLLED_WORKSPACE=' + str(workspace))
   assert.ok(originalWorkspace && originalWorkspace.startsWith(fixtureRoot + path.sep));
   const originalReport = await fs.readFile(path.join(originalWorkspace, 'audit-report.md'));
   const originalValidation = await fs.readFile(path.join(originalWorkspace, 'validation.md'));
-  const server = await startServer('controlled-document-audit', 'missing', true);
+  const server = await startServer('controlled-document-audit', 'missing', true, realPython);
   try {
     const id = 'controlled-proof-fixture', runDirectory = path.join(server.runs, id);
     const workspace = path.join(runDirectory, 'work', path.basename(originalWorkspace));
@@ -259,8 +470,341 @@ await test('Example language persists and controls the audit while uploaded byte
     assert(completed.files.every(file=>!file.path.startsWith('internal/')&&!/\.jsonl?$/.test(file.path)));
     const instructions=await fs.readFile(path.join(server.runs,started.id,'instructions.md'),'utf8');
     assert.match(instructions,/--language ro/);assert.match(instructions,/human documents in Romanian/);
+    await assertHelperRunsThroughInterpreter(instructions,'tools/document_audit.py');
     assert.deepEqual(await fs.readFile(path.join(server.runs,started.id,'inputs/report.md')),reportBytes);
     const names=await fs.readdir(path.join(server.runs,started.id,'inputs/sources'));
     assert.equal(names.length,1);assert.deepEqual(await fs.readFile(path.join(server.runs,started.id,'inputs/sources',names[0])),sourceBytes);
   } finally {await server.stop();}
+});
+
+await test('every API route refuses a request without the key or with a wrong one, before anything is read or started (H-A3)', { timeout: 30000 }, async () => {
+  const server = await startServer('api-refusal', 'success');
+  try {
+    const { id, report } = await seed(server);
+    const run = await server.request('/api/runs', { exampleId: id, reportPath: report.path }); await server.terminal(run.id);
+    const listing = async folder => (await fs.readdir(folder, { recursive: true })).map(String).sort();
+    const snapshot = async () => JSON.stringify([await listing(server.examples), await listing(server.runs), await listing(server.records), sha(await fs.readFile(path.join(server.examples, id, 'example.md')))]);
+    const before = await snapshot();
+    const upload = { role: 'source', files: [{ name: 'Planted.md', data: Buffer.from('planted').toString('base64') }] };
+    const routes = [['POST', '/api/examples', { title: 'Planted' }], ['POST', `/api/examples/${id}/files`, upload], ['POST', `/api/examples/${id}/reports/generate`, { mode: 'grounded' }], ['POST', `/api/examples/${id}/stop`, {}],
+      ['POST', '/api/runs', { exampleId: id, reportPath: report.path, reviewNotes: 'planted' }], ['POST', `/api/runs/${run.id}/render`, {}], ['POST', `/api/runs/${run.id}/stop`, {}], ['POST', '/api/agent-settings', { agent: 'claude', model: '' }], ['POST', '/api/ala', { path: server.ala }],
+      ['GET', '/api/examples'], ['GET', '/api/agent-settings'], ['GET', '/api/coding-agents?refresh=1'], ['GET', '/api/coding-agents/codex/models?refresh=1'], ['GET', '/api/report-jobs/draft-x'], ['GET', `/api/runs/${run.id}`], ['GET', `/api/file?example=${id}&path=example.md`], ['POST', '/api/session', {}]];
+    assert.equal(routes.length, 17, 'the 16 API routes of the route table and POST /api/session');
+    const flipped = server.key.slice(0, 20) + (server.key[20] === 'A' ? 'B' : 'A') + server.key.slice(21);
+    for (const sent of [null, crypto.randomBytes(32).toString('base64url'), flipped]) {
+      for (const [method, route, data] of routes) {
+        const body = data === undefined ? '' : JSON.stringify(data);
+        const response = await raw(server.port, [`${method} ${route} HTTP/1.1`, ...(sent ? [`Authorization: Bearer ${sent}`] : []), ...(data === undefined ? [] : ['Content-Type: application/json', `Origin: ${server.origin}`, `Content-Length: ${Buffer.byteLength(body)}`])], body);
+        const label = `${method} ${route} ${sent === null ? 'without a key' : 'with a wrong key'}`;
+        assert.equal(response.status, 401, label); assert.deepEqual(JSON.parse(response.body), { error: API_UNAUTHORIZED }, label);
+        assert.match(response.head, /^WWW-Authenticate: Bearer$/mi, label); assert.match(response.head, /^Cache-Control: no-store$/mi, label);
+      }
+    }
+    assert.equal(await snapshot(), before, 'no example, run, upload or fake-ALA record was created or changed, so no process was started');
+    // Path forms the URL parser normalises: the gate and the router read the same parsed path, so none of them reaches
+    // an API route without the key (a 404 means the parsed path is no route at all).
+    for (const target of ['//api/examples', '/api/%2e%2e/examples', '/api/%2e%2e/api/examples', '/api/./examples', `http://127.0.0.1:${server.port}/api/examples`, `//127.0.0.1:${server.port}/api/examples`, '/API/examples', '/api/examples/..', '/x/../api/examples']) {
+      const response = await raw(server.port, [`GET ${target} HTTP/1.1`]);
+      assert.ok([401, 404].includes(response.status), `${target}: ${response.status}`); assert.equal(response.body.includes('Household bill'), false, target);
+    }
+
+    // GET / needs no key, holds none, and allows only its own script by hash.
+    const page = await fetch(server.origin + '/'), html = await page.text();
+    assert.equal(page.status, 200); assert.equal(html.includes(server.key), false);
+    assert.equal(page.headers.get('referrer-policy'), 'no-referrer'); assert.equal(page.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(html.split('<script').length, 2, 'the page has exactly one script element');
+    const script = Buffer.from(html).subarray(Buffer.from(html).indexOf('<script>') + 8, Buffer.from(html).indexOf('</script>'));
+    const policy = page.headers.get('content-security-policy');
+    assert.equal(policy, `script-src 'sha256-${crypto.createHash('sha256').update(script).digest('base64')}'; base-uri 'none'; frame-ancestors 'none'`);
+    assert.doesNotMatch(policy, /unsafe-inline|unsafe-hashes/);
+    assert.doesNotMatch(html, /\son[a-z]+\s*=\s*["']/i, 'no inline event handler attribute in the page');
+
+    // Host and Origin: only 127.0.0.1:<PORT>, also with a valid key; localhost would share an origin with [::1].
+    for (const host of [`localhost:${server.port}`, `[::1]:${server.port}`, `evil.example:${server.port}`, '127.0.0.1']) {
+      const refused = await raw(server.port, ['GET /api/examples HTTP/1.1', `Authorization: Bearer ${server.key}`], '', { host });
+      assert.equal(refused.status, 400, host); assert.deepEqual(JSON.parse(refused.body), { error: `Use http://127.0.0.1:${server.port}` }, host);
+    }
+    assert.equal((await raw(server.port, ['GET /api/examples HTTP/1.1', `Authorization: Bearer ${server.key}`])).status, 200, 'GET /api/examples with the key on 127.0.0.1');
+    // Expect: 100-continue. Without the key the client is never invited to send its body; with it, it is.
+    const body = JSON.stringify({ title: 'Continued' });
+    const unauthenticated = await raw(server.port, ['POST /api/examples HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Content-Length: ${body.length}`], body, { wait: 500 });
+    assert.doesNotMatch(unauthenticated.data, /^HTTP\/1\.1 100/, 'no 100 Continue before the gate'); assert.equal(unauthenticated.status, 401);
+    const authenticated = await raw(server.port, ['POST /api/examples HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Authorization: Bearer ${server.key}`, `Content-Length: ${body.length}`], body, { wait: 500 });
+    assert.match(authenticated.data, /^HTTP\/1\.1 100 Continue\r\n\r\nHTTP\/1\.1 200/); assert.match(authenticated.data, /"id":"custom-continued-/);
+    const wrongHost = await raw(server.port, ['POST /api/examples HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Authorization: Bearer ${server.key}`, `Content-Length: ${body.length}`], body, { wait: 500, host: `localhost:${server.port}` });
+    assert.doesNotMatch(wrongHost.data, /^HTTP\/1\.1 100/); assert.equal(wrongHost.status, 400);
+
+    // The exchange: POST /api/session sets the view cookie, which alone reads files and nothing else.
+    const session = await raw(server.port, ['POST /api/session HTTP/1.1', `Authorization: Bearer ${server.key}`, 'Content-Type: application/json', 'Content-Length: 2'], '{}');
+    assert.equal(session.status, 200, 'POST /api/session'); assert.deepEqual(JSON.parse(session.body), { ok: true });
+    const cookie = new RegExp(`^Set-Cookie: (pilot_view_${server.port})=([A-Za-z0-9_-]{43}); Path=/api/file; HttpOnly; SameSite=Strict$`, 'mi').exec(session.head);
+    assert.ok(cookie, session.head.replaceAll(server.key, '<key>'));
+    const viaCookie = await raw(server.port, [`GET /api/file?example=${id}&path=example.md HTTP/1.1`, `Cookie: ${cookie[1]}=${cookie[2]}`]);
+    assert.equal(viaCookie.status, 200, 'the view cookie on GET /api/file'); assert.match(JSON.parse(viaCookie.body).text, /Household bill/);
+    for (const route of ['/api/examples', `/api/runs/${run.id}`]) assert.equal((await raw(server.port, [`GET ${route} HTTP/1.1`, `Cookie: ${cookie[1]}=${cookie[2]}`])).status, 401, route);
+
+    // Active content is never served inline (A-E7): the page's script origin depends on it.
+    const active = await server.request(`/api/examples/${id}/files`, { role: 'source', files: [{ name: 'page.html', data: Buffer.from('<script>alert(1)</script>').toString('base64') }, { name: 'image.svg', data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>').toString('base64') }] });
+    for (const file of active.files.filter(f => /\.(html|svg)$/.test(f.path))) {
+      const response = await fetch(server.origin + '/api/file?' + new URLSearchParams({ example: id, path: file.path, inline: '1' }), { headers: { Authorization: `Bearer ${server.key}` } });
+      assert.equal(response.headers.get('content-type'), 'application/octet-stream', file.path); assert.match(response.headers.get('content-disposition'), /^attachment;/, file.path);
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff'); await response.arrayBuffer();
+    }
+    assert.deepEqual(await filesContaining(server.directory, server.key), [], 'the key is in no file under the server folder');
+  } finally { await server.stop(); }
+});
+
+await test('outside /api/ only GET is served: any other method is refused unread, before the Origin, content-type and body steps', { timeout: 30000 }, async () => {
+  // Test instrumentation, loaded into the server with --import: it records how many bytes the server read from each
+  // connection (never their content), keyed by the client's port, as the gate's own body test reads socket.bytesRead.
+  const reads = path.join(suite, 'outside-api-socket-reads.txt'), preload = path.join(suite, 'outside-api-socket-reads.mjs');
+  await fs.writeFile(preload, `import http from 'node:http';\nimport fs from 'node:fs';\nconst create = http.createServer;\nhttp.createServer = (...args) => { const server = create(...args); server.on('connection', socket => { const peer = socket.remotePort; socket.once('close', () => fs.appendFileSync(${JSON.stringify(reads)}, peer + ' ' + socket.bytesRead + '\\n')); }); return server; };\n`);
+  const server = await startServer('outside-api', 'success', false, simulatedNewPython, { nodeArgs: ['--import', pathToFileURL(preload).href] });
+  try {
+    const declared = 8 * 1024 * 1024, refusal = { error: 'Only GET is served outside /api/.' };
+    // One raw exchange that may be cut by the server: the answer, and the client port that keys the server's read count.
+    const exchange = (lines, body = null, host = `127.0.0.1:${server.port}`) => new Promise((resolve, reject) => {
+      const socket = net.connect(server.port, '127.0.0.1'); let data = '', local = null;
+      const timer = setTimeout(() => socket.destroy(new Error('the server did not answer and close the connection within 5 s')), 5000);
+      socket.on('connect', () => { local = socket.localPort; });
+      socket.on('data', chunk => { data += chunk; });
+      socket.on('error', error => { if (!['EPIPE', 'ECONNRESET'].includes(error.code)) reject(error); });
+      socket.on('close', () => { clearTimeout(timer); const [head, ...rest] = data.split('\r\n\r\n'); resolve({ status: Number(/^HTTP\/1\.1 (\d+)/.exec(head)?.[1]), head, body: rest.join('\r\n\r\n'), data, local }); });
+      socket.write([...lines, `Host: ${host}`, '', ''].join('\r\n'));
+      if (body) socket.write(body);
+    });
+    const readBy = async local => { await pause(150); const line = (await fs.readFile(reads, 'utf8')).split('\n').find(l => l.startsWith(local + ' ')); assert.ok(line, `no read count for client port ${local}`); return Number(line.split(' ')[1]); };
+    for (const target of ['/x', '/']) {
+      const head = [`POST ${target} HTTP/1.1`, 'Content-Type: application/json', `Origin: ${server.origin}`, `Content-Length: ${declared}`];
+      // The headers alone: the refusal comes without one byte of the body, and the server closes the connection.
+      const early = await exchange(head);
+      assert.equal(early.status, 405, `${target}: ${early.data.slice(0, 200)}`); assert.deepEqual(JSON.parse(early.body), refusal, target);
+      assert.match(early.head, /^Allow: GET$/mi, target); assert.match(early.head, /^Connection: close$/mi, target);
+      // The whole body sent at once: the server reads less than 1 MiB of it before it cuts the connection.
+      const full = await exchange(head, Buffer.alloc(declared, 120)), read = await readBy(full.local);
+      assert.ok(read < 1024 * 1024, `${target}: the server read ${read} bytes of an ${declared}-byte body`);
+    }
+    // A small body that is not JSON: refused for its method, not parsed (the finding answered 400 with a parse error).
+    const notJson = await exchange(['POST /x HTTP/1.1', 'Content-Type: application/json', 'Content-Length: 8'], Buffer.from('not-json'));
+    assert.equal(notJson.status, 405); assert.deepEqual(JSON.parse(notJson.body), refusal);
+    // Another Host is refused before the gate, and just as unread: a caller without the key must not make the server
+    // read an upload by naming a Host the server refuses.
+    for (const target of ['/api/examples', '/x']) {
+      const head = [`POST ${target} HTTP/1.1`, 'Content-Type: application/json', `Content-Length: ${declared}`], other = `localhost:${server.port}`;
+      const early = await exchange(head, null, other);
+      assert.equal(early.status, 400, `${target}: ${early.data.slice(0, 200)}`); assert.deepEqual(JSON.parse(early.body), { error: `Use http://127.0.0.1:${server.port}` }, target);
+      assert.match(early.head, /^Connection: close$/mi, target);
+      const full = await exchange(head, Buffer.alloc(declared, 120), other), read = await readBy(full.local);
+      assert.ok(read < 1024 * 1024, `${target} with another Host: the server read ${read} bytes of an ${declared}-byte body`);
+    }
+    // A GET outside /api/ that announces a body is refused unread as well; the page is only ever requested without one.
+    const bodyRefusal = { error: 'A request outside /api/ must not carry a body.' };
+    for (const target of ['/', '/nope']) {
+      const head = [`GET ${target} HTTP/1.1`, `Content-Length: ${declared}`];
+      const early = await exchange(head);
+      assert.equal(early.status, 400, `GET ${target}: ${early.data.slice(0, 200)}`); assert.deepEqual(JSON.parse(early.body), bodyRefusal, target);
+      assert.match(early.head, /^Connection: close$/mi, target);
+      const full = await exchange(head, Buffer.alloc(declared, 120)), read = await readBy(full.local);
+      assert.ok(read < 1024 * 1024, `GET ${target}: the server read ${read} bytes of an ${declared}-byte body`);
+    }
+    const invited = await exchange(['GET / HTTP/1.1', 'Expect: 100-continue', `Content-Length: ${declared}`]);
+    assert.doesNotMatch(invited.data, /^HTTP\/1\.1 100/, 'no 100 Continue for a GET with a body outside /api/'); assert.equal(invited.status, 400);
+    // Expect: 100-continue on a path outside /api/: the client is never invited to send its body.
+    const continued = await exchange(['POST /x HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Content-Length: ${declared}`]);
+    assert.doesNotMatch(continued.data, /^HTTP\/1\.1 100/, 'no 100 Continue outside /api/'); assert.equal(continued.status, 405); assert.deepEqual(JSON.parse(continued.body), refusal);
+    for (const method of ['PUT', 'DELETE', 'PATCH', 'OPTIONS']) assert.equal((await exchange([`${method} / HTTP/1.1`, 'Content-Length: 0', 'Connection: close'])).status, 405, method);
+    // An unknown /api/ path without a key gets the gate's 401, so the gate runs before routing.
+    const unknown = `/api/${crypto.randomBytes(6).toString('hex')}`;
+    assert.deepEqual(await server.request(unknown, undefined, 401, { key: null }), { error: API_UNAUTHORIZED });
+    assert.deepEqual(await server.request(unknown, {}, 401, { key: null }), { error: API_UNAUTHORIZED });
+    // GET / stays open.
+    const page = await fetch(server.origin + '/'); assert.equal(page.status, 200); assert.match(await page.text(), /<script>/);
+    assert.equal(server.child.exitCode, null, 'the server is still running');
+  } finally { await server.stop(); }
+});
+
+await test('without a pilot login new work and the model listing are refused with the exact text and nothing is created (H-3)', { timeout: 30000 }, async () => {
+  const empty = await startServer('no-login', 'success', false, simulatedNewPython, { template: 'empty' });
+  try {
+    const base = path.dirname(empty.homes()), { id, report } = await seed(empty);
+    for (const agent of ['codex', 'claude']) {
+      await empty.request('/api/agent-settings', { agent, model: '' });
+      assert.deepEqual(await empty.request('/api/runs', { exampleId: id, reportPath: report.path }, 400), { error: noLogin(agent, base) });
+      assert.deepEqual(await empty.request(`/api/coding-agents/${agent}/models?refresh=1`, undefined, 400), { error: noLogin(agent, base) });
+    }
+    assert.deepEqual(await fs.readdir(empty.runs), [], 'no run folder is created');
+    const settings = await empty.request('/api/agent-settings');
+    assert.equal(settings.agentHome.ready, true); assert.equal(settings.agentHome.agents.claude.loggedIn, false); assert.equal(settings.agentHome.agents.claude.source, 'none');
+    assert.deepEqual(fsSync.existsSync(empty.homes()) ? await fs.readdir(empty.homes()) : [], []);
+  } finally { await empty.stop(); }
+  // A template holding anything but a login file refuses every agent with the template text.
+  const foreign = await startServer('foreign-template', 'success', false, simulatedNewPython, { template: 'foreign' });
+  try {
+    const { id, report } = await seed(foreign);
+    const refused = await foreign.request('/api/runs', { exampleId: id, reportPath: report.path }, 503);
+    assert.equal(refused.error, homeUnavailable(reasons.foreign('.codex/config.toml', 'file')));
+    assert.deepEqual(await fs.readdir(foreign.runs), []);
+    const settings = await foreign.request('/api/agent-settings');
+    assert.equal(settings.agentHome.ready, false); assert.equal(settings.agentHome.error, refused.error);
+  } finally { await foreign.stop(); }
+  // A credential variable in the server's environment is a login: the home is empty and only the name is recorded.
+  const variable = await startServer('environment-login', 'success', false, simulatedNewPython, { template: 'empty', env: { OPENAI_API_KEY: TOKEN + '-variable' } });
+  try {
+    const { id, report } = await seed(variable);
+    const run = await variable.request('/api/runs', { exampleId: id, reportPath: report.path }); await variable.terminal(run.id);
+    const invocation = await fs.readFile(path.join(variable.runs, run.id, 'fake-ala-invocation.md'), 'utf8');
+    assert.match(invocation, /\| Agent home exists \| yes \|/); assert.deepEqual(homeEntries(invocation), [], 'with an environment login the home is empty');
+    assert.match(await fs.readFile(path.join(variable.runs, run.id, 'execution.md'), 'utf8'), /### Login\n\nvariable from the server's environment \(OPENAI_API_KEY\)/);
+    assert.deepEqual(await filesContaining(variable.directory, TOKEN), [], 'the variable value is in no file');
+  } finally { await variable.stop(); }
+});
+
+await test('three audits at once get three homes, each owned by its ALA process group, and SIGTERM leaves homes/ empty', { timeout: 60000 }, async () => {
+  const fixture = await fixtureBase();
+  const server = await startServer('three-homes', 'success', false, simulatedNewPython, { fixture, env: { AUDIT_CONCURRENCY: '3', FAKE_ALA_WAIT: '60000' } });
+  let pids = [];
+  try {
+    const { id } = await seed(server);
+    const uploaded = await server.request(`/api/examples/${id}/files`, { role: 'report', files: ['Second.md', 'Third.md'].map(name => ({ name, data: Buffer.from(`# ${name}\n`).toString('base64') })) });
+    const runs = [];
+    for (const report of uploaded.reports) runs.push(await server.request('/api/runs', { exampleId: id, reportPath: report.path }));
+    let states = [];
+    for (let i = 0; i < 200; i++) {
+      states = await Promise.all(runs.map(run => server.request(`/api/runs/${run.id}`)));
+      if (states.every(state => state.status === 'running') && runs.every(run => fsSync.existsSync(path.join(server.runs, run.id, 'fake-ala-invocation.md')))) break;
+      await pause(50);
+    }
+    assert.deepEqual(states.map(state => state.status), ['running', 'running', 'running']);
+    const homes = await Promise.all(runs.map(async run => /\| Agent home \| ([^|]+) \|/.exec(await fs.readFile(path.join(server.runs, run.id, 'fake-ala-invocation.md'), 'utf8'))[1]));
+    assert.equal(new Set(homes).size, 3, 'three distinct homes'); for (const home of homes) assert.equal(path.dirname(home), server.homes());
+    // The owner record beside each home names the ALA process, which leads its own process group (detached spawn).
+    pids = states.map(state => state.pid);
+    for (const home of homes) {
+      const owner = JSON.parse(await fs.readFile(home + '.owner', 'utf8'));
+      assert.equal(owner.group, owner.ala, 'the recorded group is the ALA pid'); assert.ok(pids.includes(owner.ala));
+      const pgid = Number(execFileSync('/bin/ps', ['-o', 'pgid=', '-p', String(owner.ala)], { encoding: 'utf8' }).trim());
+      assert.equal(pgid, owner.ala, 'the ALA process leads its own process group');
+    }
+    server.child.kill('SIGTERM'); await once(server.child, 'exit');
+    assert.deepEqual(await fs.readdir(server.homes()), [], 'the exit handler removed every open home once the ALA groups ended');
+    for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, `ALA process ${pid} ended`);
+  } finally { await server.stop(); }
+  const restarted = await startServer('three-homes', 'success', false, simulatedNewPython, { fixture });
+  try {
+    assert.deepEqual(await fs.readdir(restarted.homes()), [], 'homes/ is empty after the restart');
+    const catalog = await restarted.request('/api/examples');
+    assert.deepEqual(catalog[0].runs.map(run => run.status), ['interrupted', 'interrupted', 'interrupted']);
+  } finally { await restarted.stop(); }
+});
+
+await test('a location runs can write is never imported: the reproduction of the finding, a planted saved location, and the confirmation record (H-A3)', { timeout: 30000 }, async () => {
+  // A fake ALA in tmp/, which every run can write, whose discovery module leaves a marker if it is ever imported.
+  const planted = await createFakeALA(path.join(suite, 'planted-ala'), ''), marker = path.join(suite, 'planted-ala-imported.md');
+  await fs.writeFile(path.join(planted, 'src/coding-agents/discovery.mjs'), `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(marker)}, '# Imported\\n');\nexport async function discoverCodingAgents() { return []; }\n`);
+  const rule = `This ALA location is not accepted: it lies inside ${path.join(await fs.realpath(root), 'tmp')}, where runs can write. Use a checkout outside it.`;
+  const open = await startServer('no-ala-cli', 'missing', false, simulatedNewPython, { alaCli: false });
+  try {
+    assert.deepEqual(await open.request('/api/ala', { path: planted }, 401, { key: null }), { error: API_UNAUTHORIZED });
+    assert.deepEqual(await open.request('/api/ala', { path: planted }, 400), { error: rule });
+    assert.equal(fsSync.existsSync(path.join(open.directory, 'agent-settings.md')), false, 'nothing was saved');
+  } finally { await open.stop(); }
+  // A location saved through the old open API is refused when it is resolved, and never replaced by detection.
+  const saved = await startServer('planted-saved', 'missing', false, simulatedNewPython, { alaCli: false, settings: `| ALA location | \`${planted}\` |\n` });
+  try {
+    const settings = await saved.request('/api/agent-settings');
+    assert.equal(settings.ala.found, false); assert.deepEqual(settings.ala.checked.map(c => [c.source, c.reason]), [['configured', rule]]);
+    assert.match((await saved.request('/api/coding-agents', undefined, 503)).error, /^ALA was not found/);
+    assert.match((await saved.request('/api/coding-agents/codex/models', undefined, 503)).error, /^ALA was not found/);
+  } finally { await saved.stop(); }
+  assert.equal(fsSync.existsSync(marker), false, 'the planted discovery module was never imported');
+  // A location outside tmp/ saved before sign-in was required is not used until an authenticated save confirms it.
+  const { dir } = await fixtureBase('empty'), outside = await createFakeALA(path.join(dir, 'checkout'), '');
+  const later = await startServer('unconfirmed-saved', 'missing', false, simulatedNewPython, { alaCli: false, settings: `| ALA location | \`${outside}\` |\n` });
+  try {
+    const before = await later.request('/api/agent-settings');
+    assert.equal(before.ala.found, false); assert.equal(before.ala.unconfirmed, true); assert.deepEqual(before.ala.checked.map(c => [c.source, c.reason]), [['configured', ALA_LOCATION_UNCONFIRMED]]);
+    const after = await later.request('/api/ala', { path: outside });
+    assert.equal(after.ala.found, true); assert.equal(after.ala.source, 'configured'); assert.equal(after.ala.unconfirmed, false);
+    const record = path.join(path.dirname(later.homes()), 'server/ala-location');
+    assert.equal(await fs.readFile(record, 'utf8'), outside + '\n'); assert.equal(fsSync.statSync(record).mode & 0o777, 0o600);
+    assert.match(await fs.readFile(path.join(later.directory, 'agent-settings.md'), 'utf8'), new RegExp('\\| ALA location \\| `' + outside.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '` \\|'));
+    assert.equal((await later.request('/api/coding-agents')).agents[0].id, 'codex');
+  } finally { await later.stop(); }
+  // Clearing the location removes the record (on a server whose ALA comes from ALA_CLI, so nothing is detected).
+  const clearing = await startServer('confirmation-clear', 'success');
+  try {
+    const record = path.join(path.dirname(clearing.homes()), 'server/ala-location');
+    await clearing.request('/api/ala', { path: outside }); assert.equal(fsSync.existsSync(record), true);
+    // A record that cannot be removed is reported, not ignored.
+    await fs.chmod(path.dirname(record), 0o500);
+    try {
+      assert.deepEqual(await clearing.request('/api/ala', { path: '' }, 400), { error: `The ALA location was cleared, but its confirmation record could not be removed: ${record}` });
+      // The answer keeps its text; the reason goes to the server's console.
+      assert.ok(clearing.output().includes(`The ALA location confirmation ${record} could not be removed (EACCES).`), clearing.output());
+    } finally { await fs.chmod(path.dirname(record), 0o700); }
+    await clearing.request('/api/ala', { path: '' }); assert.equal(fsSync.existsSync(record), false);
+  } finally { await clearing.stop(); }
+});
+
+await test('a second server on the same port fails to bind and leaves the first server\'s key file and key working', { timeout: 30000 }, async () => {
+  const first = await startServer('one-port', 'success');
+  try {
+    const keyFile = path.join(path.dirname(first.homes()), 'server', `port-${first.port}.key`), before = sha(await fs.readFile(keyFile));
+    const second = spawn(process.execPath, [path.join(root, 'tools/audit-ui.mjs')], { cwd: root, env: { ...cleanEnvironment(), PORT: String(first.port), AUDIT_AGENT_HOME: first.base, AUDIT_RUNS_ROOT: path.join(first.directory, 'second-runs'), AUDIT_EXAMPLES_ROOT: first.examples, ALA_CLI: first.ala, AUDIT_PYTHON: simulatedNewPython }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = ''; second.stdout.on('data', b => { output += b; }); second.stderr.on('data', b => { output += b; });
+    const [code] = await once(second, 'exit');
+    assert.equal(code, 1); assert.match(output, /EADDRINUSE/); assert.doesNotMatch(output, /Audit laboratory/);
+    assert.equal(sha(await fs.readFile(keyFile)), before, 'the key file is unchanged');
+    assert.equal((await first.request('/api/examples')).length, 0, 'the first server\'s key still works');
+  } finally { await first.stop(); }
+});
+
+await test('without AUDIT_AGENT_HOME the server creates the default base under HOME (an injected fixture home, never the real one)', { timeout: 30000 }, async () => {
+  const { dir } = await fixtureBase('empty'), home = path.join(dir, 'home'); await fs.mkdir(home);
+  const server = await startServer('default-base', 'success', false, simulatedNewPython, { home });
+  try {
+    const base = path.join(home, '.lean-documents/agent-home');
+    assert.equal(path.dirname(server.homes()), base);
+    for (const folder of [path.join(home, '.lean-documents'), base, path.join(base, 'server')]) assert.equal(fsSync.statSync(folder).mode & 0o777, 0o700, folder);
+    assert.equal(fsSync.statSync(path.join(base, `server/port-${server.port}.key`)).mode & 0o777, 0o600);
+    assert.equal((await server.request('/api/examples')).length, 0);
+    assert.match(server.output(), new RegExp(`Dedicated agent home: ${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.`));
+  } finally { await server.stop(); }
+});
+
+await test('error injection: whatever a run does to its home, the home is removed and no login copy is left (probes)', { timeout: 60000 }, async () => {
+  const fixture = await fixtureBase();
+  const server = await startServer('error-injection', 'success', false, simulatedNewPython, { fixture, env: { AUDIT_CONCURRENCY: '1' } });
+  const homes = [];
+  try {
+    const { id } = await seed(server);
+    const uploaded = await server.request(`/api/examples/${id}/files`, { role: 'report', files: ['remove', 'mode', 'link', 'nested', 'copy'].map(name => ({ name: `${name}.md`, data: Buffer.from(`# ${name}\n`).toString('base64') })) });
+    for (const report of uploaded.reports) {
+      const injection = report.label.replace('.md', '');
+      const run = await server.request('/api/runs', { exampleId: id, reportPath: report.path, reviewNotes: `INJECT:${injection}` });
+      const result = await server.terminal(run.id);
+      assert.equal(result.status, 'incomplete', injection);
+      const journal = await fs.readFile(path.join(server.runs, run.id, 'execution.md'), 'utf8');
+      assert.match(journal, /agent home removed/, injection);
+      homes.push([injection, /\| Agent home \| ([^|]+) \|/.exec(await fs.readFile(path.join(server.runs, run.id, 'fake-ala-invocation.md'), 'utf8'))[1], journal]);
+    }
+    const byName = Object.fromEntries(homes.map(([name, home, journal]) => [name, { home, journal }]));
+    assert.match(byName.link.journal, /### Login files rewritten\n\n\.codex\/auth\.json/, 'a login replaced by a link is reported as rewritten');
+    assert.match(byName.remove.journal, /### Login files rewritten\n\n\.codex\/auth\.json/, 'a removed home counts its login as rewritten');
+    assert.match(byName.copy.journal, /### Login files rewritten\n\nnone/);
+    for (const [name, home] of homes) assert.equal(fsSync.existsSync(home), false, `${name}: the home is gone`);
+    assert.deepEqual(await fs.readdir(server.homes()), [], 'homes/ is empty');
+    assert.deepEqual(await filesContaining(server.homes(), TOKEN), []); assert.deepEqual(await filesContaining(server.directory, TOKEN), [], 'no login copy anywhere in the server folder');
+  } finally { await server.stop(); }
+  // The outside file a run linked its login to survives the removal.
+  const linked = (await fs.readdir(server.runs)).map(run => path.join(server.runs, run, 'outside-target.md')).filter(file => fsSync.existsSync(file));
+  assert.equal(linked.length, 1); assert.equal(await fs.readFile(linked[0], 'utf8'), '# Outside file\n');
+  // A login module that throws on import refuses new work with the module text; nothing is created.
+  const broken = await startServer('throwing-login-module', 'success');
+  try {
+    await fs.writeFile(path.join(broken.ala, 'src/coding-agents/logins.mjs'), "throw new Error('simulated import failure');\n");
+    const { id, report } = await seed(broken);
+    assert.deepEqual(await broken.request('/api/runs', { exampleId: id, reportPath: report.path }, 503), { error: homeUnavailable(reasons.noModule()) });
+    assert.deepEqual(await fs.readdir(broken.runs), []);
+  } finally { await broken.stop(); }
 });
