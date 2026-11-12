@@ -25,11 +25,13 @@ away from every folder an audited agent can read, and seal it before a campaign.
 import argparse
 import datetime
 import hashlib
+import importlib
 import itertools
 import json
 from pathlib import Path
 import platform
 import random
+import sys
 
 GENERATOR_VERSION = 4
 MAX_WORLDS = 200_000
@@ -863,6 +865,30 @@ def packet(rng):
 
 FAMILIES = {'ledger': ledger, 'deadlines': deadlines, 'approvals': approvals, 'packet': packet}
 
+# Harder families: larger registers, and verdicts that need several rules applied together. Each lives in its
+# own module beside this file, exports `build(rng)`, and is loaded on first use. The four families above do
+# not depend on them, so their cases stay the same when a harder family changes.
+HARD_FAMILIES = {'casework': 'hard_casework', 'procurement': 'hard_procurement'}
+
+
+def family_names():
+    return list(FAMILIES) + list(HARD_FAMILIES)
+
+
+def family_builder(name):
+    """The function that builds one case of a family from a random source."""
+    if name in FAMILIES:
+        return FAMILIES[name]
+    if name not in HARD_FAMILIES:
+        raise GenerationError(f'Unknown family: {name}')
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        return importlib.import_module(HARD_FAMILIES[name]).build
+    except ImportError as error:
+        raise GenerationError(f'Family {name} is not available: {error}')
+
 
 # ---------- Cases, keys and files ----------
 
@@ -879,7 +905,10 @@ def expectation(dossier, ident, variant, item, case):
             echo = believed
             echo_derivation = {name: told_derivation[name] for name in ('worlds', 'worlds_where_true')}
     return {'claim_id': ident, 'variant': variant, 'semantic_state': state, 'prospective_disposition': disposition,
-            'source_anchors': [f'sources/{name}#{anchor}' for name, anchor in item['cites'] if name in case['sources']],
+            # A claim may name, as `anchors`, the passages that decide it where these are fewer than the passages its
+            # report cites: a report may cite two issues of a document, of which only the one in force is evidence.
+            'source_anchors': [f'sources/{name}#{anchor}' for name, anchor in item.get('anchors') or item['cites']
+                               if name in case['sources']],
             'rationale': rationale(item, derivation, mark), 'claim_kind': item['kind'], 'error_type': item['error'],
             'derivation': derivation, 'echo_state': echo, 'echo_derivation': echo_derivation,
             'claim_text': item['text']}
@@ -887,10 +916,9 @@ def expectation(dossier, ident, variant, item, case):
 
 def build_case(family, seed, index):
     """One dossier: sources, a correct report, a mixed report, and the computed key for both."""
-    if family not in FAMILIES:
-        raise GenerationError(f'Unknown family: {family}')
+    builder = family_builder(family)
     rng = random.Random(f'evalsuite:{GENERATOR_VERSION}:{seed}:{index}:{family}')
-    case = FAMILIES[family](rng)
+    case = builder(rng)
     slots = case['slots'][:]
     rng.shuffle(slots)
     correct = [true for true, _ in slots]
@@ -898,16 +926,26 @@ def build_case(family, seed, index):
         if judge(item, case['base'], case['unknowns'])[0] != 'supported':
             raise GenerationError(f'A claim meant to be correct is not supported: {item["text"]}')
     # A mutation is an error only if the computation says so; one that happens to stay true is dropped.
-    usable = {}
+    usable, left_open = {}, {}
     for position, (_, mutations) in enumerate(slots):
-        options = [m for m in mutations if judge(m, case['base'], case['unknowns'])[0] != 'supported']
+        states = [(m, judge(m, case['base'], case['unknowns'])[0]) for m in mutations]
+        options = [m for m, state in states if state != 'supported']
         if options:
             usable[position] = options
+            left_open[position] = [m for m, state in states if state == 'undetermined']
     wanted = max(2, round(len(slots) * rng.uniform(0.3, 0.5)))
     if len(usable) < wanted:
         raise GenerationError(f'Only {len(usable)} of the {wanted} claims to alter have a usable error')
     mixed = correct[:]
-    for position in rng.sample(sorted(usable), wanted):
+    # A family may ask, with `open_claims`, that this many of the altered claims be ones the sources leave open:
+    # a plain draw seldom picks one. A family that does not ask gets the plain draw, unchanged.
+    reserved = []
+    if case.get('open_claims'):
+        openable = sorted(position for position in usable if left_open[position])
+        reserved = rng.sample(openable, min(case['open_claims'], len(openable), wanted))
+        for position in reserved:
+            mixed[position] = rng.choice(left_open[position])
+    for position in rng.sample(sorted(set(usable) - set(reserved)), wanted - len(reserved)):
         mixed[position] = rng.choice(usable[position])
     dossier = f'g{seed}-{index:03d}-{family}'
     rows = [expectation(dossier, f'C{n:02d}', variant, item, case)
@@ -968,12 +1006,13 @@ def main():
     parser.add_argument('--keys', type=Path, required=True, help='New folder for the answer keys, outside the fixtures')
     parser.add_argument('--seed', type=int, required=True)
     parser.add_argument('--dossiers', type=int, default=12)
-    parser.add_argument('--families', default=','.join(FAMILIES), help='Comma-separated: ' + ', '.join(FAMILIES))
+    parser.add_argument('--families', default=','.join(FAMILIES),
+                        help='Comma-separated: ' + ', '.join(family_names()) + '. Default: ' + ', '.join(FAMILIES))
     args = parser.parse_args()
     try:
         families = [name for name in args.families.split(',') if name]
-        if not families or any(name not in FAMILIES for name in families):
-            raise GenerationError(f'Choose families from: {", ".join(FAMILIES)}')
+        if not families or any(name not in family_names() for name in families):
+            raise GenerationError(f'Choose families from: {", ".join(family_names())}')
         if args.dossiers < 1:
             raise GenerationError('--dossiers needs a positive number')
         summary = write_suite(args.fixtures, args.keys, args.seed, args.dossiers, families)
@@ -988,4 +1027,6 @@ def main():
 
 
 if __name__ == '__main__':
+    # A harder family imports this file by name. Give it this module, not a second copy of it.
+    sys.modules.setdefault('generate', sys.modules[__name__])
     main()

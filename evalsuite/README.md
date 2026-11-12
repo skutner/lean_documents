@@ -164,6 +164,51 @@ Limits:
 - Only `supported`, `refuted` and `undetermined` are generated. No case has `both` or `not_applicable` claims.
 - A capable agent may judge these cases almost perfectly with or without the skill. If every contestant is near 100%, the cases cannot separate them, and harder families are needed before any conclusion.
 
+### Two harder families
+
+The four families above are short: a dossier is about 700 words, its tables have five to eight rows, and a claim needs one lookup or one short sum. Two more families, `casework` and `procurement`, are larger and need several rules applied together. They are not part of the default set and have to be named:
+
+```sh
+python3 evalsuite/generate.py --fixtures /campaign/fixtures --keys /campaign/keys-draft --seed 7 --dossiers 8 \
+  --families casework,procurement
+```
+
+Each lives in its own module beside `generate.py` (`hard_casework.py`, `hard_procurement.py`) and is loaded on first use, so the four families above give the same cases whether or not these two change. Their keys are computed the same way, by trying every combination the sources allow.
+
+| | `casework` | `procurement` |
+| --- | --- | --- |
+| Subject | A regulator's notices and the replies to them | Purchase requests against an approval policy |
+| Register | 46 to 68 notices | 65 to 75 requests |
+| Sources | 7 files, 3,500 to 4,300 words | 8 files, 4,000 to 4,250 words |
+| Rules that interact | Reply period by class; an amendment from a stated date; the day of issue is not counted; a last day on a weekend or holiday moves to the next working day; an extension that can be refused, pending, void or barred; a receipt rule for post; on time or late | Conversion at the rate of the month; requests of one requester to one supplier in one week assessed together; three tiers by amount; an amendment from a stated date; approving roles; acting appointments with first and last day; the requester's own signature never counts; in some policies an exemption for small amounts |
+| Open facts | Posting dates and decision dates that the register does not show, each with its possible days listed | An illegible signature, an unreadable amount and the last day of an appointment, each with its alternatives listed |
+| Claims per report | 14 | 14 |
+
+The figures are those of seeds 1 to 60.
+
+What sets them apart from the four families:
+
+- **Several rules per verdict.** A claim about one notice or request is drawn from rows on which at least two rules decide the answer. Counts, totals and "the latest" or "the largest" run over the whole register, so one rule misapplied to one row changes them.
+- **Errors are single slips.** A wrong claim states what a reader reaches by one slip: the rule engine run again with one rule switched off, or with one input swapped. The key names the slip as `error_type`.
+- **Two issues of one document.** A casework dossier holds two registers and a procurement dossier two policies, with neutral file names, the same headings, and requests or dates that fit both. Only the document index says which is in force, and it is the later-dated one in about half the dossiers. A claim that depends on the document cites both issues and the index; the key's `source_anchors` name only the issue in force.
+- **Open claims in every altered report.** A family may ask `build_case`, through `open_claims`, that some of the altered claims be ones the sources leave open. Both ask for two. Over seeds 1 to 60 that gives 149 and 151 open claims among 840 altered-report claims. The correct report holds claims that are settled although an open fact touches them.
+- **One subject, one claim.** No notice or request is the subject of two claims of a report, and both reports of a dossier hold the same kinds of claims.
+
+The tests (`tests.test_evalsuite_hard_casework`, `tests.test_evalsuite_hard_procurement`) derive every key a second time from the rendered Markdown over seeds 1 to 60, finding the document in force from the index, and check the properties above. They also check that the two issues of a document cannot be told apart by the properties the tests can state: wording, order of the rows, dates on non-working days, and requests that sit exactly on the limits of only one policy.
+
+Checked once on 12 November 2026, outside the tests:
+
+- **Independent review of each family.** No wrong key was found: a reviewer's own comparison agreed with the key on 24,640 key rows of casework and on every claim variant of 5,000 procurement dossiers. The findings were about patterns that gave a verdict away without the sources, and each was fixed and tested.
+- **Blind readers.** Separate agents were given rendered cases only (one report per dossier, no keys, no code, not told which reports were altered), wrote their own rule engines and judged every claim. On 224 casework claims and 224 procurement claims, over the successive versions of the text and with readers of two model families, every verdict agreed with the key. The sentences they found open to a second reading were reworded: what "pending" means for an extension, what counts as a shifted deadline, and how the exemption relates to the tier rule.
+
+Limits:
+
+- **Not hard for a careful, capable agent.** Every blind reader was told to read every document and to compute by script, and judged every claim as the key does. These families ask for completeness and care on a larger dossier and under a time limit. Whether a plain agent falls short of that, and whether the skill helps, is what a campaign has to show; none has been run on them.
+- **Casework.** "Exactly N … received after the deadline" is wrong in about two of three appearances, because an open fact usually moves that count. A slip that leaves out the shift can state a deadline on a Saturday or a Sunday. The rarest slips are injected one to three times in 60 dossiers. A reader who checks each register against the extension register or a cover note may still tell the registers apart.
+- **Procurement.** "Exactly" on a count over the whole register is wrong in about three of five appearances in altered reports. A compliance claim is right about two times in three in altered reports, whichever way it is worded. Claims that compare two named departments or currencies leave 29 of 71 wordings one-sided under the plain normalisation of the wording test, which pins that set. In 34 of 60 dossiers the open facts change counts and amounts but no request's compliance.
+- **Procurement, two patterns the last review found and that are not fixed.** A count or an amount for one request that is worded "exactly" is never wrong in a correct report, which holds at most two such claims, and is wrong in most of its appearances in an altered report (716 of 837 counts and 377 of 498 amounts over 600 seeds), which holds up to five; a reader who knew this could name the altered report about four times in five. And some planted requests exist only around the limits of the policy in force, for example an amount in a foreign currency that is above a limit as written and at most the limit in euro; a guess from those names the policy in force 520 times in 600 and the other 27 times. The index is the only statement of which policy is in force, but not the only pointer for a reader who goes looking. Both need knowledge of how the cases are built. Fix them before a campaign whose scores are reported.
+- **Rule sentences.** What is said above about the rule sentences of the four families holds here with more sentences: the second derivation reads them as the generator does. The blind readers are the check on that, and they read only some seeds.
+
 ## A blind campaign with three contestants
 
 `run_blind.py` runs the same agent, model and time limit in three ways, defined in `arms.json`:
