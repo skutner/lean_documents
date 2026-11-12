@@ -1505,5 +1505,73 @@ class ComparisonTests(CampaignCase):
         self.assertGreater(result['baseline']['false_support']['count'], 0)
 
 
+class AlaLocationTests(unittest.TestCase):
+    """Where the runner finds ALA, and which commit it records for a copy that npm installed."""
+
+    COMMIT = 'c' * 40
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp(prefix='ala-location-', dir=TEST_RUN)) / 'repository'
+        self.installed = self.repo / 'node_modules/advanced-language-agent'
+        self.write_ala(self.installed)
+        # A Git repository with one commit around the copy: a `git rev-parse HEAD` inside the copy would name that commit.
+        git = ['git', '-C', str(self.repo), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid']
+        try:
+            subprocess.run(git + ['init', '-q'], check=True, capture_output=True)
+            subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'around'], check=True, capture_output=True)
+            self.around = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True, text=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError) as error:
+            self.skipTest('Git is needed to build the repository around the fixture: ' + str(error))
+        for patch in (mock.patch.object(run_blind, 'REPO', self.repo), mock.patch.dict(os.environ)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        os.environ.pop('ALA_CLI', None)
+
+    def write_ala(self, root):
+        (root / 'bin').mkdir(parents=True)
+        (root / 'bin/ala.mjs').write_text('', encoding='utf-8')
+        (root / 'package.json').write_text(json.dumps({'name': 'advanced-language-agent', 'version': '0.1.0'}), encoding='utf-8')
+
+    def write_lock(self, resolved, name='node_modules/.package-lock.json'):
+        lock = {'packages': {'node_modules/advanced-language-agent': {'resolved': resolved}}}
+        (self.repo / name).write_text(json.dumps(lock), encoding='utf-8')
+
+    def test_installed_copy_is_found_with_the_commit_npm_recorded(self):
+        self.write_lock('git+ssh://git@github.com/AssistOS-AI/AdvancedLanguageAgent.git#' + self.COMMIT)
+        found = run_blind.locate_ala()
+        self.assertEqual(found, {'entry': str((self.installed / 'bin/ala.mjs').resolve()), 'version': '0.1.0', 'commit': self.COMMIT})
+
+    def test_commit_is_what_npm_installed_not_what_the_root_lock_would_install(self):
+        # After a pull that moves the pin, the root lock names the new commit while node_modules still holds the old one.
+        self.write_lock('git+ssh://git@github.com/AssistOS-AI/AdvancedLanguageAgent.git#' + 'd' * 40, name='package-lock.json')
+        self.assertIsNone(run_blind.locate_ala()['commit'], 'the root lock alone names no installed commit')
+        self.write_lock('git+ssh://git@github.com/AssistOS-AI/AdvancedLanguageAgent.git#' + self.COMMIT)
+        self.assertEqual(run_blind.locate_ala()['commit'], self.COMMIT)
+
+    def test_copy_without_git_folder_never_gets_the_commit_of_the_repository_around_it(self):
+        self.assertEqual(subprocess.run(['git', '-C', str(self.installed), 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip(), self.around,
+                         'Git, asked inside the copy, names the commit of the repository around it')
+        for lock in (None, 'https://registry.npmjs.org/advanced-language-agent/-/advanced-language-agent-0.1.0.tgz', 7):
+            if lock is not None:
+                self.write_lock(lock)
+            self.assertIsNone(run_blind.locate_ala()['commit'], lock)
+            self.assertIsNone(run_blind.locate_ala(str(self.installed))['commit'], lock)
+
+    def test_checkout_beside_or_inside_the_repository_comes_first(self):
+        self.write_lock('git+ssh://git@github.com/AssistOS-AI/AdvancedLanguageAgent.git#' + self.COMMIT)
+        inside = self.repo / 'AdvancedLanguageAgent'
+        self.write_ala(inside)
+        self.assertEqual(run_blind.locate_ala()['entry'], str((inside / 'bin/ala.mjs').resolve()))
+        beside = self.repo.parent / 'AdvancedLanguageAgent'
+        self.write_ala(beside)
+        self.assertEqual(run_blind.locate_ala()['entry'], str((beside / 'bin/ala.mjs').resolve()))
+
+    def test_without_any_copy_the_runner_says_how_to_name_one(self):
+        shutil.rmtree(self.installed)
+        with self.assertRaises(run_blind.RunError) as raised:
+            run_blind.locate_ala()
+        self.assertIn('ALA was not found', str(raised.exception))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -425,7 +425,7 @@ export async function main({root,timeout=120000,helperOptions={},homeDir=os.home
  // agent-home base, because this check imports ALA's modules unconfined. ALA_CLI is the operator's own statement.
  let homeBase=null;try{homeBase=agentHomeLocation({env:process.env,home:homeDir}).base;}catch{}
  const ala=resolveALA(root,createSettingsStore(path.join(root,'tmp/readable-pilot/agent-settings.md')).read(),{refused:[path.join(root,'tmp'),homeBase].filter(Boolean)});
- if(!ala.found){console.error('ALA was not found. Checked: '+ala.checked.map(c=>c.location+' ('+c.reason+')').join(', ')+'. Set ALA_CLI or save the ALA location in Agent settings.');return 2;}
+ if(!ala.found){console.error('ALA was not found. Checked: '+ala.checked.map(c=>c.location+' ('+c.reason+')').join(', ')+'. Run "npm install" in this repository, set ALA_CLI or save the ALA location in Agent settings.');return 2;}
  let logins;try{logins=await loadALALogins(ala.entry);}catch(error){console.error(error.message);return 2;}
  let python=null,pythonError=null,lean=null,leanError=null;
  try{python=resolvePython();}catch(error){pythonError=error.message;}

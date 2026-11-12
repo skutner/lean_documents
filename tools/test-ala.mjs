@@ -119,6 +119,32 @@ test('ALA location: ALA_CLI overrides, a saved location is authoritative and inv
   }
 });
 
+test('ALA location: the copy npm install puts under node_modules is found after a checkout beside or inside the repository', async () => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ala-dependency-')));
+  const saved = process.env.ALA_CLI, savedPath = process.env.PATH; delete process.env.ALA_CLI; process.env.PATH = path.join(directory, 'empty-path');
+  try {
+    const app = path.join(directory, 'lean_documents'); await fs.mkdir(app);
+    const missing = resolveALA(app, {});
+    assert.equal(missing.found, false); assert.deepEqual(missing.checked.map(c => c.source), ['parent', 'application', 'dependency']);
+    const installed = await createFakeALA(path.join(app, 'node_modules/advanced-language-agent'), '');
+    const found = resolveALA(app, {});
+    assert.equal(found.found, true); assert.equal(found.source, 'dependency'); assert.equal(found.entry, path.join(installed, 'bin/ala.mjs'));
+    // npm puts node_modules/.bin on PATH, where `ala` is a link to the same entry: the dependency is named first.
+    await fs.mkdir(path.join(app, 'node_modules/.bin')); await fs.symlink('../advanced-language-agent/bin/ala.mjs', path.join(app, 'node_modules/.bin/ala'));
+    process.env.PATH = path.join(app, 'node_modules/.bin');
+    assert.equal(resolveALA(app, {}).source, 'dependency');
+    // A saved location and a checkout inside or beside the repository still come first.
+    const wrong = resolveALA(app, { alaPath: path.join(directory, 'missing') });
+    assert.equal(wrong.found, false, 'an invalid saved location is not replaced by the installed copy'); assert.deepEqual(wrong.checked.map(c => c.source), ['configured']);
+    await createFakeALA(path.join(app, 'AdvancedLanguageAgent'), ''); assert.equal(resolveALA(app, {}).source, 'application');
+    await createFakeALA(path.join(directory, 'AdvancedLanguageAgent'), ''); assert.equal(resolveALA(app, {}).source, 'parent');
+  } finally {
+    if (saved === undefined) delete process.env.ALA_CLI; else process.env.ALA_CLI = saved;
+    process.env.PATH = savedPath;
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('the ALA location rule refuses a location inside tmp/ by folder identity', async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ala-rule-')));
   const saved = process.env.ALA_CLI; delete process.env.ALA_CLI;

@@ -5,12 +5,13 @@ Check claims in a supplied report against its source documents. Explain what is 
 ## Current readable-document pilot
 
 ```sh
+npm install
 npm run start
 ```
 
-This runs `node tools/pilot.mjs`; there is nothing to install first, because the tools use only built-in Node.js modules.
+`npm install` fetches the one dependency, [ALA](tools/README.md#coding-agents-through-ala), at the commit pinned in `package.json`; the tools themselves use only built-in Node.js modules. `npm run start` runs `node tools/pilot.mjs`.
 
-The tools run on Linux and macOS. Open the address the server prints: `http://127.0.0.1:8787` unless `PORT` is set; `localhost` does not work. The dependency-free Node.js server displays the investment approval case in English and Romanian, plus acquisition financing, project funding, operating budgets, research funding and three literary-analysis dossiers, each in English and Romanian. All navigation is in the left tree: examples, input files and reports, findings, evidence and Lean sources. The selected document opens directly in the right pane, without popup readers or secondary navigation bars. Each report retains only its current verification. Finding nodes show a status icon and label; unfinished audits remain explicitly pending.
+The tools run on Linux and macOS. Open the address the server prints: `http://127.0.0.1:8787` unless `PORT` is set; `localhost` does not work. The Node.js server displays the investment approval case in English and Romanian, plus acquisition financing, project funding, operating budgets, research funding and three literary-analysis dossiers, each in English and Romanian. All navigation is in the left tree: examples, input files and reports, findings, evidence and Lean sources. The selected document opens directly in the right pane, without popup readers or secondary navigation bars. Each report retains only its current verification. Finding nodes show a status icon and label; unfinished audits remain explicitly pending.
 
 Choose English or Romanian when creating an example. You can upload a supplied report or generate a new report with the separate investment-report-writer skill, then audit it independently. Uploaded documents retain their original bytes; authored audit explanations and document templates use the selected language. Internal JSON preserves typed records, while semantic templates generate complete readable documents using prose, tables and descriptive links. The UI does not display internal data as recursive trees.
 

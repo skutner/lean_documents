@@ -78,7 +78,7 @@ function locateALA(root, base, env) {
   const refusal = ala.checked.find(candidate => candidate.refusedInside);
   if (refusal) throw new Exit(3, refusal.reason);
   if (!ala.found) {
-    throw new Exit(3, `ALA was not found. Checked: ${ala.checked.map(c => `${c.location} (${c.reason})`).join(', ')}. Set ALA_CLI, or save the ALA location in Agent settings.`);
+    throw new Exit(3, `ALA was not found. Checked: ${ala.checked.map(c => `${c.location} (${c.reason})`).join(', ')}. Run "npm install" in this repository, set ALA_CLI, or save the ALA location in Agent settings.`);
   }
   if (ala.source !== 'environment') {
     for (const refused of [path.join(root, 'tmp'), base]) {

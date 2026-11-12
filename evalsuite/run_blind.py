@@ -354,10 +354,26 @@ def build_bundle(bundle, report, sources, sheet, lean):
 
 # ---------- ALA ----------
 
+def installed_commit(root, repo=None):
+    """The commit npm recorded for the ALA copy it installed at `root`, or None. It is read from
+    node_modules/.package-lock.json, which npm writes after an install and which names what is on disk; the
+    package-lock.json at the root names what the next install would fetch, which may differ."""
+    repo = Path(repo or REPO)
+    try:
+        key = Path(root).resolve().relative_to(repo.resolve()).as_posix()
+        resolved = read_json(repo / 'node_modules/.package-lock.json')['packages'][key]['resolved']
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    match = re.search(r'#([0-9a-f]{40})$', resolved) if isinstance(resolved, str) else None
+    return match.group(1) if match else None
+
+
 def locate_ala(explicit=None):
-    """An AdvancedLanguageAgent checkout: --ala, then ALA_CLI, then beside or inside this repository."""
+    """An AdvancedLanguageAgent checkout: --ala, then ALA_CLI, then beside or inside this repository, then the copy
+    `npm install` puts under node_modules. The commit is the checkout's own HEAD; a copy without a Git folder of its
+    own gets the commit npm recorded when it installed it, or none, never the HEAD of a repository around it."""
     candidates = [explicit] if explicit else [os.environ['ALA_CLI']] if os.environ.get('ALA_CLI') else [
-        REPO.parent / 'AdvancedLanguageAgent', REPO / 'AdvancedLanguageAgent']
+        REPO.parent / 'AdvancedLanguageAgent', REPO / 'AdvancedLanguageAgent', REPO / 'node_modules/advanced-language-agent']
     for candidate in candidates:
         root = Path(candidate)
         root = root.parent.parent if root.name == 'ala.mjs' else root
@@ -368,13 +384,16 @@ def locate_ala(explicit=None):
             continue
         if entry.is_file() and package.get('name') == 'advanced-language-agent':
             commit = None
-            try:
-                done = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True, text=True, timeout=20)
-                commit = done.stdout.strip() if done.returncode == 0 else None
-            except (OSError, subprocess.SubprocessError):
-                pass
+            if not (root / '.git').exists():
+                commit = installed_commit(root)
+            else:
+                try:
+                    done = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True, text=True, timeout=20)
+                    commit = done.stdout.strip() if done.returncode == 0 else None
+                except (OSError, subprocess.SubprocessError):
+                    pass
             return {'entry': str(entry.resolve()), 'version': package.get('version'), 'commit': commit}
-    raise RunError('ALA was not found. Pass --ala with the AdvancedLanguageAgent folder, or set ALA_CLI.')
+    raise RunError('ALA was not found. Run "npm install" in this repository, pass --ala with the AdvancedLanguageAgent folder, or set ALA_CLI.')
 
 
 def ala_arguments(entry, selection, run, lean_root=None, home=None, session=None, python_root=None):

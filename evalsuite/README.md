@@ -185,7 +185,7 @@ python3 evalsuite/run_blind.py probe …same arguments…
 python3 evalsuite/run_blind.py run   …same arguments…
 ```
 
-`plan` shows what would run and starts nothing. `probe` and `run` need Linux with Bubblewrap or macOS with `sandbox-exec`, and an AdvancedLanguageAgent checkout (`--ala`, or `ALA_CLI`). Only `run` reaches a model.
+`plan` shows what would run and starts nothing. `probe` and `run` need Linux with Bubblewrap or macOS with `sandbox-exec`, and ALA: `--ala`, else `ALA_CLI`, else an `AdvancedLanguageAgent` checkout beside or inside this repository, else the copy `npm install` puts under `node_modules`. For that copy the recorded commit is the one npm wrote to `node_modules/.package-lock.json` when it installed it; any other copy without a Git folder of its own records no commit. Only `run` reaches a model.
 
 What the agent can read during a review:
 

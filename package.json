@@ -6,5 +6,8 @@
   "scripts": {
     "start": "node tools/pilot.mjs",
     "test": "node tools/verify.mjs"
+  },
+  "dependencies": {
+    "advanced-language-agent": "git+https://github.com/AssistOS-AI/AdvancedLanguageAgent.git#cae156389e0ee5118adbed896df1281cc01795a9"
   }
 }

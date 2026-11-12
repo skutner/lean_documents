@@ -26,11 +26,12 @@ function onPath(){
  for(const folder of (process.env.PATH||'').split(path.delimiter).filter(Boolean)){const file=path.join(folder,'ala');try{if(fs.statSync(file).isFile())return fs.realpathSync(file);}catch{}}
  return null;
 }
-// ALA_CLI is an operator override; a saved location comes next; automatic detection is the fallback.
+// ALA_CLI is an operator override; a saved location comes next; automatic detection is the fallback: a checkout beside or
+// inside the repository, then the copy `npm install` puts under node_modules (the commit pinned in package.json), then PATH.
 export function alaCandidates(root,configured){
  if(process.env.ALA_CLI)return [{source:'environment',location:process.env.ALA_CLI}];
  if(configured)return [{source:'configured',location:configured}];
- const candidates=[{source:'parent',location:path.resolve(root,'..','AdvancedLanguageAgent')},{source:'application',location:path.resolve(root,'AdvancedLanguageAgent')}];
+ const candidates=[{source:'parent',location:path.resolve(root,'..','AdvancedLanguageAgent')},{source:'application',location:path.resolve(root,'AdvancedLanguageAgent')},{source:'dependency',location:path.resolve(root,'node_modules','advanced-language-agent')}];
  const installed=onPath();if(installed)candidates.push({source:'path',location:installed});
  return candidates;
 }
@@ -62,7 +63,7 @@ export function validateALALocation(location,{root=ROOT,refused=[]}={}){
  const inside=refusedRoot(result.entry,refusedRoots(root,refused));if(inside)throw fail(locationRefused(inside));
  return location.trim();
 }
-export const alaUnavailable='ALA was not found. Set its location in Agent Settings, or start the server with ALA_CLI pointing to the AdvancedLanguageAgent checkout.';
+export const alaUnavailable='ALA was not found. Run "npm install" in this repository, set its location in Agent Settings, or start the server with ALA_CLI pointing to the AdvancedLanguageAgent checkout.';
 
 // ---------- Saved agent settings ----------
 // A readable Markdown record, so the legacy Markdown-only profile never gains a data document.
