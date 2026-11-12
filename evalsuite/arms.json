@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "task": "prompts/task.md",
+  "arms": [
+    {"id": "plain", "label": "The same agent with no skill and no Lean", "skill": false, "lean": false, "prompt": "prompts/plain.md"},
+    {"id": "skill-no-lean", "label": "Evidence-to-Proof Review without Lean", "skill": true, "lean": false, "prompt": "prompts/skill-no-lean.md"},
+    {"id": "skill-lean", "label": "Evidence-to-Proof Review with Lean", "skill": true, "lean": true, "prompt": "prompts/skill-lean.md"}
+  ]
+}

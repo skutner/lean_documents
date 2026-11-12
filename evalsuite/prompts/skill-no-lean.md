@@ -1,0 +1,3 @@
+Follow the Evidence-to-Proof Review skill in `skill/SKILL.md`. The pilot tools it mentions under `tools/` are not part of this run: use its Markdown-native workflow, described in `skill/references/markdown-native.md`, with the helper `skill/scripts/markdown_audit.py`, and keep the audit workspace under `work/` in the folder you start in.
+
+No Lean toolchain is available in this run. Do everything else the skill asks. Where the skill would run a Lean check, record the formal status as `not_attempted` or `blocked` and say that Lean was unavailable. The helper's final `check` step needs Lean, so say which mechanical checks you could not run. In the answer sheet, `formal_status` is `not_attempted` or `blocked` for every claim.

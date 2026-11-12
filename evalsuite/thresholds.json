@@ -1,0 +1,11 @@
+{
+  "require_isolated_keys": true,
+  "require_no_contamination_flags": true,
+  "require_full_coverage": true,
+  "min_repeats_per_report": 3,
+  "max_false_formal_certainty": 0,
+  "max_false_support_upper_bound": 0.05,
+  "max_false_refutation_upper_bound": 0.05,
+  "min_error_detection_lower_bound": 0.8,
+  "min_lift_over_best_constant_on_flawed_reports": 0.3
+}
