@@ -3,8 +3,10 @@
 The tools run on Linux and macOS. Start the dependency-free Node.js server in a terminal:
 
 ```sh
-node tools/pilot.mjs
+npm run start
 ```
+
+The root `package.json` only names two commands and has no dependencies, so there is no `npm install` step: `npm run start` is `node tools/pilot.mjs` and `npm test` is `node tools/verify.mjs`. Either form works.
 
 The server prints `Audit laboratory: http://127.0.0.1:8787`. Open that address; see [The address](#the-address). The current examples are in `examples/pilot/`; execution artifacts are retained under `tmp/readable-pilot/`. The server uses built-in Node.js modules. Real writing and auditing run through [ALA (Advanced Language Agent)](https://github.com/AssistOS-AI/AdvancedLanguageAgent) with an installed coding agent that has a pilot login, plus Python 3.12 or later and the repository-local Lean toolchain. See [Platforms and toolchain](#platforms-and-toolchain), [Coding agents through ALA](#coding-agents-through-ala) and [Dedicated agent home](#dedicated-agent-home).
 
