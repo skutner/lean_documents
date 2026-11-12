@@ -511,6 +511,22 @@ await test('the page allows only its own script, and the server answers only for
       assert.equal(refused.status, 400, host); assert.deepEqual(JSON.parse(refused.body), { error: `Use http://127.0.0.1:${server.port}` }, host);
     }
     assert.equal((await raw(server.port, ['GET /api/examples HTTP/1.1'])).status, 200, 'GET /api/examples on 127.0.0.1');
+    // A page request typed as localhost:<PORT> is redirected to the same path on 127.0.0.1:<PORT>; the target never takes
+    // a host from the request. Nothing else under that name is served or redirected.
+    const accepted = `http://127.0.0.1:${server.port}`, local = { host: `localhost:${server.port}` };
+    for (const [target, location] of [['/', '/'], ['/anything?x=1&y=%20z', '/anything?x=1&y=%20z'], ['//evil.example/x', '/x'], ['http://evil.example/y?z=1', '/y?z=1'], ['/api', '/api']]) {
+      const redirected = await raw(server.port, [`GET ${target} HTTP/1.1`], '', local);
+      assert.equal(redirected.status, 302, target); assert.equal(/^Location: (.*)$/mi.exec(redirected.head)?.[1], accepted + location, target);
+      assert.match(redirected.head, /^Cache-Control: no-store$/mi, target); assert.equal(redirected.body, '', target);
+    }
+    for (const lines of [['GET /api/examples HTTP/1.1'], ['GET /api/../api/examples HTTP/1.1'], ['POST / HTTP/1.1', 'Content-Length: 0'], ['HEAD / HTTP/1.1'], ['GET / HTTP/1.1', 'Content-Length: 2']]) {
+      const refused = await raw(server.port, lines, lines.at(-1) === 'Content-Length: 2' ? '{}' : '', local);
+      assert.equal(refused.status, 400, lines[0]); assert.doesNotMatch(refused.head, /^Location:/mi, lines[0]);
+    }
+    for (const host of [`localhost:${server.port + 1}`, 'localhost', `LOCALHOST:${server.port}`, `localhost.evil.example:${server.port}`, `[::1]:${server.port}`]) {
+      const refused = await raw(server.port, ['GET / HTTP/1.1'], '', { host });
+      assert.equal(refused.status, 400, host); assert.doesNotMatch(refused.head, /^Location:/mi, host);
+    }
     // Expect: 100-continue. The client is invited to send its body, but never under another Host.
     const body = JSON.stringify({ title: 'Continued' });
     const invited = await raw(server.port, ['POST /api/examples HTTP/1.1', 'Content-Type: application/json', 'Expect: 100-continue', `Content-Length: ${body.length}`], body, { wait: 500 });

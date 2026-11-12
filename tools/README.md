@@ -76,7 +76,7 @@ Lean is looked for only at `tmp/toolchains/<folder>/bin/lean`, where `<folder>` 
 
 ## The address
 
-Open `http://127.0.0.1:<port>`; the port is `PORT`, else 8787. Only that address works: the server answers a request for any other host name, `localhost` included, with `Use http://127.0.0.1:<port>`. The name `localhost` also reaches `[::1]`, where a sandboxed run may be listening.
+Open `http://127.0.0.1:<port>`; the port is `PORT`, else 8787. Only that address is served: the server answers a request for any other host name with `Use http://127.0.0.1:<port>`. The name `localhost` also reaches `[::1]`, where a sandboxed run may be listening, so the page never runs under that name. As a convenience, a page request typed as `http://localhost:<port>` is redirected to the same path on `http://127.0.0.1:<port>`; API calls under `localhost` are still refused. The redirect only helps when the request reaches this server: type `127.0.0.1` when you want to be sure which page you get.
 
 The API has no sign-in. Any process on this machine that can reach the port can call it, including a sandboxed run, which shares the host network (see [Limits](#limits)). A page of another site open in your browser is only partly kept out: its POST requests are refused by the Origin check and it cannot read any answer, but its GET requests are served (see [Limits](#limits)).
 

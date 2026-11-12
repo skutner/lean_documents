@@ -303,7 +303,15 @@ function refusedOutsideApi(req,res,url){
 // Only 127.0.0.1: the name localhost also reaches [::1], where a confined run may listen and share the origin. The
 // refusal is answered unread, so a caller cannot make the server read an upload by naming another Host. The router and
 // checkContinue both use it.
-function acceptedURL(req,res){try{if(req.headers.host!==`127.0.0.1:${PORT}`)throw Error(`Use http://127.0.0.1:${PORT}`);return new URL(req.url,`http://127.0.0.1:${PORT}`);}catch(e){answerUnread(req,res,400,{'Cache-Control':'no-store'},{error:e.message});return null;}}
+// One convenience: a page request typed as localhost:<PORT> (a GET outside /api/ without a body) is redirected to the same
+// path on 127.0.0.1:<PORT>, so the page itself only ever runs from the accepted address. The target is built from the
+// parsed path and query alone, never from a host in the request, and nothing under /api/ is redirected.
+function redirectedFromLocalhost(req,res){
+ if(req.headers.host!==`localhost:${PORT}`||req.method!=='GET'||(req.headers['content-length']&&req.headers['content-length']!=='0')||req.headers['transfer-encoding'])return false;
+ const target=new URL(req.url,`http://127.0.0.1:${PORT}`);if(target.pathname.startsWith('/api/'))return false;
+ res.writeHead(302,{Location:`http://127.0.0.1:${PORT}${target.pathname}${target.search}`,'Cache-Control':'no-store','Content-Length':0});res.end();return true;
+}
+function acceptedURL(req,res){try{if(req.headers.host!==`127.0.0.1:${PORT}`){if(redirectedFromLocalhost(req,res))return null;throw Error(`Use http://127.0.0.1:${PORT}`);}return new URL(req.url,`http://127.0.0.1:${PORT}`);}catch(e){answerUnread(req,res,400,{'Cache-Control':'no-store'},{error:e.message});return null;}}
 const server=http.createServer(async(req,res)=>{
  try{
   const url=acceptedURL(req,res);if(!url)return;let result;
