@@ -143,8 +143,10 @@ def citation(cites):
         f'{name} {", ".join(anchors)}' for name, anchors in grouped.items()) + '.'
 
 
-def report(title, items):
+def report(title, items, preamble=None):
     blocks = [f'# {title}\n']
+    if preamble:
+        blocks.append(preamble.strip() + '\n')
     for number, item in enumerate(items, 1):
         ident = f'C{number:02d}'
         blocks.append(f'<a id="{ident}"></a>\n**{ident}.** {item["text"]} {citation(item["cites"])}\n')
@@ -868,7 +870,13 @@ FAMILIES = {'ledger': ledger, 'deadlines': deadlines, 'approvals': approvals, 'p
 # Harder families: larger registers, and verdicts that need several rules applied together. Each lives in its
 # own module beside this file, exports `build(rng)`, and is loaded on first use. The four families above do
 # not depend on them, so their cases stay the same when a harder family changes.
-HARD_FAMILIES = {'casework': 'hard_casework', 'procurement': 'hard_procurement'}
+HARD_FAMILIES = {'casework': 'hard_casework', 'procurement': 'hard_procurement',
+                 # Families with a named flawed reader (see the README): each misleads one specific wrong way
+                 # of reading the dossier and records, as `echo_state` or `lure_states`, what that reader answers.
+                 'attested': 'lure_attested', 'conflict': 'lure_conflict', 'defaults': 'lure_defaults',
+                 'derived': 'lure_derived', 'earlier': 'lure_earlier', 'premise': 'lure_premise',
+                 'repair': 'lure_repair', 'tables': 'lure_tables', 'truncated': 'lure_truncated',
+                 'uncited': 'lure_uncited'}
 
 
 def family_names():
@@ -904,7 +912,7 @@ def expectation(dossier, ident, variant, item, case):
         if believed != state:
             echo = believed
             echo_derivation = {name: told_derivation[name] for name in ('worlds', 'worlds_where_true')}
-    return {'claim_id': ident, 'variant': variant, 'semantic_state': state, 'prospective_disposition': disposition,
+    row = {'claim_id': ident, 'variant': variant, 'semantic_state': state, 'prospective_disposition': disposition,
             # A claim may name, as `anchors`, the passages that decide it where these are fewer than the passages its
             # report cites: a report may cite two issues of a document, of which only the one in force is evidence.
             'source_anchors': [f'sources/{name}#{anchor}' for name, anchor in item.get('anchors') or item['cites']
@@ -912,6 +920,16 @@ def expectation(dossier, ident, variant, item, case):
             'rationale': rationale(item, derivation, mark), 'claim_kind': item['kind'], 'error_type': item['error'],
             'derivation': derivation, 'echo_state': echo, 'echo_derivation': echo_derivation,
             'claim_text': item['text']}
+    if echo is not None and 'reader' in case:
+        row['echo_reader'] = case['reader']
+    if 'readers' in case:
+        row['lure_states'], row['lure_derivations'] = {}, {}
+        for name, reader in case['readers'].items():
+            believed, counts = judge(item, reader['base'], reader['unknowns'])
+            if believed != state:
+                row['lure_states'][name] = believed
+                row['lure_derivations'][name] = {key: counts[key] for key in ('worlds', 'worlds_where_true')}
+    return row
 
 
 def build_case(family, seed, index):
@@ -956,8 +974,8 @@ def build_case(family, seed, index):
            'generator': {'version': GENERATOR_VERSION, 'seed': seed, 'index': index, 'family': family},
            'expectations': rows}
     files = {f'sources/{name}': text for name, text in case['sources'].items()}
-    files['report-correct.md'] = report(case['title'], correct)
-    files['report-mixed.md'] = report(case['title'], mixed)
+    files['report-correct.md'] = report(case['title'], correct, case.get('preamble'))
+    files['report-mixed.md'] = report(case['title'], mixed, case.get('preamble'))
     return {'dossier': dossier, 'family': family, 'files': files, 'key': key}
 
 
@@ -976,7 +994,7 @@ def write_suite(fixtures, keys, seed, dossiers, families):
             raise GenerationError(f'Folder must be new or empty: {folder}')
     summary = {'schema_version': 1, 'generator_version': GENERATOR_VERSION, 'seed': seed,
                'python': platform.python_version(), 'families': list(families), 'dossiers': {}}
-    states, errors, echoes = {}, {}, 0
+    states, errors, echoes, lures = {}, {}, 0, 0
     for index in range(1, dossiers + 1):
         case = build_case(families[(index - 1) % len(families)], seed, index)
         hashes = {}
@@ -993,10 +1011,13 @@ def write_suite(fixtures, keys, seed, dossiers, families):
             if row['error_type']:
                 errors[row['error_type']] = errors.get(row['error_type'], 0) + 1
             echoes += row['echo_state'] is not None
+            lures += bool(row.get('lure_states'))
         summary['dossiers'][case['dossier']] = {'family': case['family'], 'files': hashes,
                                                 'claims_per_report': len(case['key']['expectations']) // 2}
     summary.update(claims=sum(states.values()), expected_states=dict(sorted(states.items())),
                    injected_errors=dict(sorted(errors.items())), echo_claims=echoes)
+    if lures:
+        summary['lure_claims'] = lures
     return summary
 
 
@@ -1021,7 +1042,8 @@ def main():
     # The summary counts the injected errors, so it is answer material: it goes beside the keys, never into the fixtures.
     record = Path(str(args.keys.resolve()) + '.generation.json')
     record.write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({key: summary[key] for key in ('claims', 'expected_states', 'injected_errors', 'echo_claims')},
+    print(json.dumps({key: summary[key] for key in ('claims', 'expected_states', 'injected_errors', 'echo_claims',
+                                                  'lure_claims') if key in summary},
                      indent=2))
     print(f'{len(summary["dossiers"])} dossiers in {args.fixtures}; keys in {args.keys}; summary in {record}')
 

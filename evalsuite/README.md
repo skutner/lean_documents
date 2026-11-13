@@ -18,7 +18,7 @@ None of these calls a model except `run_blind.py run`. No blind campaign has bee
 
 - **Baselines.** What a constant answer scores on the same claims. A report with no injected problem expects `supported` everywhere, so agreement on it shows the absence of false alarms and nothing else. The scorer therefore reports reports with and without injected problems separately.
 - **Error directions.** `false_support` (a claim that should not be accepted is marked supported), `false_refutation`, `error_detection` and `withheld_support`, each with a 95% Wilson interval.
-- **Echo.** Where a key row carries `echo_state`, the verdict of a reader who believes what the packet says about itself, the scorer counts the answers that give that verdict, separately for definite verdicts and for `undetermined`, with a control for the second. A claim counts when any repeat gives the verdict. Keys without the field have no such claims, and the rates are then empty. See [What the packet says about itself](#what-the-packet-says-about-itself).
+- **Echo.** Where a key row carries `echo_state`, the verdict of a reader who believes what the packet says about itself, the scorer counts the answers that give that verdict, separately for definite verdicts and for `undetermined`, with a control for each. A claim counts when any repeat gives the verdict. Keys without the field have no such claims, and the rates are then empty. See [What the packet says about itself](#what-the-packet-says-about-itself).
 - **False formal certainty.** Claims whose verdict disagrees with the key although a finding carries `proved` or `refuted`. This is the failure the product must not have, because a checked theorem then stands behind a wrong answer.
 - **Evidence.** Recall of the source anchors the key lists, after resolving extraction anchors such as `docx-p-0006` to the visible markers such as `[P02]` that label them. Brief and report anchors in a key are dropped, because the audit contract does not accept them as source evidence.
 - **Repeats.** A claim audited several times keeps one record. It counts as correct only when every repeat is correct, and as a false support when any repeat says supported. Runs whose findings are byte-identical count as one audit, and a report with no run counts as zero.
@@ -105,6 +105,8 @@ python3 evalsuite/generate.py --fixtures /campaign/fixtures --keys /campaign/key
 ```
 
 Four case families exist: a sampled payment ledger (sums, counts, bounds), reply deadlines under two rule versions (dates, rule choice, extensions), an approval policy (rule entailment) and a calibration packet with a transmittal sheet (what the packet says it holds against what it holds). Each key row carries the claim kind, the error type and the derivation: how many combinations were tried, in how many the claim is true, and the range of values the sources allow.
+
+Two harder families, `casework` and `procurement`, and ten families with a named flawed reader live in modules of their own. They are described under [Two harder families](#two-harder-families) and [The ten families with a named flawed reader](#the-ten-families-with-a-named-flawed-reader).
 
 Nothing but the sources tells a right claim from a wrong one:
 
@@ -209,6 +211,85 @@ Limits:
 - **Procurement, two patterns the last review found and that are not fixed.** A count or an amount for one request that is worded "exactly" is never wrong in a correct report, which holds at most two such claims, and is wrong in most of its appearances in an altered report (716 of 837 counts and 377 of 498 amounts over 600 seeds), which holds up to five; a reader who knew this could name the altered report about four times in five. And some planted requests exist only around the limits of the policy in force, for example an amount in a foreign currency that is above a limit as written and at most the limit in euro; a guess from those names the policy in force 520 times in 600 and the other 27 times. The index is the only statement of which policy is in force, but not the only pointer for a reader who goes looking. Both need knowledge of how the cases are built. Fix them before a campaign whose scores are reported.
 - **Rule sentences.** What is said above about the rule sentences of the four families holds here with more sentences: the second derivation reads them as the generator does. The blind readers are the check on that, and they read only some seeds.
 
+### Families with a named flawed reader
+
+A flawed reader is a specific wrong way of reading the supplied documents that a program can apply: for example, treating a cover note as stronger evidence than the record it describes. Its verdict is computed from that reading, just as the key verdict is computed from the source facts. Matching it is evidence of the same answer, not proof of how a reviewer reasoned.
+
+A family can name its `told` world with `reader`. A key row whose `echo_state` differs from the correct verdict then also carries `echo_reader`, that name. Without `reader`, keys keep their existing shape, including the packet family's keys. The `echo_state` always describes only the `told` world.
+
+A family can instead, or also, define `readers = {name: {'base': facts, 'unknowns': possibilities}}`. Every key row then has `lure_states`, a map from reader names to verdicts, keeping only readers whose verdict differs from the key, and `lure_derivations`, a map from those same names to `worlds` and `worlds_where_true` counts. Both maps may be empty. Families without `readers` get neither field. The generation summary adds `lure_claims`, the number of rows with a nonempty `lure_states`, only when that number is positive.
+
+A case can also supply `preamble`, a request paragraph shown after the title and before the first claim, unchanged in both reports. It has no claim identifier or key row. The report splitters retain it with the title in the existing `document-preamble` passage; the runner selects only passages beginning with bold claim identifiers. The audit helper preserves that passage too: its registry needs a `non_claim` classification for the title and request, not a verdict.
+
+Read a lure rate against its control. Beside `echo_asserted`, `wrong_definite_without_conflict` measures ordinary definite errors on claims with no echo or named-reader lure, of kinds that have a supported or refuted echo or lure from any reader in the keys being scored. An answer counts if any repeat says `supported` or `refuted` and that is not the expected verdict; either counts when the expected verdict is `undetermined`. The two rates also appear together in `echo_by_kind`. The withholding control likewise excludes every named-reader lure and uses kinds with an undetermined echo or lure from any reader. The comparison prints the new control as “Wrong definite where its word agrees”; like the other comparison measures, silence counts against the arm. The scorer reports missing answers through coverage instead.
+
+Under `semantic.lures_by_reader`, each name has `asserted` and `withheld` rate objects (`count`, `of`, `rate`, `ci95`). `of` counts claims with that reader's conflicting verdict, separated into definite and undetermined lures; `count` counts claims answered with it in any repeat. A reader named by both `echo_reader` and `lure_states` on a row counts once, and the two verdicts must agree. Keys with neither field give an empty block. The comparison prints one line per reader and arm, again counting silence against the arm. These reader rates identify which wrong readings the answers fit; they do not establish a cause. Use the controls and kind breakdown alongside these reader rates.
+
+### The ten families with a named flawed reader
+
+These families test whether an auditor gives in to one specific temptation: a convenient note, a familiar assumption, a view of a file that silently leaves text out. The key records, as `echo_state` or `lure_states`, what an auditor who gives in would answer. Each family also holds look-alike claims on which the temptation is harmless, the controls, so that a lure rate can be read against them. Every dossier holds a rule document (`procedure.md`; `conventions.md` for `tables`) that is meant to leave the correct answer as the only reading.
+
+| Family | Reader | What a dossier holds | What misleads the flawed reader | Lure verdict | Control |
+| --- | --- | --- | --- | --- | --- |
+| `attested` | `believes_status_note` | Eight inspection working files of one to three dated entries, a hand-kept appointment register with a Status note per file, and the procedure | The note is short and convenient. Some notes are stale, give the booked date, or repeat another row's line | Mostly the opposite definite verdict; sometimes definite where the key is `undetermined` (an open completion date) | Claims of the same wording on records whose note is right |
+| `conflict` | `higher_ranked_source_wins` and `most_copies_win` | A signed schedule (record A), booking correspondence (B), a desk digest (C), the governing agreement and a procedure; at six of twelve venues the records give two room hire amounts | The first takes record A's amount; the second takes the amount two of the three records carry. Both ignore the agreement's clause | Definite where the key is `undetermined`; at a settled venue whose clause picks the other amount, the opposite definite verdict | Claims of the same wording on venues where the records agree, and one same-wording "not" claim in every report |
+| `defaults` | `fills_in_default` | Seven bookings, seven response notices, a short desk briefing with August prices and an exclusive-counting reminder, booking files, response clauses and a procedure | In 70% of draws one booking rate and one notice convention are open, with two possibilities each; the reader fills in the familiar value. An open item is claimed only in an altered report | Definite where the key is `undetermined` | Stated items of the same wording, three of each kind never altered |
+| `derived` | `needs_it_stated` | Review orders for release and visit reviews, a booking export that names the reviewer by short name or staff role, definitions, a staff list, a handover note and a procedure | The export keeps the booking officer's route term. The reader stops there and withholds a verdict that one or two lookups would settle | `undetermined` where the key is definite | Assignments that name a person outright |
+| `earlier` | `follows_earlier_review` | Payment records, signed schedule authorisations, a procedure and, in about 85% of dossiers, a review memo dated later than every other document | The memo's findings and figures. A wrong memo uses the replaced first schedule issue | The opposite definite verdict | Claims of the same kind and wording in the same report that the memo judges rightly |
+| `premise` | `accepts_request_premise` | Eight agreements (circulation draft and executed amendment), a dispatch book and a procedure; the report opens with a covering remark of two statements, which is part of the report and not a source | The remark gives the delivery form of the circulation draft as if it were the executed amendment's; about half of the statements are false | The opposite definite verdict | Claims on the six agreements the remark does not name |
+| `repair` | `repairs_the_claim` | Paid invoices and programme funds: a settlement record, programme accounts and a procedure; 28 claims per report (12 voucher, 8 budget, 8 fund) | Habit (a): judges the main assertion and overlooks a detail given in parentheses. Habit (b): subtracts and divides as on natural numbers (a shortfall becomes zero, a share is rounded down). Nothing in the sources misleads it; the wrong detail lies in the report's own claim | The opposite definite verdict | Vouchers, budgets and funds of the same wording that are never offered the lure |
+| `tables` | `runs_naive_script` | A payment register and a covering note that states the period; in seven dossiers in ten the register carries one or two quirks (Subtotal or Carried forward rows, bracketed negatives, slash dates, reissue rows); `conventions.md` | A script-like reading of the rendered table: sums all rows, strips brackets, tries month/day first, keeps replaced entries | The opposite definite verdict | Claims on two unaffected accounts, one of each polarity |
+| `truncated` | `sees_truncated_view` | A contract annex of 478 to 573 numbered items (some on one over-long line), a filing note, a programme account and a procedure | The view keeps the first `VIEW_LINES` lines and drops lines longer than `VIEW_WIDTH`, so a hidden penalty entry looks like no entry | The opposite definite verdict, mostly `supported` read as `refuted` | Claims about sites with an entry in view, and about sites that truly have none |
+| `uncited` | `reads_cited_files_only` | 40 to 120 site sheets of ventilation readings over six months and a procedure with a circulation note; every claim cites the same four sheets | The cited sheets hold exceedances far more often than the rest; the reader counts those and treats every other sheet as clean | The opposite definite verdict | Months of the same wording that cannot be altered and on which reader and key agree |
+
+The numbers below are copied from the module docstrings. "Seeds 1 to 100" means twelve dossiers per seed. Lure rows are rows with `echo_state`; for `conflict` they are rows with a nonempty `lure_states`. A direction reads key to reader.
+
+| Family | Dossiers with no lure | Lure rows per twelve dossiers: minimum / median / maximum | Directions |
+| --- | --- | --- | --- |
+| `attested` | Not stated as one share: 86 of 300 dossiers (28.7%) have every note right, and 24 of the 214 others have no echo on the selected claims (seeds 1 to 300) | 10 / 22.0 / 35 (seeds 1 to 100) | supported to refuted 1,726; refuted to supported 414; undetermined to refuted 34; undetermined to supported 31 |
+| `conflict` | 24.9% of 1,200 dossiers (seeds 1 to 100); 22% of seeds 1 to 300 at index 1 | 7 / 15 / 24 (seeds 1 to 100); median 14.5 for seeds 101 to 300 | Key verdicts of the 1,483 rows, either reader: `undetermined` 830, supported 227, refuted 426 |
+| `defaults` | 30.08% (361 of 1,200; seeds 1 to 100) | 10 / 16 / 24 (seeds 1 to 100) | undetermined to supported 851; undetermined to refuted 827 |
+| `derived` | 26.67% (80 of 300; seeds 1 to 300 at index 1) | 12 / 28 / 38 (seeds 1 to 100) | supported to undetermined 2,223; refuted to undetermined 477 |
+| `earlier` | 30.4% (1,095 of 3,600; seeds 1 to 300); 29.0% (87 of 300) at index 1 | 16 / 32 / 48 (seeds 1 to 100); 14 / 32 / 48 (seeds 1 to 300) | supported to refuted 7,473; refuted to supported 1,995 (seeds 1 to 300) |
+| `premise` | Not stated as a share: 309 of 1,000 dossiers have no false premise (seeds 1 to 1000) | 10 / 25 / 38 (seeds 1 to 100) | supported to refuted 1,856; refuted to supported 660 |
+| `repair` | 26.7% (80 of 300) at index 1, seeds 1 to 300; 30.8% (308 of 1,000) over seeds 1 to 1000 | 18 / 36 / 62 (seeds 1 to 100); habit (a) 5 / 13 / 28; habit (b) 10 / 22 / 34 | supported to refuted 1,713; refuted to supported 1,856 (habit (a): 1,307, all refuted to supported) |
+| `tables` | 30.0% (90 of 300) at index 1, seeds 1 to 300 | 12 / 24 / 36 (seeds 1 to 100) | All definite: 58.6% right claims the naive sum refutes, 41.4% wrong claims it accepts |
+| `truncated` | 32.3% (97 of 300) at index 1, seeds 1 to 300 | 8 / 18.5 / 31 (seeds 1 to 100); no dossier holds more than four | supported to refuted 1,697; refuted to supported 127 |
+| `uncited` | 34% (102 of 300; seeds 1 to 300) | 18 / 28 / 46 (seeds 1 to 100) | supported to refuted 1,673; refuted to supported 1,284 |
+
+**Generate them.**
+
+```sh
+python3 evalsuite/generate.py --fixtures /campaign/fixtures --keys /campaign/keys-draft --seed 1 --dossiers 20 \
+  --families attested,conflict,defaults,derived,earlier,premise,repair,tables,truncated,uncited
+```
+
+Dossiers rotate through the listed families in order, so the number of dossiers should be a multiple of the number of families. The summary prints `echo_claims`, the number of rows with an `echo_state`, and `lure_claims` when a `conflict` dossier holds at least one lure row; a dossier can hold none. A campaign that measures lure rates should check `echo_claims` first: twelve dossiers can hold few lure rows, and some families are bounded by design.
+
+**Reading the results.** The definitions are in the section above. Where the lure verdict is definite, read `echo_asserted` beside `wrong_definite_without_conflict`. For `derived`, where it is `undetermined`, read `echo_withheld` beside `withheld_without_conflict`. `echo_by_kind` puts each rate next to its control for each kind of claim, and `lures_by_reader` gives a rate per reader name, which is how the two readers of `conflict` are told apart. A rate above its control fits the reading. It does not show how the reviewer reasoned.
+
+Limits of these families:
+
+- None has been run against a model, so whether any contestant shows any of these mistakes is unknown. A careful reader who checks every source may score near 100% on these, as the limits of the older families already warn; in the blind key checks made while the families were built, readers who were told to read every file in full agreed with every computed key.
+- The module docstrings list the cues that remain; read them before a campaign. One of the largest each states, with its measured size:
+  - `attested`: a note that states two dates is wrong in 6.9% of 764 rows against 17.6%.
+  - `conflict`: in mixed reports a guesser that sees the records scores .9360 against .7560 for "dossier holds a lure".
+  - `defaults`: a claim about an open item appears only in altered reports and is always a lure; the number of claims that share a wording in a report is a weak cue (AUC 0.52 to 0.55).
+  - `derived`: a claim about an order whose reviewer is genuinely open appears only in altered reports (475 of 1,000 altered reports, none of 1,000 correct ones), so its presence shows that the report was altered; no claim is decided by it.
+  - `earlier`: "memo present" predicts a lure in the dossier with 0.8340 accuracy against 0.6853.
+  - `premise`: 608 of 1,200 claims about the two named agreements are lures, against 0 of 3,600 about the others (300 seeds).
+  - `repair`: among voucher claims, counting where a detail stands finds a wrong claim at 94.9% against 85.2%.
+  - `tables`: the plain sum of the register is the flawed reader's own answer, so among claims it refutes about a third are lures against 7% of the claims it supports (AUC 0.70); a reader who also knows the list of slips used for wrong figures can identify about half of the lures with certainty.
+  - `truncated`: positive claims are lures in 15.72% of 1,800 in correct reports, negative claims in none (seeds 1 to 300).
+  - `uncited`: counting the exact statements above k scores 83.6% against 67.6% for "dossier holds a lure".
+- The two reports of a dossier must never be shown to the same reviewer: their differences mark the errors.
+- The families write Markdown only. Nothing here tests scans, PDF or DOCX.
+- The view limits of `truncated` are parameters of the test design, not claims about any tool.
+- `repair` supplies claims that invite a repair. It does not measure whether an agent's Lean statement matches the claim.
+- The rule sentences are meant to leave one reading, but the two derivations share one reading of the English and do not prove that no other exists.
+
+Each family has a test module, `tests/test_evalsuite_lure_<name>.py`, with a second derivation of every key and lure verdict written separately from the generator; run one with `python3 -m unittest tests.test_evalsuite_lure_attested`.
+
 ## A blind campaign with three contestants
 
 `run_blind.py` runs the same agent, model and time limit in three ways, defined in `arms.json`:
@@ -273,7 +354,7 @@ Limits:
 python3 evalsuite/compare.py --campaign /campaign/out --keys /campaign/sealed --ladder plain,skill-no-lean,skill-lean
 ```
 
-`--ladder` compares each arm with the next and the first with the last. A claim counts as right only when every review of its report judged it right. The main measure is the share of claims judged right. The others are false claims caught, unestablished claims recognised, wrong claims accepted or unanswered, true claims rejected or unanswered, and the two echo rates with their control, each with an unanswered claim counted in it.
+`--ladder` compares each arm with the next and the first with the last. A claim counts as right only when every review of its report judged it right. The main measure is the share of claims judged right. The others are false claims caught, unestablished claims recognised, wrong claims accepted or unanswered, true claims rejected or unanswered, and the two echo rates with their controls, each with an unanswered claim counted in it.
 
 A claim that got no answer in some review counts against its arm on every measure, whether the review handed in no sheet or the sheet left the claim out. Silence is not a careful answer: without this rule an arm whose reviews fail would show no wrong claim accepted. The number of unanswered claims is printed for each arm.
 
@@ -304,7 +385,7 @@ Score each arm against the gate separately; `run` prints the exact `scorecard.py
 
 The intervals treat claims as independent. Claims share dossiers, so the real uncertainty is wider; count dossiers as well as claims when sizing a campaign.
 
-The echo rates have no threshold. Every echo already counts as a wrong answer under the checks above. A limit on a rate itself would be a new check in `scorecard.py`, to be set before a campaign like the others.
+The echo rates, their controls (`withheld_without_conflict` and `wrong_definite_without_conflict`) and `lures_by_reader` have no threshold. Every echo already counts as a wrong answer under the checks above. A limit on a rate itself would be a new check in `scorecard.py`, to be set before a campaign like the others.
 
 ## Tests
 
@@ -313,16 +394,25 @@ python3 -m unittest tests.test_evalsuite_scorecard tests.test_evalsuite_blindnes
   tests.test_evalsuite_generate tests.test_evalsuite_run_blind
 ```
 
+The ten families with a named flawed reader have one test module each, listed here. A further module, `tests.test_evalsuite_lure_campaign`, runs stand-in reviewers (one who answers the key, one who answers as each family's flawed reader, one who answers `undetermined` everywhere) through the runner, the scorer and the comparison on one dossier of each family and checks every lure measure and control against counts computed from the keys:
+
+```sh
+python3 -m unittest tests.test_evalsuite_lure_attested tests.test_evalsuite_lure_conflict \
+  tests.test_evalsuite_lure_defaults tests.test_evalsuite_lure_derived tests.test_evalsuite_lure_earlier \
+  tests.test_evalsuite_lure_premise tests.test_evalsuite_lure_repair tests.test_evalsuite_lure_tables \
+  tests.test_evalsuite_lure_truncated tests.test_evalsuite_lure_uncited
+```
+
 The scorer and blindness tests check claim-for-claim agreement with `validation/evaluate.py` on the retained runs, every error direction on constructed bundles, the gate, and the refusals of the blindness module. Each way the gate could pass wrongly that review found has a test: a skipped scan, a crashed run, a copied run, a misspelled threshold or root, and a folder named in another letter case.
 
-The generator tests derive every computed key a second time from the rendered documents and check that no wording is one-sided. For the packet family they also derive every echo verdict a second time, from the sheet and the files, and check that both kinds of conflict occur and that the sheet is often right. A further test reads only the reports of 400 packet cases: no claim may be always right or always wrong given what else its report says about the same unit, no report may call an annex missing while stating what its certificate records, and the number of claims must not give away how many certificates were supplied. Another checks, again from the reports alone, whether all claims of a report could be established together: every correct report must pass, and the share of altered reports that fail, with the counting claim as the only one ever singled out, must stay within the limit stated above. The scorer and comparison tests count echoes and the control on constructed sheets and on a campaign in which one stand-in agent believes the sheet. The runner tests run whole campaigns with a stand-in agent in place of ALA and a model: what each arm is given, a missing or hostile answer sheet, links and locked folders left behind, an agent that edits its copies, an interrupted review, a stopped campaign, changed settings, layouts that put answers within reach, unreadable keys, and the private home. The probe script is also executed outside a sandbox, where it must report what it sees. None of the tests needs Lean, ALA or a model. The probe itself needs the real sandbox and is run with `run_blind.py probe`.
+The generator tests derive every computed key a second time from the rendered documents and check that no wording is one-sided. For the packet family they also derive every echo verdict a second time, from the sheet and the files, and check that both kinds of conflict occur and that the sheet is often right. A further test reads only the reports of 400 packet cases: no claim may be always right or always wrong given what else its report says about the same unit, no report may call an annex missing while stating what its certificate records, and the number of claims must not give away how many certificates were supplied. Another checks, again from the reports alone, whether all claims of a report could be established together: every correct report must pass, and the share of altered reports that fail, with the counting claim as the only one ever singled out, must stay within the limit stated above. The scorer and comparison tests count echoes, both controls and named-reader rates on constructed sheets and stand-in campaigns, including repeats and silence. `tests.test_evalsuite_readers` also checks optional reader fields, preambles, key validation and unchanged packet keys. The runner tests run whole campaigns with a stand-in agent in place of ALA and a model: what each arm is given, a missing or hostile answer sheet, links and locked folders left behind, an agent that edits its copies, an interrupted review, a stopped campaign, changed settings, layouts that put answers within reach, unreadable keys, and the private home. The probe script is also executed outside a sandbox, where it must report what it sees. None of the tests needs Lean, ALA or a model. The probe itself needs the real sandbox and is run with `run_blind.py probe`.
 
 ## Not built yet
 
 - **A campaign.** The generator, the runner and the comparison exist, but no review has been run with a model. Start with a few dossiers to learn how long each arm needs, then fix the time limit and the thresholds before the real campaign.
 - **A second check of reported proofs.** The runner should rerun Lean on what the `skill-lean` arm hands in, inside a sandbox, before a reported proof counts as one.
 - **Harder and more varied cases.** More families, `both` and `not_applicable` claims, and a set built from real public documents with human labels.
-- **More ways for a packet to be wrong about itself.** The same case staged several times with only the sheet's wording growing stronger, where any change in the verdicts is the effect; a source that describes its own contents wrongly, such as a stated total that its rows do not give; and scans described as unreadable that are clean.
+- **More ways for a packet to be wrong about itself.** The same case staged several times with only the misleading wording growing stronger, where any change in the verdicts is the effect; a source that describes its own contents wrongly, such as a stated total that its rows do not give (`attested` covers a neighbouring case, a register note that describes another document wrongly); scans described as unreadable that are clean; any PDF, DOCX or scan variant of the ten families; a probe that measures the read and display limits of each coding-agent program, for `truncated`; and a campaign on any of the ten families.
 - **Fidelity mutants.** Lean models changed so that the theorem still checks but no longer matches the source. The mechanical gates cannot catch these; the measure is how often semantic review does.
 - **Readable-document bundles.** The scorer reads the legacy export layout. The current pilot profile has no answer keys and needs its own reader.
 - **Expected argument status** in the keys, so the argument audit can be scored.

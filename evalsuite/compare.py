@@ -30,6 +30,7 @@ MEASURES = (('accuracy', 'Claims judged right'), ('error_detection', 'False clai
             ('false_support', 'Wrong claims accepted or unanswered'),
             ('false_refutation', 'True claims rejected or unanswered'),
             ('echo_asserted', 'Packet’s word taken over its files'),
+            ('wrong_definite_without_conflict', 'Wrong definite where its word agrees'),
             ('echo_withheld', 'Withheld where its word is wrong'),
             ('withheld_control', 'Withheld where its word is right'))
 PRIMARY = 'accuracy'
@@ -60,6 +61,7 @@ def arm_reviews(campaign, arm, keys):
             rows = [{'run_id': run['run_id'], 'dossier': run['dossier'], 'variant': run['variant'],
                      'repeat': run['repeat'], 'claim_id': row['claim_id'], 'expected': row['semantic_state'],
                      'echo': row.get('echo_state'), 'kind': row.get('claim_kind'),
+                     'lures': scorecard.reader_states(row),
                      'observed': 'missing', 'matches': False, 'formal_statuses': []} for row in key_rows]
         else:
             rows = scorecard.observe(run, bundle, key_rows)
@@ -87,10 +89,10 @@ def unanswered(claim):
     return 'missing' in claim['observed_by_repeat']
 
 
-def tally(claim, kinds=frozenset()):
+def tally(claim, kinds=frozenset(), definite_kinds=frozenset()):
     """(hits, chances) of one claim for every measure. A claim left unanswered in any review takes the worse
     outcome on each: for the measures where less is better, silence counts like the error itself. `kinds` are
-    the kinds of claim on which believing the packet means withholding a verdict (`scorecard.withholding_kinds`)."""
+    the kinds of claim on which any flawed reader withholds a verdict (`scorecard.withholding_kinds`)."""
     expected, silent, role = claim['expected'], unanswered(claim), scorecard.echo_role(claim, kinds)
     flawed, unsettled, true = expected in scorecard.ERROR_STATES, expected == 'undetermined', expected == 'supported'
     return {'accuracy': (int(claim['all_match']), 1),
@@ -102,6 +104,8 @@ def tally(claim, kinds=frozenset()):
             # claim and `undetermined` on the second. The third is the control for the second: the same kinds
             # of claim where the packet's statement has no bearing, so `undetermined` there is caution alone.
             'echo_asserted': (int(claim['any_echo'] or silent), 1) if role == 'asserted' else (0, 0),
+            'wrong_definite_without_conflict': (int(scorecard.wrong_definite(claim) or silent), 1)
+            if scorecard.definite_control(claim, definite_kinds) else (0, 0),
             'echo_withheld': (int(claim['any_echo'] or silent), 1) if role == 'withheld' else (0, 0),
             'withheld_control': (int(claim['any_undetermined'] or silent), 1) if role == 'control' else (0, 0)}
 
@@ -110,8 +114,9 @@ def by_dossier(claims):
     """Per dossier, the summed (hits, chances) of every measure."""
     totals = defaultdict(lambda: {name: [0, 0] for name, _ in MEASURES})
     kinds = scorecard.withholding_kinds(claims)
+    definite_kinds = scorecard.asserting_kinds(claims)
     for claim in claims:
-        for name, (hits, chances) in tally(claim, kinds).items():
+        for name, (hits, chances) in tally(claim, kinds, definite_kinds).items():
             totals[claim['dossier']][name][0] += hits
             totals[claim['dossier']][name][1] += chances
     return totals
@@ -179,6 +184,7 @@ def compare(baseline, candidate, bootstrap=10000, seed=1, strict=False):
                 'answers_missing_from_sheets': sum(row['observed'] == 'missing' for r in chosen if not r['failed']
                                                    for row in r['rows']),
                 'answers_expected_from_sheets': sum(len(r['rows']) for r in chosen if not r['failed']),
+                'lures_by_reader': scorecard.lures_by_reader(claims, count_silence=True),
                 'minutes': round(sum(r['seconds'] or 0 for r in chosen) / 60, 1)}
     return {'reviews_compared': len(labels), 'dossiers': len(dossiers), 'claims': len(claims_a),
             'repeats': sorted({label[2] for label in labels}),
@@ -276,6 +282,11 @@ def render(names, result, strict, notes):
     for name, label in MEASURES:
         cell = lambda arm: f'{percent(arm[name]["rate"])} ({arm[name]["count"]}/{arm[name]["of"]})'  # noqa: E731
         lines.append(f'{label:38}{cell(a):>20}{cell(b):>20}   {points(result["difference"][name])}')
+    for arm_name, arm in zip(names, (a, b)):
+        for reader, block in arm['lures_by_reader'].items():
+            cells = [f'{kind} {percent(value["rate"])} ({value["count"]}/{value["of"]})'
+                     for kind, value in block.items()]
+            lines.append(f'Reader "{reader}", arm "{arm_name}": ' + '; '.join(cells))
     lines += [f'{"Reviews with no valid sheet":38}{a["failed"]:>20}{b["failed"]:>20}',
               f'{"Claims left unanswered":38}{a["claims_unanswered"]:>20}{b["claims_unanswered"]:>20}',
               f'{"Reviews ended by the time limit":38}{a["ended_by_time_limit"]:>20}{b["ended_by_time_limit"]:>20}',

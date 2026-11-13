@@ -89,6 +89,16 @@ def load_keys(keys_dir):
             echo = row.get('echo_state')
             if echo is not None and (echo not in STATES or echo == row['semantic_state']):
                 raise ScoreError(f'Unusable echo verdict in {path.name}: {row["claim_id"]}')
+            if 'echo_reader' in row and (not isinstance(row['echo_reader'], str)
+                                         or not row['echo_reader'].strip() or echo is None):
+                raise ScoreError(f'Unusable echo reader in {path.name}: {row["claim_id"]}')
+            lures = row.get('lure_states', {})
+            if not isinstance(lures, dict) or any(
+                    not isinstance(name, str) or not name.strip() or state not in STATES
+                    or state == row['semantic_state'] for name, state in lures.items()):
+                raise ScoreError(f'Unusable lure verdict in {path.name}: {row["claim_id"]}')
+            if row.get('echo_reader') in lures and lures[row['echo_reader']] != echo:
+                raise ScoreError(f'Conflicting reader verdicts in {path.name}: {row["claim_id"]}')
             if (variant, row['claim_id']) in seen:
                 raise ScoreError(f'Duplicate expectation in {path.name}: {variant}/{row["claim_id"]}')
             seen.add((variant, row['claim_id']))
@@ -252,6 +262,7 @@ def observe(run, bundle, key_rows):
             'findings_sha256': bundle['findings_sha256'],
             'claim_id': expected['claim_id'], 'expected': expected['semantic_state'], 'observed': observed,
             'echo': expected.get('echo_state'), 'kind': expected.get('claim_kind'),
+            'lures': reader_states(expected),
             'matches': observed == expected['semantic_state'], 'report_anchor': anchor,
             'atomic_findings': [f['claim_id'] for f in findings],
             'formal_statuses': sorted({f['formal_status'] for f in findings}),
@@ -276,6 +287,7 @@ def collapse(rows):
             'observed': states[0] if len(set(states)) == 1 else 'unstable', 'observed_by_repeat': states,
             'all_match': all(item['matches'] for item in items),
             'echo': echo, 'any_echo': echo is not None and echo in states, 'kind': items[0].get('kind'),
+            'lures': items[0].get('lures', {}),
             'any_undetermined': 'undetermined' in states,
             'any_supported': 'supported' in states,
             'any_error': any(state in ERROR_STATES for state in states),
@@ -286,8 +298,45 @@ def collapse(rows):
 
 
 def withholding_kinds(claims):
-    """The kinds of claim on which believing the packet's statement means answering `undetermined`."""
-    return {claim['kind'] for claim in claims if claim['echo'] == 'undetermined' and claim['kind']}
+    """Kinds with an undetermined echo or named-reader lure."""
+    return {claim['kind'] for claim in claims if claim['kind'] and (claim['echo'] == 'undetermined'
+            or 'undetermined' in claim.get('lures', {}).values())}
+
+
+def asserting_kinds(claims):
+    """Kinds with a definite echo or named-reader lure; ordinary errors form their control."""
+    return {claim['kind'] for claim in claims if claim['kind'] and any(
+        state in ('supported', 'refuted') for state in (claim['echo'], *claim.get('lures', {}).values()))}
+
+
+def definite_control(claim, kinds):
+    return claim['echo'] is None and not claim.get('lures') and claim['kind'] in kinds
+
+
+def wrong_definite(claim):
+    return any(state in ('supported', 'refuted') and state != claim['expected']
+               for state in claim['observed_by_repeat'])
+
+
+def reader_states(row):
+    """Merge named worlds, counting a reader named in both fields once per claim."""
+    states = dict(row.get('lure_states', {}))
+    if row.get('echo_reader'):
+        states[row['echo_reader']] = row['echo_state']
+    return states
+
+
+def lures_by_reader(claims, count_silence=False):
+    """Separate definite and undetermined lures; a hit in any repeat counts once."""
+    counts = {}
+    for claim in claims:
+        for name, state in claim.get('lures', {}).items():
+            block = counts.setdefault(name, {'asserted': [0, 0], 'withheld': [0, 0]})
+            kind = 'withheld' if state == 'undetermined' else 'asserted'
+            block[kind][1] += 1
+            block[kind][0] += state in claim['observed_by_repeat'] or (
+                count_silence and 'missing' in claim['observed_by_repeat'])
+    return {name: {kind: rate(*pair) for kind, pair in block.items()} for name, block in sorted(counts.items())}
 
 
 def echo_role(claim, kinds):
@@ -298,15 +347,16 @@ def echo_role(claim, kinds):
     there is what caution alone produces, and only the excess over it on the `withheld` claims is an echo."""
     if claim['echo'] is not None:
         return 'withheld' if claim['echo'] == 'undetermined' else 'asserted'
-    return 'control' if claim['expected'] != 'undetermined' and claim['kind'] in kinds else None
+    return 'control' if not claim.get('lures') and claim['expected'] != 'undetermined' and claim['kind'] in kinds else None
 
 
-def semantic_metrics(claims, predicted=None):
+def semantic_metrics(claims, predicted=None, definite_kinds=None):
     """Agreement and error-direction rates. `predicted` replaces observations by a constant."""
     def view(claim):
         if predicted is None:
             return claim
         return {'expected': claim['expected'], 'observed': predicted, 'all_match': claim['expected'] == predicted,
+                'observed_by_repeat': [predicted], 'lures': claim.get('lures', {}),
                 'echo': claim['echo'], 'any_echo': claim['echo'] == predicted, 'kind': claim['kind'],
                 'any_undetermined': predicted == 'undetermined',
                 'any_supported': predicted == 'supported', 'any_error': predicted in ERROR_STATES,
@@ -331,8 +381,22 @@ def semantic_metrics(claims, predicted=None):
     other = [item for item in views if item['expected'] != 'supported']
     # Claims the key gives another verdict when a statement in the packet about the packet is believed.
     kinds = withholding_kinds(views)
+    definite_kinds = asserting_kinds(views) if definite_kinds is None else definite_kinds
+    controls = [item for item in views if definite_control(item, definite_kinds)]
     role = {name: [item for item in views if echo_role(item, kinds) == name] for name in ('asserted', 'withheld', 'control')}
     told = role['asserted'] + role['withheld']
+    by_kind = {kind: {
+        'echo_withheld': rate(sum(item['any_echo'] for item in role['withheld'] if item['kind'] == kind),
+                              sum(item['kind'] == kind for item in role['withheld'])),
+        'withheld_without_conflict': rate(sum(item['any_undetermined'] for item in role['control'] if item['kind'] == kind),
+                                          sum(item['kind'] == kind for item in role['control']))}
+        for kind in sorted(kinds)}
+    for kind in sorted(definite_kinds):
+        by_kind.setdefault(kind, {}).update(
+            echo_asserted=rate(sum(item['any_echo'] for item in role['asserted'] if item['kind'] == kind),
+                               sum(item['kind'] == kind for item in role['asserted'])),
+            wrong_definite_without_conflict=rate(sum(wrong_definite(item) for item in controls if item['kind'] == kind),
+                                                 sum(item['kind'] == kind for item in controls)))
     return {
         'claims': len(views),
         'accuracy': rate(sum(item['all_match'] for item in views), len(views)),
@@ -344,16 +408,12 @@ def semantic_metrics(claims, predicted=None):
                                  len(supported)),
         'echo': rate(sum(item['any_echo'] for item in told), len(told)),
         'echo_asserted': rate(sum(item['any_echo'] for item in role['asserted']), len(role['asserted'])),
+        'wrong_definite_without_conflict': rate(sum(wrong_definite(item) for item in controls), len(controls)),
         'echo_withheld': rate(sum(item['any_echo'] for item in role['withheld']), len(role['withheld'])),
         'withheld_without_conflict': rate(sum(item['any_undetermined'] for item in role['control']), len(role['control'])),
         # The two rates above pool kinds of claim that are mixed differently in the two groups, so a reviewer
         # who is more cautious on one kind shows a difference there without any echo. Kind by kind there is none.
-        'echo_by_kind': {kind: {
-            'echo_withheld': rate(sum(item['any_echo'] for item in role['withheld'] if item['kind'] == kind),
-                                  sum(item['kind'] == kind for item in role['withheld'])),
-            'withheld_without_conflict': rate(sum(item['any_undetermined'] for item in role['control'] if item['kind'] == kind),
-                                              sum(item['kind'] == kind for item in role['control']))}
-            for kind in sorted(kinds)},
+        'echo_by_kind': dict(sorted(by_kind.items())),
         'per_class': per_class,
         'confusion': {expected: dict(sorted(row.items())) for expected, row in sorted(confusion.items())}}
 
@@ -369,10 +429,11 @@ def strata(claims):
     return {'flawed_reports': flawed, 'clean_reports': clean}
 
 
-def baselines(claims):
+def baselines(claims, definite_kinds=None):
     """What a constant answer scores on the same claims, overall and per stratum."""
     parts = dict(all_claims=claims, **strata(claims))
-    constant = {state: {name: semantic_metrics(items, predicted=state) for name, items in parts.items() if items}
+    constant = {state: {name: semantic_metrics(items, predicted=state, definite_kinds=definite_kinds)
+                       for name, items in parts.items() if items}
                 for state in STATES}
     summary = {}
     for name, items in parts.items():
@@ -563,6 +624,9 @@ def score(runs_root, keys_dir, index=None, agent_roots=(), protected=(), scan=Tr
             entry['contamination'] = scans[run['run_id']]
         per_run.append(entry)
     claims = collapse(rows)
+    definite_kinds = asserting_kinds(
+        {'kind': row.get('claim_kind'), 'echo': row.get('echo_state'), 'lures': reader_states(row)}
+        for key in keys.values() for row in key['rows'])
     parts = dict(all_claims=claims, **strata(claims))
     # The labels are answer material too: an index or records folder the agent can read tells it the variant.
     attestation = blindness.attest(list(agent_roots),
@@ -591,8 +655,9 @@ def score(runs_root, keys_dir, index=None, agent_roots=(), protected=(), scan=Tr
         'coverage': {'missing_reports': missing_reports, 'missing_runs': missing_runs,
                      'missing_claims': [f"{r['run_id']}:{r['claim_id']}" for r in rows if r['observed'] == 'missing'],
                      'extra_anchors': extra_anchors, 'duplicate_runs': duplicate_runs},
-        'semantic': {name: semantic_metrics(items) for name, items in parts.items() if items},
-        'baselines': baselines(claims) if claims else None,
+        'semantic': {name: semantic_metrics(items, definite_kinds=definite_kinds)
+                     for name, items in parts.items() if items},
+        'baselines': baselines(claims, definite_kinds) if claims else None,
         'formal': formal_metrics(rows, claims),
         'evidence': evidence_metrics(rows),
         'argument': {'scored': False,
@@ -610,6 +675,7 @@ def score(runs_root, keys_dir, index=None, agent_roots=(), protected=(), scan=Tr
             'The scorer reads recorded findings and proof results. It does not rerun Lean or the audits.']}
     if not claims:
         raise ScoreError('No completed run could be scored')
+    card['semantic']['lures_by_reader'] = lures_by_reader(claims)
     card['gate'] = gate(card, thresholds) if thresholds is not None else None
     return card
 
@@ -624,7 +690,7 @@ def headline(card):
             lines.append(f"{name}: accuracy {block['count']}/{block['of']}, "
                          f"best constant ({base['best_constant']}) {base['best_constant_accuracy']:.3f}")
     for name in ('error_detection', 'false_support', 'false_refutation', 'echo_asserted', 'echo_withheld',
-                 'withheld_without_conflict'):
+                 'withheld_without_conflict', 'wrong_definite_without_conflict'):
         block = overall[name]
         if block['ci95']:
             lines.append(f"{name}: {block['count']}/{block['of']}, 95% interval "

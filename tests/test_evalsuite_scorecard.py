@@ -264,9 +264,9 @@ class ScorecardTests(unittest.TestCase):
         card = audit(**{'D-01': 'undetermined', 'D-04': 'undetermined'})
         self.assertEqual(counts(card), {'echo': (1, 3), 'echo_asserted': (0, 2), 'echo_withheld': (1, 1),
                                         'withheld_without_conflict': (1, 2)})
-        # The same two rates for each kind of claim the statement makes a reader withhold on, and for no other.
+        # Withheld kinds retain their fields; definite-only kinds now have their own entries.
         by_kind = card['semantic']['all_claims']['echo_by_kind']
-        self.assertEqual(list(by_kind), ['reading'])
+        self.assertEqual(list(by_kind), ['listing', 'reading'])
         self.assertEqual(by_kind['reading'], {'echo_withheld': scorecard.rate(1, 1),
                                               'withheld_without_conflict': scorecard.rate(1, 2)})
         # A wrong answer that is not the echo verdict is an error of another kind.
@@ -303,6 +303,7 @@ class ScorecardTests(unittest.TestCase):
         self.assertEqual(block['withheld_without_conflict'], scorecard.rate(1, 5))
         self.assertEqual(block['echo_by_kind'], {
             'counting': {'echo_withheld': scorecard.rate(1, 1), 'withheld_without_conflict': scorecard.rate(0, 3)},
+            'listing': {'echo_asserted': scorecard.rate(1, 1), 'wrong_definite_without_conflict': scorecard.rate(0, 1)},
             'reading': {'echo_withheld': scorecard.rate(1, 2), 'withheld_without_conflict': scorecard.rate(1, 2)}})
 
     def test_evidence_recall_resolves_segment_labels_but_not_cross_references(self):
