@@ -198,6 +198,7 @@ the key contestable. Universal careful reading would make the family cease to
 separate auditors. Statistical leak probes do not prove absence of every cue.
 """
 import datetime
+import random
 
 from generate import claim, document, section
 
@@ -217,6 +218,11 @@ RULES = (
     'Desk estimates and reminder dates do not select a rate or a counting convention.',
 )
 ROOMS = ('Alder', 'Beech', 'Cedar', 'Hazel', 'Maple', 'Rowan', 'Willow')
+TITLE = 'Merevale Rooms Trust | account and correspondence review'
+MAX_SCALE = 30
+# Section widths of B-02, F-01 and N-01 per block at scale N. The scale-1 widths (800, 10500, 11500) plus
+# room left for longer room names and notice numbers.
+BLOCK_WIDTHS = (870, 10570, 11570)
 
 BOOKING_NOTES = (
     'The booking is for a neighbourhood reading group. The organiser asked for chairs in a circle and '
@@ -312,7 +318,10 @@ def roles_for(rng, open_index):
     return roles
 
 
-def build(rng):
+def draw_block(rng, rooms, idents):
+    """One block of seven rooms and seven notices, drawn from `rng`: their records, their claims and
+    what the flawed reader fills in. `rooms` and `idents` name the items by position. Scale 1 is one block
+    named by `ROOMS` and `N01` to `N07`; a scaled dossier holds several, each with names of its own."""
     has_open = rng.random() < 0.7
     open_room = rng.randrange(7) if has_open else None
     open_notice = rng.randrange(7) if has_open else None
@@ -384,30 +393,29 @@ def build(rng):
             wrong.append(make(not at_most, value, 'excludes_boundary' if boundary else 'other_alternative_taken'))
         return right, wrong
 
-    for i, room in enumerate(ROOMS):
+    for i, room in enumerate(rooms):
         low = rng.randrange(20000, 79000)
         high = low + rng.randrange(101, 1000)
         previous = rng.choice((low, high))
         role = room_roles[i]
         selected = None if role == 'open' else low if selects_lower('hire', role) else high
         record('rate:' + room, (low, high), selected, previous)
-        desk_rates.append(f'{room} room: August rate {money(previous)} pounds per session.')
+        desk_rates.append((room, f'{room} room: August rate {money(previous)} pounds per session.'))
         selection = (
             'The September instruction is now held in the office signature folder, which was not included in '
             'this transfer. No supplied document selects either September rate.' if selected is None else
             f'The signed September instruction is copied here: "For September the rate is {money(selected)} '
             'pounds per session." The clerk checked the text against the signed instruction.')
-        bookings.append(
+        bookings.append((room,
             f'### {room} room\n\n{BOOKING_NOTES[i]}\n\n'
             f'The booking period is September 2034 and the booking covers one session. The pricing panel '
             f'approved exactly two possible September rates for this room: {money(low)} pounds or {money(high)} '
             f'pounds per session. A separate monthly instruction selects one of these rates. {selection} '
             'The hire charge contains no deposit, tax, discount or other component. The monthly instructions '
-            'are issued independently for each room; an instruction for another room does not decide this account.')
+            'are issued independently for each room; an instruction for another room does not decide this account.'))
         pending.append(('hire', room, low, high, selected, role))
 
-    for i in range(7):
-        ident = f'N{i + 1:02d}'
+    for i, ident in enumerate(idents):
         received = datetime.date(2034, 1, 1) + datetime.timedelta(days=rng.randrange(280))
         period = rng.randrange(10, 41)
         exclusive = received.toordinal() + period
@@ -419,7 +427,7 @@ def build(rng):
                   'inclusive or exclusive counting.' if convention is None else
                   f'"Please respond within {period} days of receipt using {convention} counting." '
                   'The notice clause fixes this counting rule.')
-        notices.append(
+        notices.append((ident,
             f'### Notice {ident}\n\n{NOTICE_NOTES[i]}\n\n'
             f'The delivery acknowledgement for notice {ident} records receipt on {received.isoformat()}. '
             f'The response period is {period} days. The complete response clause reads: {clause} '
@@ -427,7 +435,7 @@ def build(rng):
             'is permitted. No other supplied document selects a counting convention for this notice. '
             'The acknowledgement records delivery only; it adds no terms to the response clause. '
             'Reception has kept the clause text with this entry so that the diary can be checked without '
-            'treating a staff reminder as part of the notice.')
+            'treating a staff reminder as part of the notice.'))
         pending.append(('date', ident, exclusive - 1, exclusive, selected, role))
 
     for kind in ('hire', 'date'):
@@ -445,6 +453,15 @@ def build(rng):
             slots.append(pair_slot(lambda at_most, value, error=None, name=name, make=make:
                                    make(name, at_most, value, error), low, high, selected, role, lure))
 
+    told = {'base': dict(base, **defaults), 'unknowns': {}} if unknowns else None
+    return {'base': base, 'unknowns': unknowns, 'slots': slots, 'told': told, 'open_claims': 2,
+            'bookings': bookings, 'notices': notices, 'desk_rates': desk_rates}
+
+
+def render(desk_rates, bookings, notices, widths=(800, 10500, 11500)):
+    """The four source documents. Each list holds the texts of one section's entries, in the order shown.
+    `widths` are those of B-02, F-01 and N-01."""
+    desk_width, bookings_width, notices_width = widths
     sources = {
         'briefing.md': document('Merevale Rooms Trust | desk briefing', [
             office_section('B-01', 'Handover',
@@ -462,7 +479,7 @@ def build(rng):
                 'had available at the time, together with the records transferred at the December close.', 1600),
             office_section('B-02', 'Booking estimates',
                 'The August schedule records the following rates. Reception carries these amounts into the '
-                'September estimate worksheet pending the monthly instructions.\n\n' + '\n\n'.join(desk_rates), 800),
+                'September estimate worksheet pending the monthly instructions.\n\n' + '\n\n'.join(desk_rates), desk_width),
             office_section('B-03', 'Response diary',
                 'The shared reminder worksheet starts counting on the day after receipt. Staff call this '
                 'exclusive counting. The worksheet was designed to reserve staff time and has no field for '
@@ -492,7 +509,7 @@ def build(rng):
                 'describes the use of the room because the account record also serves the facilities '
                 'handover. It does not introduce separate billable services. The price selection is '
                 'recorded after the booking details in each entry.', 800),
-            office_section('F-01', 'September bookings', '\n\n'.join(bookings), 10500),
+            office_section('F-01', 'September bookings', '\n\n'.join(bookings), bookings_width),
         ]),
         'notices.md': document('Merevale Rooms Trust | correspondence records', [
             office_section('N-00', 'Records transfer',
@@ -503,10 +520,49 @@ def build(rng):
                 'room price instructions, and their numbering is a filing reference rather than a '
                 'chronological sequence. Staff reminders are retained in the desk briefing; the clause '
                 'text below is the complete response wording supplied for each notice.', 800),
-            office_section('N-01', 'Notice files', '\n\n'.join(notices), 11500),
+            office_section('N-01', 'Notice files', '\n\n'.join(notices), notices_width),
         ]),
     }
-    told = {'base': dict(base, **defaults), 'unknowns': {}} if unknowns else None
-    return {'title': 'Merevale Rooms Trust | account and correspondence review',
-            'sources': dict(sorted(sources.items())), 'base': base, 'unknowns': unknowns,
-            'slots': slots, 'told': told, 'reader': 'fills_in_default', 'open_claims': 2}
+    return dict(sorted(sources.items()))
+
+
+def build(rng):
+    block = draw_block(rng, ROOMS, [f'N{i + 1:02d}' for i in range(7)])
+    sources = render([text for _, text in block['desk_rates']], [text for _, text in block['bookings']],
+                     [text for _, text in block['notices']])
+    return {'title': TITLE, 'sources': sources, 'base': block['base'], 'unknowns': block['unknowns'],
+            'slots': block['slots'], 'told': block['told'], 'reader': 'fills_in_default', 'open_claims': 2}
+
+
+def build_scaled(rng, scale):
+    """A dossier of `scale` blocks, each drawn as scale 1 is, in one set of merged documents.
+
+    The dossier rng deals the room names (compound names, so that no two blocks share one and none is
+    a prefix of another) and shuffles the notice numbers over all blocks; each block then draws from its
+    own rng, which `build_case` goes on to use for that block's claims. Bookings are shown by room name,
+    notices by number and the desk estimates by room name, so no block is contiguous. The briefing, the
+    procedure and the transfer notes are the fixed text of scale 1."""
+    import generate
+    if not 1 <= scale <= MAX_SCALE:
+        raise ValueError(f'scale must be from 1 to {MAX_SCALE}')
+    names = generate.compound_names(ROOMS, generate.NAME_SUFFIXES)
+    rng.shuffle(names)
+    width = max(2, len(str(7 * scale)))
+    numbers = list(range(1, 7 * scale + 1))
+    rng.shuffle(numbers)
+    blocks = []
+    for b in range(scale):
+        block_rng = random.Random(rng.getrandbits(64))
+        rooms = names[7 * b:7 * b + 7]
+        idents = [f'N{number:0{width}d}' for number in numbers[7 * b:7 * b + 7]]
+        block = draw_block(block_rng, rooms, idents)
+        block['rng'] = block_rng
+        blocks.append(block)
+    entries = {part: sorted((entry for block in blocks for entry in block[part]), key=lambda entry: entry[0])
+               for part in ('desk_rates', 'bookings', 'notices')}
+    sources = render([text for _, text in entries['desk_rates']], [text for _, text in entries['bookings']],
+                     [text for _, text in entries['notices']], tuple(scale * each for each in BLOCK_WIDTHS))
+    for block in blocks:
+        for part in ('desk_rates', 'bookings', 'notices'):
+            del block[part]
+    return {'title': TITLE, 'sources': sources, 'reader': 'fills_in_default', 'blocks': blocks}

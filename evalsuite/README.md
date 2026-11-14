@@ -108,6 +108,8 @@ Four case families exist: a sampled payment ledger (sums, counts, bounds), reply
 
 Two harder families, `casework` and `procurement`, and ten families with a named flawed reader live in modules of their own. They are described under [Two harder families](#two-harder-families) and [The ten families with a named flawed reader](#the-ten-families-with-a-named-flawed-reader).
 
+A dossier many times as large is made with [`--scale N`](#larger-dossiers---scale-n), for six of the families.
+
 Nothing but the sources tells a right claim from a wrong one:
 
 - Both reports of a dossier use the same claim identifiers in the same order.
@@ -115,6 +117,36 @@ Nothing but the sources tells a right claim from a wrong one:
 - Gaps are not always present. A missing approval sheet, an unrecorded reply, an undecided extension and an illegible signature are each absent from four or five cases in ten, so no gap can be assumed.
 
 The tests derive every verdict a second time, with separately written code that reads only the rendered Markdown. On 80 generated cases, twenty of each family, the two derivations agree on every claim.
+
+### Larger dossiers: `--scale N`
+
+```sh
+python3 evalsuite/generate.py --fixtures /campaign/fixtures-x12 --keys /campaign/keys-draft-x12 --seed 7 --dossiers 6 \
+  --families ledger,approvals,tables,conflict,earlier,defaults --scale 12
+```
+
+`--scale N` (an integer of 1 or more, default 1, one value per run) makes every dossier N times as large, in single merged source documents, so that a campaign can find the size at which a reviewer's accuracy falls. A scale-N dossier is **N blocks**. Each block is drawn by the family's own scale-1 recipe, with the same distributions, the same share of trap claims, the same controls and the same error names. Its entities carry names that no other block has, so a claim is judged over the open facts of its own block alone and the key stays computed. The rows and sections of the blocks are interleaved in the merged documents, so that no block is contiguous, and the claims of all blocks are shuffled together. A report then holds N times as many claims as at scale 1, numbered `C001…` in one sequence (the number has two digits up to 99 claims and as many as it needs beyond that), and both reports use the same order.
+
+Six families support it, each up to `--scale 30`:
+
+| Family | A block is | Source characters at scale 30 (estimate) |
+| --- | --- | --- |
+| `ledger` | a batch of sampled payments, `B01…`; every aggregate claim names its batch | 33,000 |
+| `approvals` | a department of seven staff and its requests; the department-wide claim names it | 22,000 |
+| `tables` | 8 accounts of a register | 409,000 |
+| `conflict` | 12 venues | 420,000 |
+| `earlier` | 8 programmes, each with its own record file; one `review.md` covers the blocks that drew a memo | 628,000 |
+| `defaults` | 7 rooms and 7 notices | 692,000 |
+
+Facts that exist once per dossier are drawn once and shared by every block: the ledger's cutoff, the approvals limit, the tables' reporting period, the five dates of `conflict`, the memo date of `earlier`. Any other family is refused before a folder is made, with `Cannot generate: Family <name> does not support --scale <N>`, as is a scale above the family's limit, `0` or a negative number. At scale 1 the generator is unchanged byte for byte, with or without `--scale 1`. Because blocks are drawn independently, the share of trap claims stays the same but a dossier with no trap at all becomes rare, and the flawed-reader measures of the leak studies in the family docstrings were made at scale 1 only.
+
+What is recorded, only when N is greater than 1:
+
+- The dossier folder is named `g{seed}-{index:03d}-{family}-x{N}`. Nothing else about the scale is written into the fixtures, which hold only what a reviewer may be given.
+- The key has `generator.scale` and `generator.blocks`, both N, and each key row has `block`, the block the claim belongs to, from 1 to N. A key without `generator.scale` is a scale-1 key. In `derivation`, `worlds` and `worlds_where_true` count the block's worlds, not the dossier's.
+- The generation summary beside the keys (`<keys>.generation.json`) has a top-level `scale` and a `scale` for every dossier.
+
+Results are grouped by size by joining the dossier id against `generator.scale` or the summary. The runner, sealer, scorer and comparison are unchanged: `tests.test_evalsuite_scale.DownstreamTests` runs a scale-12 dossier of each of the six families, and a scale-30 `conflict` dossier of 360 claims, through them. Each family has its own test module, `tests/test_evalsuite_scale_<family>.py`, with a second derivation of the keys from the merged Markdown. Run the shared tests with `python3 -m unittest tests.test_evalsuite_scale`.
 
 ### What the packet says about itself
 

@@ -149,10 +149,20 @@ conventions before summing, normalises the table, or independently checks its
 script. A plain twin verifies that normalisation removes the lure. Statistical
 cue checks cover the tested guessers, not every possible classifier or access to
 both withheld reports.
+
+Scale. `build_scaled(rng, N)` makes a dossier of N blocks of eight accounts each, in one
+register: the account names are `PLACE_STEMS` x `ACCOUNTS`, dealt eight to a block, and the
+year, the period and the two boundary days are drawn once. A block is one dossier of the
+recipe above (its own quirk count, rows, controls, polarities and slips, from its own random
+source), checked alone and redrawn from that source up to 50 times; the blocks' rows are then
+interleaved and numbered once, and the flawed reader's program must give on the merged register
+the figures it gave each block. A block's `told` world holds that reader's figures for its own
+accounts. The leak measurements above were made at scale 1 only.
 """
 import datetime
+import random
 
-from generate import GenerationError, claim, document, section, table
+from generate import GenerationError, PLACE_STEMS, claim, document, interleave, section, table
 
 
 RULES = (
@@ -383,11 +393,14 @@ def transpositions(value):
                    if digits[i] != digits[i + 1] and not (i == 0 and digits[1] == '0')})
 
 
-def draw(rng):
-    year = rng.randint(2031, 2039)
-    start, end = datetime.date(year, 4, 1), datetime.date(year, 6, 30)
-    accounts = list(ACCOUNTS)
-    rng.shuffle(accounts)
+def draw_block(rng, accounts, year, start, end):
+    """One register of the recipe: the quirks, rows and claims of `accounts`, or None if the draw is rejected.
+
+    Everything the recipe draws after the dossier's year and the order of its accounts is drawn here, from
+    `rng`, starting with the number of quirks. A block of a scaled dossier is one call, so its trap rate,
+    controls and slips are those of a dossier. Row identifiers are numbered 1.. within the register; a
+    scaled dossier numbers them again once the registers are merged, which no claim depends on.
+    """
     count = rng.choice(QUIRK_COUNTS)
     quirk_of = dict(zip(rng.sample(accounts, count), rng.sample(('subtotal', 'brackets', 'dates', 'reissue'), count)))
     boundary = (datetime.date(year, 3, 31), datetime.date(year, 6, 30))
@@ -441,20 +454,15 @@ def draw(rng):
                          if r['account'] == account and r['date'].month == row['date'].month)
             rows.insert(index + 1, dict(row, id='', amount=amount or row['amount'],
                                         record=rng.choice(('Subtotal', 'Carried forward'))))
-    for index, row in enumerate(rows, 1):
-        row['id'] = f'P{index:04d}'
-    for row in rows:
-        if 'replaces' in row:
-            row['record'] = 'Reissue of ' + row['replaces']['id']
+    number_rows(rows)
     # Truth is calculated from the entries, without reparsing the table or
     # delegating its interpretation to the flawed program.
     replaced = {r['replaces']['id'] for r in rows if 'replaces' in r}
     entries = [r for r in rows if r['record'] not in ('Subtotal', 'Carried forward') and r['id'] not in replaced]
     base = {account: sum(r['amount'] for r in entries if r['account'] == account and start <= r['date'] <= end)
             for account in accounts}
-    sources = office_documents(year, start, end)
-    sources['register.md'] = render_register(rows, year)
-    naive = naive_figures(sources['register.md'], start, end)
+    register = render_register(rows, year)
+    naive = naive_figures(register, start, end)
     if any((naive[a] != base[a]) != (a in quirk_of) for a in accounts) or min(base.values()) <= 0:
         return None
     cites = [('register.md', 'R-02'), ('conventions.md', 'C-01'), ('covering.md', 'N-01')]
@@ -507,10 +515,32 @@ def draw(rng):
             mutations = [make(False, base[account], 'runs_naive_script' if affected else 'denies_true_total')]
             right = make(False, naive[account] if affected else rng.choice(slips)[1])
         slots.append((right, [] if account in controls or account not in mutable else mutations))
+    return {'rows': rows, 'register': register, 'base': base, 'naive': naive, 'slots': slots,
+            'told': {'base': naive, 'unknowns': {}} if naive != base else None}
+
+
+def number_rows(rows):
+    """Number the register's rows from P0001 in their order, and name the entry each reissue replaces."""
+    for index, row in enumerate(rows, 1):
+        row['id'] = f'P{index:04d}'
+    for row in rows:
+        if 'replaces' in row:
+            row['record'] = 'Reissue of ' + row['replaces']['id']
+
+
+def draw(rng):
+    year = rng.randint(2031, 2039)
+    start, end = datetime.date(year, 4, 1), datetime.date(year, 6, 30)
+    accounts = list(ACCOUNTS)
+    rng.shuffle(accounts)
+    block = draw_block(rng, accounts, year, start, end)
+    if block is None:
+        return None
+    sources = office_documents(year, start, end)
+    sources['register.md'] = block['register']
     return {'title': 'Marshwick Community Trust — Disbursement review',
-            'sources': dict(sorted(sources.items())), 'base': base, 'unknowns': {}, 'slots': slots,
-            'told': {'base': naive, 'unknowns': {}} if naive != base else None,
-            'reader': 'runs_naive_script'}
+            'sources': dict(sorted(sources.items())), 'base': block['base'], 'unknowns': {}, 'slots': block['slots'],
+            'told': block['told'], 'reader': 'runs_naive_script'}
 
 
 def build(rng):
@@ -522,3 +552,53 @@ def build(rng):
         if case:
             return case
     raise GenerationError('No usable payment register in 50 draws')
+
+
+# ---------- The scaled dossier: one merged register of N blocks of eight accounts ----------
+
+MAX_SCALE = 30
+
+
+def build_scaled(rng, scale):
+    """A dossier of `scale` blocks of eight accounts each, in one register.
+
+    The year, the period and the two boundary days are drawn once and shared. The dossier rng deals the
+    accounts, `PLACE_STEMS` x `ACCOUNTS`, eight to a block, so that a block is not one place. Each block is
+    the recipe of one dossier, drawn from a source of its own and redrawn from it, up to 50 times, until its
+    register read alone puts every quirk on the account it affects. The registers are then interleaved (each
+    block keeps its own row order), numbered once, and rendered once; the flawed reader's program must give,
+    on the merged register, the figures it gave each block alone. A block's `told` world is the reader's
+    figures for its own accounts, so `echo_state` keeps its meaning in a key row of that block.
+    """
+    if not 1 <= scale <= MAX_SCALE:
+        raise GenerationError(f'Family tables does not support --scale {scale} (the limit is {MAX_SCALE})')
+    year = rng.randint(2031, 2039)
+    start, end = datetime.date(year, 4, 1), datetime.date(year, 6, 30)
+    names = [f'{place} {account}' for place in PLACE_STEMS for account in ACCOUNTS]
+    rng.shuffle(names)
+    width = len(ACCOUNTS)
+    blocks = []
+    for number in range(scale):
+        block_rng = random.Random(rng.getrandbits(64))
+        accounts = names[number * width:(number + 1) * width]
+        for _ in range(50):
+            block = draw_block(block_rng, accounts, year, start, end)
+            if block:
+                break
+        else:
+            raise GenerationError(f'No usable payment register for block {number + 1} in 50 draws')
+        block['rng'] = block_rng
+        blocks.append(block)
+    rows = interleave(rng, [block['rows'] for block in blocks])
+    number_rows(rows)
+    register = render_register(rows, year)
+    merged = naive_figures(register, start, end)
+    for number, block in enumerate(blocks, 1):
+        if any(merged.get(account) != figure for account, figure in block['naive'].items()):
+            raise GenerationError(f'The merged register gives other figures than block {number} alone')
+    sources = office_documents(year, start, end)
+    sources['register.md'] = register
+    return {'title': 'Marshwick Community Trust — Disbursement review', 'sources': dict(sorted(sources.items())),
+            'reader': 'runs_naive_script',
+            'blocks': [{'base': block['base'], 'unknowns': {}, 'slots': block['slots'], 'rng': block['rng'],
+                        'told': block['told']} for block in blocks]}

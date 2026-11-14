@@ -141,6 +141,9 @@ the totals and reads the operative issue selection defeats the lure; this
 family may saturate under read-all prompts.
 """
 
+import random
+
+import generate
 from generate import claim, document, section
 
 
@@ -270,14 +273,15 @@ def procedure():
                 "No payment, reversal or schedule authorisation outside the supplied records forms part of this quarter's comparison.")])
 
 
-def record(number, name, purpose, detail, payments, original, operative, first, draw):
+def record(number, name, purpose, detail, payments, original, operative, first, draw, width=2):
     """A payment folio retains the first issue and the signed replacement.
 
-    `draw` holds the dates, the staff and the ordinary-sentence variants of this record."""
+    `draw` holds the dates, the staff and the ordinary-sentence variants of this record.
+    The record number is written with `width` digits."""
     second = 'B' if first == 'A' else 'A'
     d = draw
     return document(name + ' programme account', [
-        section(f'R{number:02d}-S', 'Schedule correspondence',
+        section(f'R{number:0{width}d}-S', 'Schedule correspondence',
                 'Merehaven Community Trust, Programme Accounts Office. File closed '
                 f'{d["closed"]} by {d["accountant"]}, programme accountant. This folio brings '
                 f'together the Q3 payment evidence for the {name} programme, which '
@@ -285,37 +289,42 @@ def record(number, name, purpose, detail, payments, original, operative, first, 
                 f'The schedule sent to the accounts desk on {d["sent"]} was issue {first}, '
                 f'with a quarter total of {original} euros. {d["covering"]} {d["first_copy"]} '
                 f'{d["folio_note"]}'),
-        section(f'R{number:02d}-P', 'Bank settlement evidence',
+        section(f'R{number:0{width}d}-P', 'Bank settlement evidence',
                 f'The bank settled the July payment of {payments[0]} euros on {d["july"]}. '
                 f'The bank settled the August payment of {payments[1]} euros on {d["august"]}. '
                 f'The bank settled the September payment of {payments[2]} euros on {d["september"]}. '
                 f'These entries were transcribed from the trust account statements '
                 f'by {d["clerk"]} in Treasury on {d["transcribed"]}. {d["confirmation"]} '
                 f'{d["bundle"]} {d["returned"]}'),
-        section(f'R{number:02d}-A', 'Signed schedule authorisation',
+        section(f'R{number:0{width}d}-A', 'Signed schedule authorisation',
                 f'On {d["signed"]} Mara Venn signed schedule issue {second} for the {name} programme. '
                 f'The authorised quarter total in issue {second} is {operative} euros. '
                 f'Issue {second} is operative for Q3 and replaces issue {first}. '
                 f'{d["letter"]} {d["signed_copy"]} {d["filed"]}')])
 
 
-def review(entries, date):
+FINDINGS = "The findings below state whether each programme's Q3 disbursements reconcile to its authorised schedule. "
+# Where the memo covers only some programmes of a larger dossier, it says which.
+SCALED_FINDINGS = ('The findings below state, for each programme I reviewed, whether its Q3 disbursements '
+                   'reconcile to its authorised schedule. ')
+
+
+def review(entries, date, width=2, findings=FINDINGS):
     """Both conclusion phrases have equal length; no padding or hidden markers."""
-    sections = [section('V-01', 'Committee preparation',
+    sections = [section(f'V-{1:0{width}d}', 'Committee preparation',
                         'Merehaven Community Trust, Accounts Review Office. '
                         f'{date}. Prepared by Soren Vale for the quarterly '
                         'accounts committee. I compared the Q3 disbursements '
                         'with the schedule copies in my working folder. '
-                        "The findings below state whether each programme's Q3 disbursements "
-                        'reconcile to its authorised schedule. The '
-                        'following findings give the amounts compared and the '
+                        + findings +
+                        'The following findings give the amounts compared and the '
                         'schedule issue used, so the committee secretary can '
                         'retrieve the corresponding working paper. The folder '
                         'contains copies from the programme accounts circulation; '
                         'it is filed alongside this note for the meeting.')]
     for number, name, paid, scheduled, issue, tail in entries:
         finding = 'No variance found.' if paid == scheduled else 'One variance seen.'
-        sections.append(section(f'V-{number + 1:02d}', name,
+        sections.append(section(f'V-{number + 1:0{width}d}', name,
                                 f'{finding} Q3 disbursements for the {name} programme: '
                                 f'{paid} euros against {scheduled} euros in schedule issue {issue}. '
                                 + tail.format(issue=issue)))
@@ -324,6 +333,59 @@ def review(entries, date):
 
 def day(rng, month, low, high):
     return f'2034-{month:02d}-{rng.randint(low, high):02d}'
+
+
+def draw_programme(rng, number, name, purpose, detail, is_changed, kind, width=2):
+    """Every draw of one programme, in the order of the scale-1 recipe: its record, the facts of its
+    world, the facts the memo would state and its claim slot."""
+    payments = [rng.randrange(100000, 190000) for _ in range(3)]
+    paid = sum(payments)
+    reconciles = rng.random() < 0.5
+    difference = rng.choice((-7500, -3600, -1200, 1200, 3600, 7500))
+    operative = paid if reconciles else paid + difference
+    original = paid + difference if reconciles else paid
+    first = rng.choice(('A', 'B'))
+    second = 'B' if first == 'A' else 'A'
+    draw = {'july': day(rng, 7, 22, 31), 'august': day(rng, 8, 22, 31), 'september': day(rng, 9, 22, 30),
+            'transcribed': day(rng, 10, 2, 8), 'sent': day(rng, 10, 5, 12),
+            'signed': day(rng, 10, 14, 20), 'closed': day(rng, 10, 21, 25),
+            'accountant': rng.choice(ACCOUNTANTS), 'clerk': rng.choice(CLERKS),
+            'covering': rng.choice(COVERING), 'first_copy': rng.choice(FIRST_COPY),
+            'folio_note': rng.choice(FOLIO_NOTE), 'confirmation': rng.choice(CONFIRMATIONS),
+            'bundle': rng.choice(BUNDLES), 'returned': rng.choice(RETURNS),
+            'letter': rng.choice(LETTERS), 'signed_copy': rng.choice(SIGNED_COPIES),
+            'filed': rng.choice(FILED)}
+    tail = rng.choice(MEMO_TAILS)
+    filename = f'record-{number:0{width}d}.md'
+    text = record(number, name, purpose, detail, payments, original, operative, first, draw, width)
+    variance, total = f'{name}|variance', f'{name}|total'
+    base = {variance: abs(paid - operative), total: operative}
+    memo_amount = original if is_changed else operative
+    believed = {variance: abs(paid - memo_amount), total: memo_amount}
+    memo_entry = (number, name, paid, memo_amount, first if is_changed else second, tail)
+    cites = [('procedure.md', 'P-02'), ('procedure.md', 'P-03')]
+    cites += [(filename, f'R{number:0{width}d}-{part}') for part in ('S', 'P', 'A')]
+
+    def about_variance(value, error=None, name=name, key=variance, cites=cites):
+        return claim('programme_variance',
+                     f'The Q3 disbursement variance for the {name} programme is {value} euros.',
+                     lambda world, key=key, value=value: world[key] == value,
+                     cites, quantity=lambda world, key=key: world[key], stated=value, error=error)
+
+    def about_total(value, error=None, name=name, key=total, cites=cites):
+        return claim('programme_total',
+                     f'The authorised schedule total for the {name} programme is {value} euros.',
+                     lambda world, key=key, value=value: world[key] == value,
+                     cites, quantity=lambda world, key=key: world[key], stated=value, error=error)
+
+    # The alternative is exactly the comparison using the other schedule.
+    # When that is also the memo finding, name the narrower measured slip.
+    error = 'follows_earlier_review' if is_changed else 'uses_superseded_schedule'
+    if kind == 'variance':
+        slot = (about_variance(base[variance]), [about_variance(abs(paid - original), error)])
+    else:
+        slot = (about_total(operative), [about_total(original, error)])
+    return filename, text, base, believed, slot, memo_entry
 
 
 def build(rng):
@@ -338,57 +400,76 @@ def build(rng):
     sources = {'procedure.md': procedure()}
     base, believed, slots, memo_entries = {}, {}, [], []
     for offset, (name, purpose, detail) in enumerate(chosen):
-        number = offset + 1
-        payments = [rng.randrange(100000, 190000) for _ in range(3)]
-        paid = sum(payments)
-        reconciles = rng.random() < 0.5
-        difference = rng.choice((-7500, -3600, -1200, 1200, 3600, 7500))
-        operative = paid if reconciles else paid + difference
-        original = paid + difference if reconciles else paid
-        first = rng.choice(('A', 'B'))
-        second = 'B' if first == 'A' else 'A'
-        draw = {'july': day(rng, 7, 22, 31), 'august': day(rng, 8, 22, 31), 'september': day(rng, 9, 22, 30),
-                'transcribed': day(rng, 10, 2, 8), 'sent': day(rng, 10, 5, 12),
-                'signed': day(rng, 10, 14, 20), 'closed': day(rng, 10, 21, 25),
-                'accountant': rng.choice(ACCOUNTANTS), 'clerk': rng.choice(CLERKS),
-                'covering': rng.choice(COVERING), 'first_copy': rng.choice(FIRST_COPY),
-                'folio_note': rng.choice(FOLIO_NOTE), 'confirmation': rng.choice(CONFIRMATIONS),
-                'bundle': rng.choice(BUNDLES), 'returned': rng.choice(RETURNS),
-                'letter': rng.choice(LETTERS), 'signed_copy': rng.choice(SIGNED_COPIES),
-                'filed': rng.choice(FILED)}
-        tail = rng.choice(MEMO_TAILS)
-        filename = f'record-{number:02d}.md'
-        sources[filename] = record(number, name, purpose, detail, payments, original, operative, first, draw)
-        variance, total = f'{name}|variance', f'{name}|total'
-        base[variance], base[total] = abs(paid - operative), operative
-        memo_amount = original if offset in changed else operative
-        believed[variance], believed[total] = abs(paid - memo_amount), memo_amount
-        memo_entries.append((number, name, paid, memo_amount, first if offset in changed else second, tail))
-        cites = [('procedure.md', 'P-02'), ('procedure.md', 'P-03')]
-        cites += [(filename, f'R{number:02d}-{part}') for part in ('S', 'P', 'A')]
-
-        def about_variance(value, error=None, name=name, key=variance, cites=cites):
-            return claim('programme_variance',
-                         f'The Q3 disbursement variance for the {name} programme is {value} euros.',
-                         lambda world, key=key, value=value: world[key] == value,
-                         cites, quantity=lambda world, key=key: world[key], stated=value, error=error)
-
-        def about_total(value, error=None, name=name, key=total, cites=cites):
-            return claim('programme_total',
-                         f'The authorised schedule total for the {name} programme is {value} euros.',
-                         lambda world, key=key, value=value: world[key] == value,
-                         cites, quantity=lambda world, key=key: world[key], stated=value, error=error)
-
-        # The alternative is exactly the comparison using the other schedule.
-        # When that is also the memo finding, name the narrower measured slip.
-        error = 'follows_earlier_review' if offset in changed else 'uses_superseded_schedule'
-        if kinds[offset] == 'variance':
-            slots.append((about_variance(base[variance]), [about_variance(abs(paid - original), error)]))
-        else:
-            slots.append((about_total(operative), [about_total(original, error)]))
+        filename, text, facts, memo_facts, slot, memo_entry = draw_programme(
+            rng, offset + 1, name, purpose, detail, offset in changed, kinds[offset])
+        sources[filename] = text
+        base.update(facts)
+        believed.update(memo_facts)
+        slots.append(slot)
+        memo_entries.append(memo_entry)
     if has_memo:
         sources['review.md'] = review(memo_entries, memo_date)
     return {'title': 'Programme disbursement review', 'sources': dict(sorted(sources.items())),
             'base': base, 'unknowns': {}, 'slots': slots,
             'told': {'base': believed, 'unknowns': {}} if changed else None,
             'reader': 'follows_earlier_review'}
+
+
+# ---------- Scale: the same dossier, many blocks of eight programmes ----------
+
+MAX_SCALE = 30
+
+# The twelve services of PROGRAMMES (its names without the place word), in the same order.
+SERVICES = ('Meals', 'Transport', 'Workshops', 'Housing Repairs', 'Gardens', 'Reading Rooms',
+            'Clinics', 'Training', 'Childcare', 'Advice', 'Pantry', 'Day Centre')
+
+
+def build_scaled(rng, scale):
+    """`scale` blocks of eight programmes, drawn as the scale-1 recipe draws a dossier.
+
+    A block keeps today's draws: whether a memo exists, whether it misleads, which points it changes,
+    the claim kinds and every per-programme value. The names are a place and a service, dealt to the
+    blocks by the dossier's random source, which also numbers all records in one shuffle, so no block
+    is contiguous in the sources. One review memo covers the programmes of the blocks that drew a memo.
+    A block's `told` holds what the memo says about its own programmes, so a block without a memo, or
+    with a right one, leaves a claim's `echo_state` empty exactly as at scale 1."""
+    if not 1 <= scale <= MAX_SCALE:
+        raise generate.GenerationError(f'The earlier family needs a scale from 1 to {MAX_SCALE}')
+    pool = [(f'{place} {service}', purpose, detail)
+            for place in generate.PLACE_STEMS
+            for service, (_, purpose, detail) in zip(SERVICES, PROGRAMMES)]
+    if len(pool) < 8 * scale or len({name for name, _, _ in pool}) != len(pool):
+        raise generate.GenerationError('The earlier family has too few programme names for this scale')
+    memo_date = day(rng, 10, 26, 31)
+    rng.shuffle(pool)
+    rngs = [random.Random(rng.getrandbits(64)) for _ in range(scale)]
+    places = [(block, offset) for block in range(scale) for offset in range(8)]
+    rng.shuffle(places)
+    number_of = {place: position + 1 for position, place in enumerate(places)}
+    width = max(2, len(str(8 * scale)))
+    sources = {'procedure.md': procedure()}
+    blocks, memo_entries = [], []
+    for block, block_rng in enumerate(rngs):
+        has_memo = block_rng.random() < 0.85
+        misleading = has_memo and block_rng.random() < 0.8
+        changed = set(block_rng.sample(range(8), 2 if block_rng.random() < 0.9 else 1)) if misleading else set()
+        kinds = ['variance'] * 4 + ['total'] * 4
+        block_rng.shuffle(kinds)
+        base, believed, slots = {}, {}, []
+        for offset in range(8):
+            name, purpose, detail = pool[8 * block + offset]
+            number = number_of[(block, offset)]
+            filename, text, facts, memo_facts, slot, memo_entry = draw_programme(
+                block_rng, number, name, purpose, detail, offset in changed, kinds[offset], width)
+            sources[filename] = text
+            base.update(facts)
+            believed.update(memo_facts)
+            slots.append(slot)
+            if has_memo:
+                memo_entries.append(memo_entry)
+        blocks.append({'base': base, 'unknowns': {}, 'slots': slots, 'rng': block_rng,
+                       'told': {'base': believed, 'unknowns': {}} if changed else None})
+    if memo_entries:
+        sources['review.md'] = review(sorted(memo_entries), memo_date, width, SCALED_FINDINGS)
+    return {'title': 'Programme disbursement review', 'sources': dict(sorted(sources.items())),
+            'reader': 'follows_earlier_review', 'blocks': blocks}

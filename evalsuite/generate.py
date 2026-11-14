@@ -37,9 +37,45 @@ GENERATOR_VERSION = 4
 MAX_WORLDS = 200_000
 DAY = datetime.timedelta(days=1)
 
+# Name pools for the scaled families (see `--scale`): every entry is a single token. A person is a given name
+# with a surname; a place or other entity is a stem, alone or with a suffix (`compound_names`).
+NAME_SUFFIXES = tuple('gate field wick ford holm stead mere combe thorpe by ham ton ley worth dale well bridge '
+                      'mouth side wood cliff haven moor bank hurst croft garth shaw firth head'.split())
+PLACE_STEMS = tuple('Northgate Southmere Eastbrook Westfield Highmoor Lowfold Kingsmead Queensway Abbotsham Brackley '
+                    'Calder Denholm Easby Farndale Glaisdale Hawkser Ingleby Kildale Lealholm Marske Newby Ormsby '
+                    'Pickton Rosedale Skelton Thornaby Ugthorpe Westerdale Yarm Aislaby'.split())
+GIVEN_NAMES = tuple('Ada Bo Cy Di Ed Fay Gus Ivy Jon Kit Lou Mae Ned Oz Pia'.split())
+SURNAMES = tuple('Brandt Castell Dorn Ebner Farrow Gould Hale Jansen Keane Lowry Marlow Nash Orme Pryce Quint'.split())
+
 
 class GenerationError(Exception):
     """A case could not be built as requested."""
+
+
+def interleave(rng, sequences):
+    """One list holding every item of every sequence, each sequence's own order kept. At each step the next
+    item comes from a sequence picked with probability proportional to the items it has left. One
+    `randrange(total)` is drawn per item, including when a single sequence is left."""
+    queues = [list(sequence) for sequence in sequences]
+    taken = [0] * len(queues)
+    total = sum(len(queue) for queue in queues)
+    merged = []
+    while total:
+        pick = rng.randrange(total)
+        for number, queue in enumerate(queues):
+            left = len(queue) - taken[number]
+            if pick < left:
+                break
+            pick -= left
+        merged.append(queue[taken[number]])
+        taken[number] += 1
+        total -= 1
+    return merged
+
+
+def compound_names(stems, suffixes):
+    """Single-token names such as `Aldergate`: every stem with every suffix, stem by stem."""
+    return [stem + suffix for stem in stems for suffix in suffixes]
 
 
 # ---------- Claims and their verdicts ----------
@@ -143,12 +179,12 @@ def citation(cites):
         f'{name} {", ".join(anchors)}' for name, anchors in grouped.items()) + '.'
 
 
-def report(title, items, preamble=None):
+def report(title, items, preamble=None, width=2):
     blocks = [f'# {title}\n']
     if preamble:
         blocks.append(preamble.strip() + '\n')
     for number, item in enumerate(items, 1):
-        ident = f'C{number:02d}'
+        ident = f'C{number:0{width}d}'
         blocks.append(f'<a id="{ident}"></a>\n**{ident}.** {item["text"]} {citation(item["cites"])}\n')
     return '\n'.join(blocks)
 
@@ -898,6 +934,48 @@ def family_builder(name):
         raise GenerationError(f'Family {name} is not available: {error}')
 
 
+# Families that can build a dossier N times as large (`--scale N`). Each module exports `MAX_SCALE` and
+# `build_scaled(rng, scale)`, which returns the case described at `build_case`. Add a family by one line.
+SCALED_FAMILIES = {'ledger': 'scaled_ledger', 'approvals': 'scaled_approvals', 'tables': 'lure_tables',
+                   'conflict': 'lure_conflict', 'earlier': 'lure_earlier', 'defaults': 'lure_defaults'}
+
+
+def scaled_module(name, scale=None):
+    """The module that builds the scaled case of a family; the same error whether the family is not
+    registered, its module is missing, or the module lacks `build_scaled` or `MAX_SCALE`."""
+    refusal = f'Family {name} does not support --scale' + ('' if scale is None else f' {scale}')
+    if name not in SCALED_FAMILIES:
+        raise GenerationError(refusal)
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        module = importlib.import_module(SCALED_FAMILIES[name])
+    except ImportError as error:
+        # A module that is not there yet is a plain refusal; an import that fails inside it is not hidden.
+        if getattr(error, 'name', None) == SCALED_FAMILIES[name]:
+            raise GenerationError(refusal)
+        raise GenerationError(f'{refusal}: {error}')
+    if not callable(getattr(module, 'build_scaled', None)) or not isinstance(getattr(module, 'MAX_SCALE', None), int):
+        raise GenerationError(refusal)
+    return module
+
+
+def scaled_builder(name, scale=None):
+    """The function that builds one scaled case of a family from a random source and a scale."""
+    return scaled_module(name, scale).build_scaled
+
+
+def check_scale(name, scale):
+    """Return the scaled builder of a family, or refuse a scale the family cannot build."""
+    if scale < 1:
+        raise GenerationError('--scale needs a positive number')
+    module = scaled_module(name, scale)
+    if scale > module.MAX_SCALE:
+        raise GenerationError(f'Family {name} does not support --scale {scale} (the limit is {module.MAX_SCALE})')
+    return module.build_scaled
+
+
 # ---------- Cases, keys and files ----------
 
 def expectation(dossier, ident, variant, item, case):
@@ -932,11 +1010,9 @@ def expectation(dossier, ident, variant, item, case):
     return row
 
 
-def build_case(family, seed, index):
-    """One dossier: sources, a correct report, a mixed report, and the computed key for both."""
-    builder = family_builder(family)
-    rng = random.Random(f'evalsuite:{GENERATOR_VERSION}:{seed}:{index}:{family}')
-    case = builder(rng)
+def choose(case, rng):
+    """The claims of the two reports of one case or block, as (correct, mixed). `rng` is the random source the
+    builder drew from last: its first draw here is the shuffle of the slots, and nothing may draw from it before."""
     slots = case['slots'][:]
     rng.shuffle(slots)
     correct = [true for true, _ in slots]
@@ -965,6 +1041,62 @@ def build_case(family, seed, index):
             mixed[position] = rng.choice(left_open[position])
     for position in rng.sample(sorted(set(usable) - set(reserved)), wanted - len(reserved)):
         mixed[position] = rng.choice(usable[position])
+    return correct, mixed
+
+
+def build_scaled_case(family, seed, index, scale):
+    """A dossier of `scale` blocks, each drawn and judged on its own, with the claims of all blocks shuffled together."""
+    builder = check_scale(family, scale)
+    rng = random.Random(f'evalsuite:{GENERATOR_VERSION}:{seed}:{index}:{family}:scale{scale}')
+    case = builder(rng, scale)
+    blocks = case['blocks']
+    if len(blocks) != scale:
+        raise GenerationError(f'Family {family} built {len(blocks)} blocks for --scale {scale}')
+    chosen = [choose(block, block['rng']) for block in blocks]
+    order = [(number, position) for number, (correct, _) in enumerate(chosen, 1) for position in range(len(correct))]
+    rng.shuffle(order)
+    width = max(2, len(str(len(order))))
+    dossier = f'g{seed}-{index:03d}-{family}-x{scale}'
+    views = []
+    for block in blocks:
+        view = {'base': block['base'], 'unknowns': block['unknowns'], 'sources': case['sources']}
+        for name in ('told', 'readers'):
+            if name in block:
+                view[name] = block[name]
+        if 'reader' in case:
+            view['reader'] = case['reader']
+        views.append(view)
+    reports = {variant: [chosen[number - 1][side][position] for number, position in order]
+               for side, variant in enumerate(('correct', 'mixed'))}
+    rows = []
+    for variant, items in reports.items():
+        for n, ((number, _), item) in enumerate(zip(order, items), 1):
+            row = expectation(dossier, f'C{n:0{width}d}', variant, item, views[number - 1])
+            row['block'] = number
+            rows.append(row)
+    key = {'schema_version': 1, 'dossier_id': dossier, 'classification': 'evaluator_only',
+           'status': 'computed_by_generator',
+           'warning': 'Computed answer key. Do not provide this file to an auditing agent.',
+           'generator': {'version': GENERATOR_VERSION, 'seed': seed, 'index': index, 'family': family,
+                         'scale': scale, 'blocks': scale},
+           'expectations': rows}
+    files = {f'sources/{name}': text for name, text in case['sources'].items()}
+    for variant, items in reports.items():
+        files[f'report-{variant}.md'] = report(case['title'], items, case.get('preamble'), width)
+    return {'dossier': dossier, 'family': family, 'files': files, 'key': key}
+
+
+def build_case(family, seed, index, scale=1):
+    """One dossier: sources, a correct report, a mixed report, and the computed key for both. At scale N > 1
+    the dossier is N blocks, each a case of the family's own size; see `build_scaled_case`."""
+    if scale < 1:
+        raise GenerationError('--scale needs a positive number')
+    if scale > 1:
+        return build_scaled_case(family, seed, index, scale)
+    builder = family_builder(family)
+    rng = random.Random(f'evalsuite:{GENERATOR_VERSION}:{seed}:{index}:{family}')
+    case = builder(rng)
+    correct, mixed = choose(case, rng)
     dossier = f'g{seed}-{index:03d}-{family}'
     rows = [expectation(dossier, f'C{n:02d}', variant, item, case)
             for variant, items in (('correct', correct), ('mixed', mixed)) for n, item in enumerate(items, 1)]
@@ -974,8 +1106,8 @@ def build_case(family, seed, index):
            'generator': {'version': GENERATOR_VERSION, 'seed': seed, 'index': index, 'family': family},
            'expectations': rows}
     files = {f'sources/{name}': text for name, text in case['sources'].items()}
-    files['report-correct.md'] = report(case['title'], correct, case.get('preamble'))
-    files['report-mixed.md'] = report(case['title'], mixed, case.get('preamble'))
+    files['report-correct.md'] = report(case['title'], correct, case.get('preamble'), 2)
+    files['report-mixed.md'] = report(case['title'], mixed, case.get('preamble'), 2)
     return {'dossier': dossier, 'family': family, 'files': files, 'key': key}
 
 
@@ -984,8 +1116,14 @@ def inside(child, parent):
     return child == parent or parent in child.parents
 
 
-def write_suite(fixtures, keys, seed, dossiers, families):
-    """Write `dossiers` cases, cycling through the families, into two new folders that do not contain each other."""
+def write_suite(fixtures, keys, seed, dossiers, families, scale=1):
+    """Write `dossiers` cases, cycling through the families, into two new folders that do not contain each other.
+    At `scale` N > 1 every dossier is N blocks; the families and the scale are checked before any folder is made."""
+    if scale < 1:
+        raise GenerationError('--scale needs a positive number')
+    if scale > 1:
+        for name in families:
+            check_scale(name, scale)
     fixtures, keys = Path(fixtures), Path(keys)
     if inside(fixtures, keys) or inside(keys, fixtures):
         raise GenerationError('The keys folder and the fixtures folder must not contain each other')
@@ -996,7 +1134,7 @@ def write_suite(fixtures, keys, seed, dossiers, families):
                'python': platform.python_version(), 'families': list(families), 'dossiers': {}}
     states, errors, echoes, lures = {}, {}, 0, 0
     for index in range(1, dossiers + 1):
-        case = build_case(families[(index - 1) % len(families)], seed, index)
+        case = build_case(families[(index - 1) % len(families)], seed, index, scale)
         hashes = {}
         for name, text in sorted(case['files'].items()):
             target = fixtures / case['dossier'] / name
@@ -1014,10 +1152,14 @@ def write_suite(fixtures, keys, seed, dossiers, families):
             lures += bool(row.get('lure_states'))
         summary['dossiers'][case['dossier']] = {'family': case['family'], 'files': hashes,
                                                 'claims_per_report': len(case['key']['expectations']) // 2}
+        if scale > 1:
+            summary['dossiers'][case['dossier']]['scale'] = scale
     summary.update(claims=sum(states.values()), expected_states=dict(sorted(states.items())),
                    injected_errors=dict(sorted(errors.items())), echo_claims=echoes)
     if lures:
         summary['lure_claims'] = lures
+    if scale > 1:
+        summary['scale'] = scale
     return summary
 
 
@@ -1029,6 +1171,9 @@ def main():
     parser.add_argument('--dossiers', type=int, default=12)
     parser.add_argument('--families', default=','.join(FAMILIES),
                         help='Comma-separated: ' + ', '.join(family_names()) + '. Default: ' + ', '.join(FAMILIES))
+    parser.add_argument('--scale', type=int, default=1,
+                        help='Make every dossier this many times as large, as that many blocks of the family\'s usual size '
+                             '(default 1; only the families listed in SCALED_FAMILIES)')
     args = parser.parse_args()
     try:
         families = [name for name in args.families.split(',') if name]
@@ -1036,7 +1181,9 @@ def main():
             raise GenerationError(f'Choose families from: {", ".join(family_names())}')
         if args.dossiers < 1:
             raise GenerationError('--dossiers needs a positive number')
-        summary = write_suite(args.fixtures, args.keys, args.seed, args.dossiers, families)
+        if args.scale < 1:
+            raise GenerationError('--scale needs a positive number')
+        summary = write_suite(args.fixtures, args.keys, args.seed, args.dossiers, families, args.scale)
     except GenerationError as error:
         raise SystemExit(f'Cannot generate: {error}')
     # The summary counts the injected errors, so it is answer material: it goes beside the keys, never into the fixtures.

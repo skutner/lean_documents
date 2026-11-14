@@ -162,10 +162,25 @@ Remaining cues and limits:
   who follows the procedure has no use for either shortcut. The family measures
   whether auditors follow it; a ceiling result would mean it no longer separates
   auditors. No model campaign is claimed.
+
+Scaled dossiers (`build_scaled`, for `--scale N`): N blocks of twelve venues. A block is
+drawn by the recipe above, from its own Random (`draw_block`), so each block keeps its
+kinds, its six disputed venues, its clauses, copy routes, amounts, slots, both readers
+and the rank reader's `told` world; the key's `lure_states` mean what they mean at scale
+1. The venues are compound names (`Aldergate`, `Alderfield`): the twelve stems of
+VENUES with the thirty NAME_SUFFIXES, 360 names, shuffled by the dossier's Random and
+dealt twelve to a block. A venue's three notes are its stem's hand-written facts with
+the full name in place of the stem. The five document dates are drawn once, by the
+dossier's Random, and printed once. The venues of all blocks are rendered together,
+sorted by name, so a block is not contiguous in any file. Each claim is judged over its
+own block's unsettled venues only, so no world count grows with N. MAX_SCALE is 30
+because the 360 names are then all used.
 """
 import collections
+import random
+import re
 
-from generate import claim, document, section
+from generate import GenerationError, NAME_SUFFIXES, claim, compound_names, document, section
 
 FACTS = {
     'Alder': (
@@ -266,9 +281,12 @@ def draw_clause(rng):
         point -= weight
 
 
-def build(rng):
-    """Draw everything from the supplied Random; no retries or outside state."""
-    shuffled = list(VENUES)
+def draw_block(rng, venues, stems=None):
+    """One block of twelve venues from the supplied Random: items, slots, base and unknowns.
+
+    `venues` is the block's venues in the order they are drawn; `stems` maps a compound name to the
+    venue whose hand-written facts it uses, and is left out where the names are the stems themselves."""
+    shuffled = list(venues)
     rng.shuffle(shuffled)
     kinds = {name: ('budget', 'at most' if i < 4 else 'more than')
              for i, name in enumerate(shuffled[:9])}
@@ -276,7 +294,7 @@ def build(rng):
     # One of the two "not" venues is disputed, so the other is a same-wording control in every report.
     disputed = set(rng.sample(shuffled[:9], rng.choice(DISPUTED_BUDGET))) | {rng.choice(shuffled[10:])}
     items, slots, base, unknowns = [], [], {}, {}
-    for venue in VENUES:
+    for venue in venues:
         kind, wording = kinds[venue]
         low = rng.randrange(1800, 8600)
         gap = rng.choice((10, 20, 30))
@@ -303,6 +321,8 @@ def build(rng):
             base[venue] = value
         items.append(dict(venue=venue, entries=entries, selection=selection, copied=copied,
                           target=target, previous=previous, equipment=equipment, conflict=conflict))
+        if stems:
+            items[-1]['stem'] = stems[venue]
         cites = [('schedule.md', 'V-' + venue), ('correspondence.md', 'V-' + venue),
                  ('circulation.md', 'V-' + venue), ('agreement.md', 'V-' + venue), ('procedure.md', 'P-01')]
 
@@ -342,17 +362,54 @@ def build(rng):
         else:
             true, mutations = make(equipment), [make(value, 'denies_selected_room_price')]
         slots.append((true, mutations))
+    return items, slots, base, unknowns
 
+
+def draw_dates(rng):
+    """The five document dates: records A, B, C and the procedure P in any order, the agreement G after all."""
     days = rng.sample(range(1, 24), 4)
     dates = {name: f'{day} September 2034' for name, day in zip(('A', 'B', 'C', 'P'), days)}
     dates['G'] = f'{max(days) + rng.randrange(1, 5)} September 2034'
+    return dates
+
+
+def build(rng):
+    """Draw everything from the supplied Random; no retries or outside state."""
+    items, slots, base, unknowns = draw_block(rng, VENUES)
+    dates = draw_dates(rng)
     readers = {name: reader_world(items, name) for name in (RANK, COPIES)}
     return {'title': 'Room hire review', 'sources': render(items, dates), 'base': base, 'unknowns': unknowns,
             'slots': slots, 'readers': readers, 'reader': RANK, 'told': readers[RANK]}
 
 
+MAX_SCALE = 30  # 30 blocks of twelve venues use all 360 compound names
+
+
+def build_scaled(rng, scale):
+    """`scale` blocks of twelve venues, drawn from the dossier's Random in a fixed order: the names
+    (shuffled and dealt twelve to a block), the five dates (once for the dossier), then one Random per
+    block. Each block is drawn by `draw_block` from its own Random, which `build_case` then continues."""
+    if not isinstance(scale, int) or not 1 <= scale <= MAX_SCALE:
+        raise GenerationError(f'Scale must be a whole number from 1 to {MAX_SCALE}')
+    names = compound_names(VENUES, NAME_SUFFIXES)
+    stems = {stem + suffix: stem for stem in VENUES for suffix in NAME_SUFFIXES}
+    rng.shuffle(names)
+    dates = draw_dates(rng)
+    blocks, items = [], []
+    for number in range(scale):
+        block_rng = random.Random(rng.getrandbits(64))
+        block_items, slots, base, unknowns = draw_block(block_rng, names[12 * number:12 * number + 12], stems)
+        readers = {name: reader_world(block_items, name) for name in (RANK, COPIES)}
+        blocks.append({'base': base, 'unknowns': unknowns, 'slots': slots, 'rng': block_rng,
+                       'readers': readers, 'told': readers[RANK]})
+        items.extend(block_items)
+    items.sort(key=lambda item: item['venue'])
+    return {'title': 'Room hire review', 'sources': render(items, dates), 'reader': RANK, 'blocks': blocks}
+
+
 def render(items, dates):
-    """Office prose, with concurrent source histories and separate selection clauses."""
+    """Office prose, with concurrent source histories and separate selection clauses. Takes any list of
+    venues; an item with a `stem` uses that venue's hand-written notes, with the full name in its place."""
     schedule = [section('S-01', 'Issue and distribution',
         'Bellwether Civic Rooms Trust. Estates Office. Signed by Mara Vale, Estates Director. '
         f'Issue date: {dates["A"]}. Record A: signed room hire schedule. '
@@ -418,7 +475,10 @@ def render(items, dates):
     for item in items:
         venue, entries = item['venue'], item['entries']
         anchor = 'V-' + venue
-        hall, steward, desk = FACTS[venue]
+        stem = item.get('stem', venue)
+        hall, steward, desk = FACTS[stem]
+        if stem != venue:
+            hall, steward, desk = (re.sub(rf'\b{stem}\b', venue, note) for note in (hall, steward, desk))
         schedule.append(section(anchor, venue,
             f'For {venue}, this schedule states a daily room hire charge of EUR {entries["A"]}. {hall}'))
         correspondence.append(section(anchor, venue,
