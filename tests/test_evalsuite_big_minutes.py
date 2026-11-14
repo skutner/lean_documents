@@ -5,17 +5,30 @@ rendered Markdown. It never reads `case['base']`, a claim's predicate or the eve
 built from the inventory finds the events in the text, and an evaluator written here recomputes the verdict of every
 statement of both reports, and of every flawed reader. The event log, the passage map and the `state` function are
 checked against that reading in their own tests.
+
+Editions 3 and 4 (BIG_MINUTES_EDITION=3 or 4) add statements about sums: over three, five or eight named projects, over every
+project up to a meeting, and over every project across a span of meetings. The same reading side checks them: a reader of the
+sum frames built from `INVENTORY['sum_statements']` and `['sum_list']`, and the same evaluator, which adds the per-project figures
+it already computes (the truth, and each flawed reader's own). The expected value of every sum, and every flawed reader's sum,
+comes from this module's parser and evaluator on the rendered text, never from `answer`, `sum_value`, `state`, `case['base']`, a
+claim's predicate or the key; the hand-written logs carry values written down from the procedure's rules. `CHECKS3` is the check list of
+editions 3 and 4; the heavy sweeps run through `--verify` (`BIG_MINUTES_EDITION=3 python3 tests/test_evalsuite_big_minutes.py
+--verify SEED 1`), a few dossiers in the unit tests.
 """
 import collections
+import contextlib
+import copy
 import fractions
 import functools
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import random
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -273,6 +286,7 @@ class Book:
         self.intro_at = intro_at
         for key, m, text in pending:
             self.read_block(key, m, text)
+        self.projects = sorted({f['p'] for f in self.facts if f['t'] == 'award'})     # "all projects": those the minutes award
 
     def meeting_of(self, text):
         year, month, day = date_parts(text)
@@ -395,7 +409,8 @@ class Book:
             elif kind == 'return':
                 self.add(key, m, text, 'return', who, when=self.meeting_of(g['when']), start=start)
             elif kind == 'pay':
-                self.add(key, m, text, 'pay', who, spec=self.amount(g['amt'], m, key, who), start=start)
+                self.add(key, m, text, 'pay', who, spec=self.amount(g['amt'], m, key, who), start=start,
+                         recipient_first=mo.start('proj') < mo.start('amt'))      # the recipient is named before the amount
             elif kind == 'intro':
                 self.add(key, m, text, 'intro', who, sponsor=g['sponsor'], start=start)
             for fact in self.facts[before:]:
@@ -534,6 +549,89 @@ def verdict(results, statement):
     return 'supported' if results[(kind, who, until)] == value else 'refuted'
 
 
+# ---------- Sums (editions 3 and 4): the statement reader and the evaluator, from the inventory and the text ----------
+
+SUM_SHAPES = {'sum': 'named', 'all': 'all', 'span': 'span'}      # the first word of a frame table's name
+FULL_PLAIN = re.sub(r'\(\?P<\w+>', '(?:', FULL_SRC)                # a full name, without group names
+SUM_LIST = INV.get('sum_list', {'separator': ', ', 'last': ' and '})
+LIST_SRC = (f'{FULL_PLAIN}(?:{re.escape(SUM_LIST["separator"])}{FULL_PLAIN})*{re.escape(SUM_LIST["last"])}{FULL_PLAIN}')
+SUM_SRC = []        # (shape, figure, compiled frames) of every table of `INV['sum_statements']`
+for _table, _frames in INV.get('sum_statements', {}).items():
+    _shape, _figure = SUM_SHAPES[_table.split('_')[0]], _table.split('_')[1]
+    _atoms = {'{names}': f'(?P<names>{LIST_SRC})', '{when}': f'(?P<when>{WHEN_SRC})', '{earlier}': f'(?P<earlier>{WHEN_SRC})',
+              '{later}': f'(?P<later>{WHEN_SRC})',
+              '{value}': '(?P<value>' + (MONEY_SRC if _figure == 'total' else r'(?:\d+|[a-z]+)') + ')'}
+    SUM_SRC.append((_shape, _figure, [re.compile('^' + ''.join(_atoms.get(part, re.escape(part)) for part in re.split(r'(\{\w+\})', _f)) + '$')
+                                      for _f in _frames]))
+
+
+def name_list(names):
+    return SUM_LIST['separator'].join(names[:-1]) + SUM_LIST['last'] + names[-1]
+
+
+def is_sum_text(text):
+    return any(rx.match(text) for _, _, patterns in SUM_SRC for rx in patterns)
+
+
+def read_sum(book, text):
+    """The statement about a sum in `text`, or None when it is not one: shape (`named`, `all`, `span`), figure (`total` or
+    `count`), the names in the order written, the meeting numbers of the close(s) and the stated value. Exactly one frame of the
+    inventory must fit, and the names must be the list as `sum_list` writes it."""
+    found = [(shape, figure, mo) for shape, figure, patterns in SUM_SRC for rx in patterns for mo in [rx.match(text)] if mo]
+    if not found:
+        return None
+    need(len(found) == 1, f'{len(found)} frames fit {text!r}')
+    shape, figure, mo = found[0]
+    g = mo.groupdict()
+    names = None
+    if shape == 'named':
+        names = [m.group(0) for m in FULL_RE.finditer(g['names'])]
+        need(name_list(names) == g['names'] and len(set(names)) == len(names) and set(names) <= set(book.names),
+             f'the names of {text!r} are not a list of distinct projects')
+    until = book.meeting_of(g['later'] if shape == 'span' else g['when'])
+    since = book.meeting_of(g['earlier']) if shape == 'span' else None
+    raw = g['value']
+    return {'shape': shape, 'figure': figure, 'names': names, 'since': since, 'until': until,
+            'value': parse_money(raw) if figure == 'total' else parse_count(raw), 'value_span': mo.span('value'), 'text': text}
+
+
+def statement_of(book, text):
+    """Any statement of a report as a dict: `shape` is `single` (kind, who, until, value) or that of a sum."""
+    found = read_sum(book, text)
+    if found is not None:
+        return found
+    kind, who, until, value = read_statement(book, text)
+    return {'shape': 'single', 'kind': kind, 'who': who, 'until': until, 'value': value, 'text': text}
+
+
+def sum_of(results, projects, st):
+    """The value of a sum statement under one reading: the figure of each project at the close, added exactly; for a span the
+    figure at the later close less that at the earlier close (None when a figure is not established)."""
+    names = st['names'] if st['shape'] == 'named' else list(projects)
+
+    def at(m):
+        parts = [results[(st['figure'], n, m)] for n in names]
+        return None if any(p is None for p in parts) else sum((fractions.Fraction(p) for p in parts), fractions.Fraction(0))
+    later = at(st['until'])
+    if st['since'] is None or later is None:
+        return later
+    earlier = at(st['since'])
+    return None if earlier is None else later - earlier
+
+
+def decide(results, projects, st):
+    """supported or refuted: the verdict of a statement of either kind under one reading."""
+    if st['shape'] == 'single':
+        return verdict(results, (st['kind'], st['who'], st['until'], st['value']))
+    got = sum_of(results, projects, st)
+    return 'supported' if got is not None and got == st['value'] else 'refuted'
+
+
+def good_figure(figure, value):
+    """A good value of a sum (supplement 4): a positive whole number of pounds, or a number of payments of at least two."""
+    return value is not None and value.denominator == 1 and value >= (2 if figure == 'count' else 1)
+
+
 @per_edition
 def made_of(seed, index=1):
     """The module's own case (events, passages, bases), built from the random source `build_case` uses."""
@@ -544,15 +642,20 @@ def readers_in(seed, index=1):
     return tuple(sorted(made_of(seed, index)['readers']))
 
 
-@per_edition
-def read(seed, index=1):
-    book = Book(sources_of(case(seed, index)))
+def runs_of(book):
+    """The truth and each flawed reader's reading of a book, by this module's own evaluator."""
     count = len(book.meetings)
     runs = {'truth': run(book.facts, count, book.names)}
     for name, mode in (('counts_every_mention', ('counts_every_mention',)), ('ignores_corrections', ('ignores_corrections',)),
                        ('counts_motions_as_decisions', ('counts_motions_as_decisions',)), ('full_name_only', ('full_name_only',))):
         runs[name] = run(book.facts, count, book.names, mode, strict=False)
-    return book, runs
+    return runs
+
+
+@per_edition
+def read(seed, index=1):
+    book = Book(sources_of(case(seed, index)))
+    return book, runs_of(book)
 
 
 def same_values(event, fact, by_id):
@@ -1554,7 +1657,7 @@ def minute_blocks(seed, index):
             for n, text in enumerate(sources[name].rstrip('\n').split('\n\n'))}
 
 
-def check_filters(seed, index=1):
+def check_filters(seed, index=1, any_word=True):
     """What two verb lists keep, what a reader that keeps any word of the subject's names keeps, and how many deciding
     passages name their project with no word of its name. Reported on every draw; the bounds are the design's."""
     book, runs = read(seed, index)
@@ -1575,6 +1678,8 @@ def check_filters(seed, index=1):
         keep_words[name] = words_of
     missed = projects = 0
     for text in report_statements(case(seed, index), 'correct'):
+        if is_sum_text(text):
+            continue
         kind, who, until, _ = read_statement(book, text)
         if who is None:
             continue
@@ -1586,7 +1691,8 @@ def check_filters(seed, index=1):
     need(share['text'] >= 0.70, f'the verb lists keep only {share["text"]:.0%} of the text')
     need(share['deciding_verbs'] <= 0.75, f'the verb lists keep {share["deciding_verbs"]:.0%} of the deciding passages')
     need(share['no_name_word'] >= 0.40, f'only {share["no_name_word"]:.0%} of deciding passages name the project with no word of its name')
-    need(share['any_word_misses'] >= 0.50, f'the any-word reader misses a deciding passage on only {share["any_word_misses"]:.0%} of statements')
+    if any_word:        # editions 3 and 4 have only four statements about one project: the share is reported, not asserted
+        need(share['any_word_misses'] >= 0.50, f'the any-word reader misses a deciding passage on only {share["any_word_misses"]:.0%} of statements')
     return (f'verb lists keep {share["text"]:.0%} of the text and {share["deciding_verbs"]:.0%} of {len(unique)} deciding passages; '
             f'{share["no_name_word"]:.0%} name the project with no word of its name; the any-word reader misses a deciding '
             f'passage on {share["any_word_misses"]:.0%} of project statements')
@@ -1682,6 +1788,8 @@ def check_single_devices(seed, index=1):
     lures = collections.Counter()
     for variant in ('correct', 'mixed'):
         for row in key_rows(built, variant):
+            if is_sum_text(row['claim_text']):
+                continue                # the rule is not applied to sums (supplement 5): `check_false_sums` stands in for it
             kind, who, until, value = read_statement(book, row['claim_text'])
             want = (kind, who, until)
             for name, devices in bundles.items():
@@ -1694,6 +1802,585 @@ def check_single_devices(seed, index=1):
     return ', '.join(f'{n}: {c} lure rows, each through one device' for n, c in sorted(lures.items()))
 
 
+# ---------- Editions 3 and 4: the check list of the sums ----------
+#
+# Written from the supplement (sections 3 to 9) and the rendered text; the tables below are written out here, from the
+# supplement's table, and compared with the inventory's, never read from it.
+
+EXPECTED_QUOTAS = {
+    3: {'award': 2, 'single': 2, 'sum3': 2, 'sum5': 4, 'sum8': 6, 'upto': 0, 'projects': 2, 'span3': 2, 'span6': 2, 'book': 2},
+    4: {'award': 2, 'single': 2, 'sum3': 0, 'sum5': 2, 'sum8': 4, 'upto': 6, 'projects': 2, 'span3': 2, 'span6': 2, 'book': 2}}
+SINGLES = ('total', 'count', 'balance', 'largest', 'first')
+STATEMENTS_PER_REPORT = 24
+ALTERED = (8, 12)
+
+
+def guarded(check):
+    """Whatever else a check meets (a refusal of the checker, a type error) is reported as a failed check, not a crash."""
+    @functools.wraps(check)
+    def wrapper(*args):
+        try:
+            return check(*args)
+        except (AssertionError, KeyError, ValueError, IndexError):
+            raise
+        except Exception as error:      # noqa: BLE001
+            raise Failed(f'{type(error).__name__}: {str(error)[:300]}')
+    return wrapper
+
+
+def strip_value(query):
+    return {k: v for k, v in query.items() if k != 'value'}
+
+
+def rung_of(st, count):
+    """The rung of a statement, from its own text: what its claim kind (`minutes_<rung>`) should say."""
+    if st['shape'] == 'single':
+        return st['kind'] if st['kind'] in ('award', 'projects') else 'single'
+    if st['shape'] == 'named':
+        return f'sum{len(st["names"])}'
+    if st['shape'] == 'all':
+        return 'book' if st['until'] == count - 1 else 'upto'
+    return f'span{st["until"] - st["since"]}'
+
+
+def claim_kind_of(st, count):
+    rung = rung_of(st, count)
+    return 'minutes_' + (st['kind'] if rung == 'single' else rung)
+
+
+def identity(st):
+    if st['shape'] == 'single':
+        return ('single', st['kind'], st['who'], st['until'])
+    return (st['shape'], st['figure'], tuple(sorted(st['names'])) if st['names'] else None, st['since'], st['until'])
+
+
+def round_trip3(built, book, runs, readers):
+    """Every statement of both reports, sums included, re-decided by this module's evaluator for the truth and for every flawed
+    reader the dossier carries; every false sum states the sum the named reader gets (supplement 5, checks 1 and 3)."""
+    need(book.errors == [], f'unreadable text: {book.errors[:2]}')
+    projects, kinds, errors = book.projects, collections.Counter(), collections.Counter()
+    need(projects == book.names, 'a project named in the minute books has no award in them')
+    for variant in ('correct', 'mixed'):
+        texts, rows = report_statements(built, variant), key_rows(built, variant)
+        need(len(texts) == len(rows) == STATEMENTS_PER_REPORT, f'{variant}: {len(texts)} statements, {len(rows)} rows')
+        for text, row in zip(texts, rows):
+            need(text == row['claim_text'], 'report and key disagree on a statement')
+            st = statement_of(book, text)
+            need(decide(runs['truth'], projects, st) == row['semantic_state'], f'{variant}: verdict differs for {text!r}')
+            for name in readers:
+                need(decide(runs[name], projects, st) == row['lure_states'].get(name, row['semantic_state']),
+                     f'{variant}: reader {name} differs for {text!r}')
+            if variant == 'correct':
+                need(row['semantic_state'] == 'supported' and row['error_type'] is None, f'a false statement in the correct report: {text!r}')
+            if st['shape'] != 'single':
+                kinds[st['shape']] += 1
+                if row['semantic_state'] == 'refuted':
+                    errors[check_false_sum(st, row, runs, projects)] += 1
+                else:
+                    need(row['error_type'] is None, f'a true sum with an error type: {text!r}')
+    return (f'{2 * STATEMENTS_PER_REPORT} statements ({sum(kinds.values())} sums: {dict(sorted(kinds.items()))}), readers '
+            f'{", ".join(readers)}; false sums by reader {dict(sorted(errors.items()))}')
+
+
+def check_false_sum(st, row, runs, projects):
+    """A false sum states the sum its named reader gets from its own figures, and not the true sum (supplement 5, checks 1 and 3);
+    where the error is the plain wrong value, no reader gets a good value other than the truth. Returns the error."""
+    truth = sum_of(runs['truth'], projects, st)
+    need(truth is not None, f'no true sum for {st["text"]!r}')
+    need(good_figure(st['figure'], truth), f'the true sum {truth} of {st["text"]!r} is not a good value')
+    stated, error = fractions.Fraction(st['value']), row['error_type']
+    need(stated != truth, f'a false sum states the true value: {st["text"]!r}')
+    need(error is not None, f'a false sum without an error type: {st["text"]!r}')
+    if error == 'plain_wrong_value':
+        for name in READERS + ('full_name_only',):
+            theirs = sum_of(runs[name], projects, st)
+            need(not (good_figure(st['figure'], theirs) and theirs != truth),
+                 f'plain wrong value stated, but reader {name} gets the good value {theirs} (true sum {truth}) for {st["text"]!r}')
+    else:
+        need(error in runs and error != 'truth', f'unknown reader {error!r}')
+        theirs = sum_of(runs[error], projects, st)
+        need(theirs == stated, f'false sum {st["text"]!r} states {st["value"]}, but reader {error} gets {theirs} (true sum {truth})')
+    return error
+
+
+@guarded
+def check_round_trip3(seed, index=1):
+    built = case(seed, index)
+    book, runs = read(seed, index)
+    return round_trip3(built, book, runs, readers_in(seed, index))
+
+
+def statements_of(seed, index=1):
+    """{variant: [statement dict]} of both reports of the dossier."""
+    built, (book, _) = case(seed, index), read(seed, index)
+    return {v: [statement_of(book, t) for t in report_statements(built, v)] for v in ('correct', 'mixed')}
+
+
+def quota_rules(edition, count, both, rows):
+    """The quota table of the edition per report, by rung as the text shows it and by claim kind as the key says it (`both`: the
+    statements of each report, `rows`: its key rows)."""
+    need({e: dict(t) for e, t in INV['sum_quotas'].items()} == EXPECTED_QUOTAS, f'the inventory\'s tables differ: {INV["sum_quotas"]}')
+    for variant, sts in both.items():
+        rungs = collections.Counter(rung_of(st, count) for st in sts)
+        need({r: n for r, n in rungs.items()} == {r: n for r, n in EXPECTED_QUOTAS[edition].items() if n},
+             f'{variant}: the text shows {dict(sorted(rungs.items()))}, edition {edition} has {EXPECTED_QUOTAS[edition]}')
+        need([r['claim_kind'] for r in rows[variant]] == [claim_kind_of(st, count) for st in sts],
+             f'{variant}: the claim kinds are not those the text shows')
+        singles = [st['kind'] for st in sts if rung_of(st, count) == 'single']
+        need(len(set(singles)) == len(singles) and set(singles) <= set(SINGLES), f'{variant}: one-project statements {singles}')
+
+
+@guarded
+def check_quotas(seed, index=1):
+    """The quota table of the edition, per report and by claim kind, from the supplement's table written out above (and equal to the
+    inventory's); the rungs the text shows are the claim kinds of the rows; 8 to 12 altered statements."""
+    edition, built = big_minutes.current_edition(), case(seed, index)
+    book, _ = read(seed, index)
+    need(all(sum(t.values()) == STATEMENTS_PER_REPORT for t in EXPECTED_QUOTAS.values()), 'the expected tables are not of 24')
+    both = statements_of(seed, index)
+    quota_rules(edition, len(book.meetings), both, {v: key_rows(built, v) for v in both})
+    altered = sum(a != b for a, b in zip(report_statements(built, 'correct'), report_statements(built, 'mixed')))
+    need(ALTERED[0] <= altered <= ALTERED[1], f'{altered} altered statements')
+    kinds = collections.Counter(claim_kind_of(st, len(book.meetings)) for st in both['correct'])
+    return f'edition {edition}: {dict(sorted(kinds.items()))} per report; {altered} altered statements of 24'
+
+
+def choice_rules(edition, count, runs, projects, both):
+    """The rules of choice (supplement 3 and 4) for both reports, from statements read out of the text (`both`) and this module's
+    evaluator's readings (`runs`). Returns the number of uses of each named project."""
+    truth = runs['truth']
+    for correct, mixed in zip(both['correct'], both['mixed']):
+        need({k: v for k, v in correct.items() if k not in ('value', 'value_span', 'text')} ==
+             {k: v for k, v in mixed.items() if k not in ('value', 'value_span', 'text')}, 'an altered statement changes more than its value')
+    for variant, sts in both.items():
+        need(len({identity(st) for st in sts}) == len(sts), f'{variant}: two statements are the same statement')
+        spans = collections.defaultdict(list)
+        by_rung = collections.defaultdict(list)
+        for st in sts:
+            rung = rung_of(st, count)
+            by_rung[rung].append(st)
+            if st['shape'] == 'named':
+                for name in st['names']:
+                    need(truth[('count', name, st['until'])] >= 2, f'{variant}: {name} has fewer than two payments at its sum')
+                need(3 * st['until'] >= 2 * count, f'{variant}: a named sum at meeting {st["until"]} of {count}, not in the last third')
+            if st['shape'] != 'single':
+                value = sum_of(truth, projects, st)
+                need(good_figure(st['figure'], value), f'{variant}: {st["text"]!r} has the true value {value}')
+            if st['shape'] == 'all' and rung == 'upto':
+                need(3 * count // 5 <= st['until'] <= count - 2, f'{variant}: an upto sum at meeting {st["until"]} of {count}')
+            if st['shape'] == 'span':
+                length = st['until'] - st['since']
+                gap = sum_of(truth, projects, dict(st, figure='count'))
+                need(gap >= length, f'{variant}: a span of {length} meetings holds {gap} more payments at its later close')
+                spans[length].append((st['since'], st['until']))
+        for length, items in spans.items():
+            for i, (s1, u1) in enumerate(items):
+                for s2, u2 in items[:i]:
+                    need(max(s1, s2) >= min(u1, u2), f'{variant}: two spans of {length} meetings overlap: {(s1, u1)} {(s2, u2)}')
+        for rung, items in by_rung.items():
+            figures = collections.Counter(st['figure'] for st in items if st['shape'] != 'single')
+            if figures:
+                need(abs(figures['total'] - figures['count']) <= len(items) % 2, f'{variant}: {rung} has {dict(figures)}')
+        if edition == 4:
+            need(len({st['until'] for st in by_rung['upto']}) >= 3, f'{variant}: the upto sums use fewer than three meetings')
+        need(all(len(st['names']) == len(set(st['names'])) for st in by_rung['sum3'] + by_rung['sum5'] + by_rung['sum8']), 'repeated names')
+        need(all(st['until'] == count - 1 for st in by_rung['book']), f'{variant}: a book sum not at the last meeting')
+        need(sorted(3 * st['until'] // count for st in by_rung['projects']) == [0, 2],
+             f'{variant}: the projects statements are not one in the first and one in the last third')
+        need(all(runs[name][('award', st['who'], st['until'])] == truth[('award', st['who'], st['until'])]
+                 for st in by_rung['award'] for name in READERS), f'{variant}: a flawed reader differs on an award control')
+    return collections.Counter(n for st in both['correct'] if st['shape'] == 'named' for n in st['names'])
+
+
+@guarded
+def check_choice_rules(seed, index=1):
+    """The rules of choice, recomputed from this module's reading of the text (see `choice_rules`)."""
+    edition, built = big_minutes.current_edition(), case(seed, index)
+    book, runs = read(seed, index)
+    both = statements_of(seed, index)
+    uses = choice_rules(edition, len(book.meetings), runs, book.projects, both)
+    # the readers' sums nearest the truth give the false value of a sum (the order of the picker's rule), by this evaluator
+    for st, row in zip(both['mixed'], key_rows(built, 'mixed')):
+        if st['shape'] != 'single' and row['error_type'] not in (None, 'plain_wrong_value'):
+            truth_sum = sum_of(runs['truth'], book.projects, st)
+            valid = {name: sum_of(runs[name], book.projects, st) for name in READERS + ('full_name_only',)}
+            valid = {n: v for n, v in valid.items() if good_figure(st['figure'], v) and v != truth_sum}
+            options = {}
+            for name in sorted(valid, key=lambda n: (abs(valid[n] - truth_sum), n)):
+                options.setdefault(valid[name], name)
+            need(fractions.Fraction(st['value']) in list(options)[:3],
+                 f'{st["text"]!r}: the stated value is not one of the three readers\' sums nearest the truth {truth_sum}: {options}')
+    return (f'edition {edition}: every rule holds in both reports; named sums over {len(uses)} projects, each used {min(uses.values(), default=0)} '
+            f'to {max(uses.values(), default=0)} times')
+
+
+def text_rules3(sources, book):
+    """Text rules of editions 3 and 4 (supplement 6), read from the sources of a dossier and the facts `book` found in them."""
+    books = {n: t for n, t in sources.items() if n != 'procedure.md'}
+    # a project is named by its place in the order of backing only up to the twelfth place
+    need(INV['ordinal_cap'] == 12, f'the inventory\'s cap is {INV["ordinal_cap"]}')
+    uses = collections.Counter()
+    for form, number in book.ordinal_forms.items():
+        uses[number] = sum(len(re.findall(re.escape(form), t, re.I)) for t in books.values())
+    need(all(n == 0 for number, n in uses.items() if number >= 12), f'a project is named by a place beyond the twelfth: {dict(uses)}')
+    need(any(n for number, n in uses.items() if number < 12), 'no project is named by its place, up to the twelfth: the check is empty')
+    # where a payment's amount is stated through another project's first instalment, the recipient is named before the amount
+    first_of = [f for f in book.facts if f['t'] == 'pay' and f['spec']['type'] == 'first_of']
+    need(all(f['recipient_first'] for f in first_of), 'an amount stated through another project\'s instalment comes before its recipient')
+    # procedure.md: the sums paragraph, and the wordings of a rescission that the minute books use
+    paragraphs = sources['procedure.md'].rstrip('\n').split('\n\n')
+    sums = [p for p in paragraphs if all(v in p for v in ('"stood higher"', '"rose by"', '"grew by"'))]
+    need(len(sums) == 1, f'{len(sums)} paragraphs of procedure.md name the verbs of a span')
+    for phrase in ('together', '"all projects"', 'adds nothing', 'less the same figure', 'after the later close', 'both closes'):
+        need(phrase in sums[0], f'the sums paragraph lacks {phrase!r}')
+    need(sums[0] == INV['procedure_sums'], 'the sums paragraph is not the inventory\'s')
+    rescissions = [p for p in paragraphs if p.startswith('Rescissions.')]
+    need(len(rescissions) == 1 and rescissions[0] == INV['procedure_rescissions'], 'the rescission paragraph is missing or not the inventory\'s')
+    need(all(w in rescissions[0] for w in INV['rescission_wordings']), 'the rescission paragraph lacks a wording')
+    used = collections.Counter()
+    for f in (f for f in book.facts if f['t'] == 'rescind'):
+        block = book.blocks[f['key']]
+        sentence = block[f['order'][1]:].split('. ')[0]
+        listed = [w for w in INV['rescission_wordings'] if w in sentence]
+        need(listed or re.search(r'rescind|withdraw|cancel', sentence), f'a rescission worded outside the procedure: {sentence!r}')
+        for w in listed:
+            need(w in rescissions[0], f'the wording {w!r} of a rescission is not named in procedure.md')
+            used[w] += 1
+    # every frame of a span names both closes and says the difference in its own words
+    for table, frames in INV['sum_statements'].items():
+        if table.startswith('span_'):
+            for frame in frames:
+                need('close of {earlier}' in frame and 'close of {later}' in frame and
+                     any(v in frame for v in ('{value} higher', 'rose by', 'grew by')), f'a span frame without both closes or a verb: {frame!r}')
+    return (f'{len(first_of)} amounts through another project\'s instalment name their recipient first; projects named by place only up to '
+            f'the twelfth ({sum(uses.values())} uses); procedure.md holds the sums paragraph and the wordings used ({dict(sorted(used.items()))})')
+
+
+@guarded
+def check_text_rules3(seed, index=1):
+    return text_rules3(sources_of(case(seed, index)), read(seed, index)[0])
+
+
+@guarded
+def check_filters3(seed, index=1):
+    return check_filters(seed, index, any_word=False)
+
+
+@guarded
+def check_leads3(seed, index=1):
+    return check_edition2_leads(seed, index)
+
+
+@guarded
+def check_sums_turn_on_projects(seed, index=1):
+    """Editions 3 and 4 have no use for the rule that four statements turn on another subject; what holds for them: a named sum
+    turns on a payment of each named project, a sum over every project up to a meeting on at least three projects, and the
+    number of projects holding an award on every award held and every rescission up to the meeting."""
+    made = made_of(seed, index)
+    events, by_id = made['events'], {e['id']: e for e in made['events']}
+    built, (book, _) = case(seed, index), read(seed, index)
+    spread = collections.defaultdict(list)
+    for key, q in statement_queries(seed, index).items():
+        needed = needed_of(seed, index, key)
+        closed = closed_needed_of(seed, index, key)
+        if q['kind'] in ('sum3', 'sum5', 'sum8'):
+            for name in q['subjects']:
+                need(any(by_id[i]['subject'] == name and by_id[i]['kind'] == 'pay' for i in needed), f'{key}: nothing of {name} is needed')
+        if q['kind'] in ('upto', 'book', 'span3', 'span6'):
+            subjects = {by_id[i]['subject'] for i in closed if by_id[i]['kind'] != 'names'}
+            need(q['kind'].startswith('span') or len(subjects) >= 3, f'{key}: only {len(subjects)} projects are needed')
+            spread[q['kind']].append(len(subjects))
+        if q['kind'] == 'projects':
+            every = {e['id'] for e in events if e['kind'] in ('award', 'rescind') and e['date'] <= q['until']}
+            rescinded = {e['subject'] for e in events if e['kind'] == 'rescind' and e['date'] <= q['until']}
+            held = {i for i in every if by_id[i]['kind'] == 'rescind' or by_id[i]['subject'] not in rescinded}
+            need(held <= closed, f'{key}: not every award held and rescission is needed')
+    return 'projects needed by the all-project sums (min/max): ' + ', '.join(f'{k} {min(v)}/{max(v)}' for k, v in sorted(spread.items()))
+
+
+# ---------- The real pipeline and the basis, through the frozen checker ----------
+
+@guarded
+def check_pipeline(seed, index=1):
+    """Build the dossier with the facts in its key, then read its keys through the real `check_shown.read_keys` (which runs
+    `check_row` on every row) with the edition variable unset and set to 1, 2, 3 and 4: no refusal, and `answer`, `value_form`
+    and `relevant` give the same for every row and every reader under every setting."""
+    import blindness
+    import check_shown
+    built = build_with_facts(seed, index)                  # under the edition that is set now
+    key = built['key']
+    folder = Path(tempfile.mkdtemp(prefix='big-minutes-keys-', dir=str(ROOT / 'tmp')))
+    try:
+        (folder / 'draft').mkdir()
+        (folder / 'arena').mkdir()
+        (folder / 'draft' / f'{key["dossier_id"]}.json').write_text(json.dumps(key), encoding='utf-8')
+        blindness.seal_keys(folder / 'draft', folder / 'sealed', [folder / 'arena'])
+        seen, rows_read = {}, 0
+        for setting in (None, 1, 2, 3, 4):
+            with edition_env(setting):
+                dossier = check_shown.read_keys(folder / 'sealed')['dossiers'][key['dossier_id']]
+                rows, found = dossier['rows'], {}
+                rows_read = len(rows)
+                for row in rows:
+                    query = row['query']
+                    found[row['claim_id'], row['variant']] = (
+                        big_minutes.value_form(query), big_minutes.relevant(query, dossier['family'].events),
+                        [big_minutes.answer(query, dossier['family'].events, name) for name in (None,) + big_minutes.READERS])
+                seen[setting] = found
+        need(rows_read == 2 * STATEMENTS_PER_REPORT, f'{rows_read} rows read')
+        for setting, found in seen.items():
+            need(found == seen[None], f'answer, value_form or relevant differ under {big_minutes.EDITION_VARIABLE}={setting}')
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    return f'read_keys accepts {rows_read} rows with the variable unset and set to 1, 2, 3, 4; answer, value_form and relevant are the same'
+
+
+@per_edition
+def checker_view(seed, index=1):
+    """The checker's own view of the dossier built now: the key, `check_shown.Family` over its facts and `Sources` over the
+    files (the stand-in for what a sheet is judged against)."""
+    import check_shown
+    built = build_with_facts(seed, index)
+    return built['key'], check_shown.Family(big_minutes, built['key']['facts'], 'minutes'), check_shown.Sources(sources_of(built))
+
+
+@guarded
+def check_basis(seed, index=1):
+    """For every statement of the key: the checker's needed set is not empty and is the one this module computes by removal; it
+    is among `relevant`; no needed event is unquotable under the checker's `Sources.quotable`, so none is `not_checkable` on a stand-in
+    sheet; every paragraph that states an event or serves as a lead paragraph is quotable under the same test."""
+    import check_shown
+    key, family, sources = checker_view(seed, index)
+    made = made_of(seed, index)
+    spots = collections.defaultdict(set)
+    for p in made['passages']:
+        if p['role'] in ('states', 'names'):
+            for i in p['event_ids']:
+                spots[i].add((p['file'], p['paragraph']))
+    lost = sorted(spot for spot in set().union(*spots.values()) if not sources.quotable(spot))
+    need(not lost, f'{len(lost)} paragraphs that state an event or lead one cannot be quoted: {lost[:3]}')
+    need({e: sorted(s) for e, s in spots.items()} == {e: sorted(s) for e, s in family.spots_of.items()},
+         'the checker\'s paragraphs for an event are not the passage map\'s')
+    queries, done, sizes = statement_queries(seed, index), set(), []
+    for row in key['expectations']:
+        stripped = strip_value(row['query'])
+        got = check_shown.judge_statement(family, dict(row, query=stripped), [], sources, 'answered')
+        need(got['class'] != check_shown.NOT_CHECKABLE, f'{row["claim_id"]} {row["variant"]} is not checkable: {got["detail"]}')
+        name = stripped['key']
+        if name in done:
+            continue
+        done.add(name)
+        analysis = family.analysis(stripped)
+        by_removal, closed = needed_of(seed, index, name), closed_needed_of(seed, index, name)
+        need(by_removal and closed, f'{name}: the needed set is empty')
+        need(set(analysis['needed_by_removal']) == by_removal and set(analysis['needed']) == closed,
+             f'{name}: the checker\'s needed set is not the one this module finds by removal')
+        need(not analysis['outside'] and by_removal <= set(big_minutes.relevant(queries[name], made['events'])),
+             f'{name}: needed events {sorted(closed - analysis["relevant"])} are not relevant')
+        need(not family.unquotable(analysis['needed'], sources), f'{name}: a needed event cannot be quoted')
+        need(all(any(sources.quotable(spot) for spot in spots[i]) for i in closed), f'{name}: a needed event has no quotable paragraph')
+        sizes.append(len(closed))
+    return f'{len(done)} statements: needed sets not empty (smallest {min(sizes)}), as found by removal, relevant, every event quotable'
+
+
+@guarded
+def check_depth(seed, index=1):
+    """Informative, always ok: per claim kind, the minimum / median / maximum number of paragraphs of the checker's closed needed set."""
+    key, family, sources = checker_view(seed, index)
+    kinds, seen = collections.defaultdict(list), set()
+    for row in key['expectations']:
+        stripped = strip_value(row['query'])
+        if stripped['key'] in seen:
+            continue
+        seen.add(stripped['key'])
+        needed = family.analysis(stripped)['needed']
+        kinds[row['claim_kind']].append(len({spot for e in needed for spot in family.spots_of.get(e, ())}))
+    return 'paragraphs of the closed needed set (min/median/max): ' + ', '.join(
+        f'{k[len("minutes_"):]} {min(v)}/{statistics.median(v):g}/{max(v)}' for k, v in sorted(kinds.items()))
+
+
+# ---------- Hand-written logs for the sums ----------
+#
+# Written from the procedure's rules and the supplement (sections 4 and 5) before they were run: a sum is the figure of each project
+# (the total paid, or the number of payments, that count at the close of the meeting), added; "all projects" are those with an award
+# in the minutes (on a subset: every project that has any event in it, whether or not the subset holds its award); a span is the
+# figure for all projects at the later close less that at the earlier one; a payment returned stops counting from the meeting that
+# reports the return; a correction is read back from the start, whenever it is minuted. A is project 0, B project 1, C project 2;
+# meeting m has the date 2036-(m+1)-10. A query is (figure, projects or None for all, earlier meeting or None, later meeting, value).
+
+HAND_SUM_CASES = [
+ dict(name='named, all and a span', events=[
+        ('a1', 'award', 0, 0, dict(amount=20000)), ('b1', 'award', 0, 1, dict(amount=15000)), ('g1', 'award', 1, 2, dict(amount=9000)),
+        ('pa1', 'pay', 1, 0, dict(spec={'type': 'abs', 'amount': 4000})), ('pb1', 'pay', 2, 1, dict(spec={'type': 'abs', 'amount': 5000})),
+        ('pa2', 'pay', 3, 0, dict(spec={'type': 'abs', 'amount': 3000})), ('pg1', 'pay', 3, 2, dict(spec={'type': 'abs', 'amount': 1000})),
+        ('pb2', 'pay', 4, 1, dict(spec={'type': 'abs', 'amount': 2500}))],
+      queries=[('total', (0, 1), None, 3, 12000),          # A 7000 and B 5000
+               ('count', (0, 1), None, 3, 3),
+               ('total', (0, 1, 2), None, 2, 9000),        # C holds an award but has had no payment by then: it adds nothing
+               ('count', (0, 1, 2), None, 2, 2),
+               ('total', None, None, 4, 15500),            # 7000 + 7500 + 1000
+               ('count', None, None, 4, 5),
+               ('total', None, None, 0, 0),                # awards, no payment yet
+               ('count', None, None, 0, 0),
+               ('total', None, 1, 4, 11500),               # 15500 less 4000
+               ('count', None, 1, 4, 4),
+               ('total', None, 2, 3, 4000),                # 13000 less 9000: the payments of the meeting of A and C
+               ('count', None, 2, 3, 2)]),
+ dict(name='returns inside and after a span', events=[
+        ('a1', 'award', 0, 0, dict(amount=30000)), ('b1', 'award', 0, 1, dict(amount=20000)),
+        ('p1', 'pay', 1, 0, dict(spec={'type': 'abs', 'amount': 4000})), ('q1', 'pay', 1, 1, dict(spec={'type': 'abs', 'amount': 2000})),
+        ('p2', 'pay', 2, 0, dict(spec={'type': 'abs', 'amount': 3000})), ('q2', 'pay', 3, 1, dict(spec={'type': 'abs', 'amount': 6000})),
+        ('p3', 'pay', 4, 0, dict(spec={'type': 'abs', 'amount': 5000})),
+        ('r1', 'return', 5, 0, dict(target='p2', target_m=2)), ('r2', 'return', 5, 1, dict(target='q2', target_m=3))],
+      queries=[('total', None, None, 2, 9000), ('count', None, None, 2, 3),
+               ('total', None, None, 4, 20000), ('count', None, None, 4, 5),      # the returns are minuted after this close
+               ('total', None, None, 5, 11000), ('count', None, None, 5, 3),      # p2 and q2 stop counting from the meeting of the return
+               ('total', None, 2, 5, 2000),     # +5000 (p3) -3000 (p2 counted at the earlier close, returned inside); q2 is made and returned inside: at neither
+               ('count', None, 2, 5, 0),        # +1 (p3) -1 (p2)
+               ('total', None, 3, 5, -4000),    # the returns outweigh p3: the difference goes down below zero
+               ('count', None, 3, 5, -1),
+               ('total', None, 1, 4, 14000),    # the returns of the meeting after the later close change neither figure
+               ('count', None, 1, 4, 3),
+               ('total', (0, 1), None, 5, 11000), ('total', (0,), None, 5, 9000), ('count', (0,), None, 5, 2)]),
+ dict(name='corrections minuted after the later close', events=[
+        ('a1', 'award', 0, 0, dict(amount=20000)), ('b1', 'award', 0, 1, dict(amount=10000)),
+        ('p1', 'pay', 1, 0, dict(spec={'type': 'abs', 'amount': 4000})), ('q1', 'pay', 2, 1, dict(spec={'type': 'abs', 'amount': 3000})),
+        ('p2', 'pay', 3, 0, dict(spec={'type': 'abs', 'amount': 2000})),
+        ('c1', 'correct', 6, 0, dict(target='p1', target_kind='pay', target_m=1, new=5000)),
+        ('c2', 'correct', 7, 0, dict(target='p2', target_kind='pay', target_m=3, new=2500))],
+      queries=[('total', None, None, 1, 5000), ('count', None, None, 1, 1),          # c1 is read into the close of meeting 1, minuted at 6
+               ('total', None, None, 3, 10500), ('count', None, None, 3, 3),         # 5000 + 2500 + 3000
+               ('total', None, None, 5, 10500),                                      # before either correction was minuted
+               ('total', None, 1, 3, 5500),     # both corrections read in: 10500 less 5000 (c1 moves both closes alike, c2 only the later one)
+               ('count', None, 1, 3, 2),
+               ('total', (0,), None, 3, 7500), ('count', (0,), None, 3, 2)]),
+ dict(name='a relative payment', events=[
+        ('a1', 'award', 0, 0, dict(amount=20000)), ('b1', 'award', 0, 1, dict(amount=10000)),
+        ('pa1', 'pay', 1, 0, dict(spec={'type': 'abs', 'amount': 4000})), ('pb1', 'pay', 1, 1, dict(spec={'type': 'abs', 'amount': 2000})),
+        ('pa2', 'pay', 2, 0, dict(spec={'type': 'frac_award', 'award_m': 0, 'frac': [1, 4]}))],
+      queries=[('total', None, None, 2, 11000), ('count', None, None, 2, 3),         # 4000 + 5000 + 2000
+               ('total', None, 1, 2, 5000), ('count', None, 1, 2, 1)]),
+]
+
+# Subsets: (label, case, events kept or None, events dropped, [queries]); what the rule for a subset says. A project that has no
+# event in the subset adds nothing; "all projects" are those with an event in the subset, its award or not; a payment whose amount
+# cannot be read (it is a share of an award that is absent) is a payment and adds no sum.
+HAND_SUM_SUBSETS = [
+ ('all projects, a subset that lacks the award of C (its payment still counts)', 'named, all and a span', None, ['g1'],
+  [('total', None, None, 4, 15500), ('count', None, None, 4, 5), ('total', None, None, 2, 9000), ('total', None, 2, 3, 4000)]),
+ ('a named project and a project with no event in the subset', 'named, all and a span', ['a1', 'pa1', 'pa2'], [],
+  [('total', (0, 1, 2), None, 4, 7000), ('count', (0, 1, 2), None, 4, 2), ('total', None, None, 4, 7000), ('count', None, None, 4, 2),
+   ('total', (1,), None, 4, 0), ('count', (1,), None, 4, 0)]),
+ ('payments with no award at all, a span', 'named, all and a span', ['pa1', 'pa2', 'pb1'], [],
+  [('total', None, None, 3, 12000), ('count', None, None, 3, 3), ('total', None, 1, 3, 8000), ('count', None, 1, 3, 2)]),
+ ('the returns left out', 'returns inside and after a span', None, ['r1', 'r2'],
+  [('total', None, None, 5, 20000), ('count', None, None, 5, 5), ('total', None, 2, 5, 11000), ('count', None, 2, 5, 2)]),
+ ('the return of an absent payment is left out', 'returns inside and after a span', None, ['p2'],
+  [('total', None, None, 5, 11000), ('count', None, None, 5, 3), ('total', None, 2, 5, 5000), ('count', None, 2, 5, 1)]),
+ ('only the later side of a span', 'returns inside and after a span', ['p3', 'q2', 'r1', 'r2'], [],
+  [('total', None, None, 4, 11000), ('count', None, None, 4, 2), ('total', None, None, 5, 5000), ('count', None, None, 5, 1),
+   ('total', None, 2, 4, 11000), ('count', None, 2, 4, 2)]),
+ ('no corrections', 'corrections minuted after the later close', None, ['c1', 'c2'],
+  [('total', None, None, 3, 9000), ('total', None, 1, 3, 5000)]),
+ ('the correction of the earlier close only: both closes move alike', 'corrections minuted after the later close', None, ['c2'],
+  [('total', None, None, 3, 10000), ('total', None, 1, 3, 5000)]),
+ ('the correction inside the span only', 'corrections minuted after the later close', None, ['c1'],
+  [('total', None, None, 1, 4000), ('total', None, None, 3, 9500), ('total', None, 1, 3, 5500)]),
+ ('a share of an absent award', 'a relative payment', None, ['a1'],
+  [('total', None, None, 2, 6000), ('count', None, None, 2, 3), ('total', None, 1, 2, 0), ('count', None, 1, 2, 1)]),
+ ('the empty list', 'a relative payment', [], [],
+  [('total', (0, 1), None, 2, 0), ('total', None, None, 2, 0), ('count', None, 1, 2, 0)]),
+]
+
+
+def hand_sum_query(figure, projects, since, until):
+    rung = 'sum3' if projects is not None else 'upto' if since is None else 'span6'
+    names = sorted(HAND_PROJECTS[p] for p in projects) if projects is not None else None
+    return {'kind': rung, 'subject': None, 'figure': figure, 'subjects': names, 'since': None if since is None else hand_date(since),
+            'until': hand_date(until), 'key': f'hand|{figure}|{projects}|{since}|{until}'}
+
+
+def check_hand_sums(seed=None, index=None):
+    """Every hand-written log gives the value written down for each sum, on the whole log and on its subsets; the events
+    removal changes the value of a statement are among `relevant`; a query is plain JSON with an integer form."""
+    by_name = {c['name']: c for c in HAND_SUM_CASES}
+    problems, checked = [], 0
+    for c in HAND_SUM_CASES:
+        events = hand_events(c['events'])
+        for figure, projects, since, until, value in c['queries']:
+            q = hand_sum_query(figure, projects, since, until)
+            got = big_minutes.answer(q, events)
+            checked += 1
+            if got != value:
+                problems.append(f'{c["name"]}: {figure} of {projects} from {since} to {until}: by hand {value!r}, by the interpreter {got!r}')
+            cut = {e['id'] for e in events if big_minutes.answer(q, [x for x in events if x['id'] != e['id']]) != got}
+            if not cut <= set(big_minutes.relevant(q, events)):
+                problems.append(f'{c["name"]}: {figure} of {projects}: events {sorted(cut)} change the value and are not relevant')
+            if json.loads(json.dumps(q)) != q or big_minutes.value_form(q) != 'integer':
+                problems.append(f'{c["name"]}: the query of {figure} is not plain JSON of an integer form')
+    for label, base, keep, drop, queries in HAND_SUM_SUBSETS:
+        events = [e for e in hand_events(by_name[base]['events']) if (keep is None or e['id'] in keep) and e['id'] not in drop]
+        for figure, projects, since, until, value in queries:
+            got = big_minutes.answer(hand_sum_query(figure, projects, since, until), events)
+            checked += 1
+            if got != value:
+                problems.append(f'subset {label}: {figure} of {projects} from {since} to {until}: by hand {value!r}, by the interpreter {got!r}')
+    need(not problems, f'{len(problems)} of {checked} hand-written sums disagree: {problems[:3]}')
+    return (f'{len(HAND_SUM_CASES)} hand-written logs with {sum(len(c["queries"]) for c in HAND_SUM_CASES)} sums, '
+            f'{len(HAND_SUM_SUBSETS)} subsets with {sum(len(s[4]) for s in HAND_SUM_SUBSETS)} values')
+
+
+def copy_built(built):
+    """A copy of the parts of a built dossier the round trip reads (files and key rows), safe to damage."""
+    return {'files': dict(built['files']), 'key': {'expectations': [dict(r, lure_states=dict(r['lure_states']))
+                                                                    for r in built['key']['expectations']]}}
+
+
+def book_with_one_payment_changed(seed, index=1):
+    """The book read from the dossier's sources after the digits of one absolute payment have been changed, in the minute
+    book (in memory): a payment of a project of a named total sum, before its close, not returned and not corrected. Returns
+    (book, the text of the statement of the correct report that rests on it)."""
+    built, (book, _) = case(seed, index), read(seed, index)
+    money = re.compile(r'£\d[\d,]*|\d[\d,]* pounds')
+    corrected = {(f['p'], f['when']) for f in book.facts if f['t'] == 'correct' and f['target'] == 'pay'}
+    returned = {(f['p'], f['when']) for f in book.facts if f['t'] == 'return'}
+    for text in report_statements(built, 'correct'):
+        st = read_sum(book, text)
+        if st is None or st['shape'] != 'named' or st['figure'] != 'total':
+            continue
+        for f in book.facts:
+            if f['t'] == 'pay' and f['p'] in st['names'] and f['m'] <= st['until'] and f['spec']['type'] == 'abs' \
+                    and (f['p'], f['m']) not in corrected | returned:
+                block = book.blocks[f['key']]
+                mo = money.search(block, f['order'][1])
+                if mo and parse_money(mo.group(0)) == f['spec']['amount']:
+                    sources, volume = dict(sources_of(built)), VOLUMES[f['key'][0]]
+                    blocks = sources[volume].rstrip('\n').split('\n\n')
+                    blocks[f['key'][1]] = block[:mo.start()] + f'£{f["spec"]["amount"] + 7000:,}' + block[mo.end():]
+                    sources[volume] = '\n\n'.join(blocks) + '\n'
+                    return Book(sources), text
+    raise Failed('no payment to change')
+
+
+def built_with_false_sum_nudged(seed, index=1):
+    """A copy of the dossier in which the stated value of one false sum (named after a reader) is one more, in the report and in
+    the key's row alike, and the row no longer says that the reader finds it true: only the rule that a false sum states its
+    reader's sum can see it."""
+    built, (book, _) = copy_built(case(seed, index)), read(seed, index)
+    for row in built['key']['expectations']:
+        if row['variant'] == 'mixed' and row['error_type'] not in (None, 'plain_wrong_value'):
+            st = statement_of(book, row['claim_text'])
+            if st['shape'] != 'single':
+                a, b = st['value_span']
+                new = f'£{st["value"] + 1:,}' if st['figure'] == 'total' else str(st['value'] + 1)
+                text = row['claim_text'][:a] + new + row['claim_text'][b:]
+                report = built['files']['report-mixed.md']
+                need(report.count(row['claim_text']) == 1, 'the statement does not occur once in the report')
+                built['files']['report-mixed.md'] = report.replace(row['claim_text'], text)
+                row['claim_text'] = text
+                del row['lure_states'][row['error_type']]
+                return built
+    raise Failed('no false sum named after a reader')
 
 
 # ---------- The two editions ----------
@@ -1737,6 +2424,7 @@ EDITION1_PINS = {
 }
 # Edition 2 draws that the unit tests build: every check runs on EDITION2_FULL (a dossier of five minute books), the cheaper
 # ones (size, mix, leads) on EDITION2_SEEDS too; the other draws are verified with `--verify` under BIG_MINUTES_EDITION=2.
+ED_SEED = 1               # the one draw the unit tests build under editions 3 and 4 (`--verify` runs more)
 EDITION2_SEEDS = (1, 7)
 EDITION2_FULL = 8          # a dossier of five minute books
 
@@ -1828,44 +2516,95 @@ CHECKS = (('round trip', check_round_trip), ('one referent', check_one_referent)
           ('lures turn on one device', check_single_devices))
 
 
+CHECKS3 = (('round trip, sums and false sums', check_round_trip3), ('one referent', check_one_referent),
+           ('answer agrees with the key and every reader', check_answers),
+           ('subset read as the whole record', check_subset_rules),
+           ('relevant covers needed, no empty set, no tie', check_relevant_and_needed),
+           ('needed events are an argument', check_needed_events_are_an_argument),
+           ('recorded dependencies match the words', check_naming_recorded),
+           ('depends and the reading of subsets', check_dependencies),
+           ('closed needed events: names, counts, basis', check_closed_needed),
+           ('hand-written lists', check_hand_cases),
+           ('hand-written sums', check_hand_sums),
+           ('no running totals', check_no_running_totals),
+           ('verb lists and name words (the any-word share reported, over four statements)', check_filters3),
+           ('nothing outside the passage map reads as deciding', check_nothing_outside_the_map_decides),
+           ('sums and counts of projects turn on the projects they cover', check_sums_turn_on_projects),
+           ('one-project statements: lures turn on one device (sums skipped)', check_single_devices),
+           ('quota table of the edition, 8 to 12 altered statements', check_quotas),
+           ('rules of choice', check_choice_rules),
+           ('text rules: places, recipients, procedure.md', check_text_rules3),
+           ('every lead paragraph occurs once', check_leads3),
+           ('real pipeline: read_keys under every edition setting', check_pipeline),
+           ('basis: no empty set, relevant, every needed paragraph quotable', check_basis),
+           ('depth', check_depth))
+
+
+def checks_of(edition):
+    return CHECKS3 if edition >= 3 else CHECKS + (EDITION2_CHECKS if edition == 2 else ())
+
+
+def fixtures_folder(fixtures, seed, index):
+    base = Path(fixtures)
+    return base if (base / 'report-correct.md').exists() else base / f'g{seed}-{index:03d}-minutes'
+
+
+def fixtures_refusal(base, edition):
+    """None, or the reason a fixtures folder cannot be of `edition`. Only its shape is looked at: a fourth minute book means
+    edition 2 (editions 1, 3 and 4 have three); among editions 1, 3 and 4 the comparison of bytes decides."""
+    four = any((base / name).exists() for name in ('sources/minute-book-4.md', 'minute-book-4.md'))
+    if four and edition != 2:
+        return (f'{base} was made under edition 2 (it has minute-book-4.md) and {big_minutes.EDITION_VARIABLE} asks for edition '
+                f'{edition}: set {big_minutes.EDITION_VARIABLE}=2 and run again')
+    if not four and edition == 2:
+        return (f'{base} was made under edition 1, 3 or 4 (it lacks minute-book-4.md) and {big_minutes.EDITION_VARIABLE} asks for '
+                f'edition 2: set {big_minutes.EDITION_VARIABLE}=1 (or leave it unset), 3 or 4 and run again')
+    return None
+
+
+def compare_fixtures(built, base):
+    """Print and count: the rebuilt files against a fixtures folder, byte for byte."""
+    differing = [n for n, text in sorted(built['files'].items())
+                 if not (base / n).exists() or (base / n).read_bytes() != text.encode('utf-8')]
+    if differing:
+        print(f'FAIL  fixtures: {len(differing)} of {len(built["files"])} files differ or are missing: {differing[:3]}')
+        return 1
+    print(f'ok    fixtures: {len(built["files"])} files identical to {base}')
+    return 0
+
+
 def verify(seed, index, fixtures=None):
     """Run the checks on exactly one draw and, given a fixtures folder, compare the rebuilt files with it byte for
     byte. Prints one line per check; returns the number of failures. The draw is built under the edition that
-    BIG_MINUTES_EDITION names (1 when it is not set), and a fixtures folder made under the other edition is refused:
-    edition 2 has a fourth minute book, which edition 1 never has."""
+    BIG_MINUTES_EDITION names (1 when it is not set; editions 1 to 4 exist), and a fixtures folder whose shape is not that
+    of the edition is refused before any check: edition 2 has a fourth minute book, the others never do."""
     try:
         edition = big_minutes.current_edition()
     except generate.GenerationError as error:
         print(f'FAIL  edition: {error}')
         return 1
     if fixtures is not None:
-        base = Path(fixtures)
-        if not (base / 'report-correct.md').exists():
-            base = base / f'g{seed}-{index:03d}-minutes'
-        made_under = 2 if any((base / name).exists() for name in ('sources/minute-book-4.md', 'minute-book-4.md')) else 1
-        if made_under != edition:
-            print(f'FAIL  fixtures: {base} was made under edition {made_under} (it {"has" if made_under == 2 else "lacks"} '
-                  f'minute-book-4.md) and {big_minutes.EDITION_VARIABLE} asks for edition {edition}: set '
-                  f'{big_minutes.EDITION_VARIABLE}={made_under if made_under == 2 else "1 (or leave it unset)"} and run again')
+        base = fixtures_folder(fixtures, seed, index)
+        refusal = fixtures_refusal(base, edition)
+        if refusal:
+            print(f'FAIL  fixtures: {refusal}')
             return 1
     failures = 0
-    for name, check in CHECKS + (EDITION2_CHECKS if edition == 2 else ()):
+    for name, check in checks_of(edition):
         try:
             print(f'ok    {name}: {check(seed, index)}')
         except (AssertionError, KeyError, ValueError, IndexError) as error:
             failures += 1
             print(f'FAIL  {name}: {type(error).__name__}: {str(error)[:300]}')
     if fixtures is not None:
-        built = generate.build_case('minutes', seed, index)
-        differing = [n for n, text in sorted(built['files'].items())
-                     if not (base / n).exists() or (base / n).read_bytes() != text.encode('utf-8')]
-        if differing:
-            failures += 1
-            print(f'FAIL  fixtures: {len(differing)} of {len(built["files"])} files differ or are missing: {differing[:3]}')
-        else:
-            print(f'ok    fixtures: {len(built["files"])} files identical to {base}')
+        failures += compare_fixtures(generate.build_case('minutes', seed, index), base)
     return failures
 
+
+
+def case_dossier(seed, edition, index=1):
+    with edition_env(edition):
+        return case(seed, index)['dossier']
 
 
 def write_fixtures(built, parent):
@@ -2148,10 +2887,10 @@ class BigMinutesTest(unittest.TestCase):
 
     def test_edition_switch(self):
         self.assertEqual(big_minutes.current_edition(), 1)                    # not set: edition 1
-        for raw, want in (('1', 1), ('2', 2)):
+        for raw, want in (('1', 1), ('2', 2), ('3', 3), ('4', 4)):
             with edition_env(raw):
                 self.assertEqual(big_minutes.current_edition(), want)
-        for raw in ('', '0', '3', '12', '2 ', ' 1', 'one', '1.0', 'two'):
+        for raw in ('', '0', '5', '12', '2 ', ' 1', 'one', '1.0', 'two', '34', '03', '-1', '5th'):
             with edition_env(raw):
                 with self.assertRaises(generate.GenerationError, msg=repr(raw)):
                     big_minutes.current_edition()
@@ -2170,6 +2909,14 @@ class BigMinutesTest(unittest.TestCase):
         self.assertIn('sources/minute-book-4.md', two['files'])
         self.assertNotIn('sources/minute-book-4.md', default['files'])
         self.assertEqual(default['key']['facts']['interpreter'], two['key']['facts']['interpreter'])
+        for edition in (3, 4):
+            with edition_env(edition):
+                built = build_with_facts(ED_SEED, 1)
+            self.assertEqual(built['key']['facts']['size'], edition)
+            self.assertEqual(built['key']['facts']['interpreter'], default['key']['facts']['interpreter'])
+            self.assertNotIn('sources/minute-book-4.md', built['files'])           # editions 3 and 4 have three minute books
+            self.assertEqual(sorted(n for n in built['files'] if n.startswith('sources/')),
+                             [f'sources/{n}' for n in ('minute-book-1.md', 'minute-book-2.md', 'minute-book-3.md', 'procedure.md')])
 
     def test_edition_1_is_unchanged(self):
         """The files, the key's rows and the facts of four draws are those of the module before editions existed."""
@@ -2200,9 +2947,7 @@ class BigMinutesTest(unittest.TestCase):
                 shutil.rmtree(folder)
 
     def test_verify_refuses_fixtures_of_the_other_edition(self):
-        import contextlib
-        import io
-        for made_under, asks in ((2, None), (2, 1), (1, 2)):
+        for made_under, asks in ((2, None), (2, 1), (1, 2), (2, 3), (2, 4), (3, 2), (4, 2)):
             with edition_env(made_under):
                 folder = write_fixtures(case(1), ROOT / 'tmp')
             try:
@@ -2211,15 +2956,39 @@ class BigMinutesTest(unittest.TestCase):
                     with contextlib.redirect_stdout(out):
                         failures = verify(1, 1, str(folder))
                 self.assertEqual(failures, 1)
-                self.assertIn(f'made under edition {made_under}', out.getvalue())
+                self.assertIn('made under edition 2' if made_under == 2 else 'made under edition 1, 3 or 4', out.getvalue())
                 self.assertEqual(out.getvalue().count('\n'), 1, out.getvalue())          # refused before any check
             finally:
                 shutil.rmtree(folder)
-        with edition_env('3'):
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                self.assertEqual(verify(1, 1), 1)
-            self.assertIn('must be 1 or 2', out.getvalue())
+        for raw in ('5', 'x', '0', ''):                     # editions 1 to 4 exist; nothing else does
+            with edition_env(raw):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(verify(1, 1), 1, raw)
+                self.assertIn('must be 1, 2, 3 or 4', out.getvalue())
+                self.assertEqual(out.getvalue().count('\n'), 1, out.getvalue())
+
+    def test_a_three_book_folder_is_accepted_by_editions_1_3_and_4_and_the_bytes_decide(self):
+        made = {}
+        for edition in (1, 3, 4):
+            with edition_env(edition):
+                made[edition] = write_fixtures(case(ED_SEED), ROOT / 'tmp')
+        try:
+            for made_under, folder in made.items():
+                base = folder / case_dossier(ED_SEED, made_under)
+                for asks in (1, 3, 4):
+                    with edition_env(asks):
+                        self.assertIsNone(fixtures_refusal(base, asks), (made_under, asks))
+                        out = io.StringIO()
+                        with contextlib.redirect_stdout(out):
+                            differing = compare_fixtures(generate.build_case('minutes', ED_SEED, 1), base)
+                    self.assertEqual(differing, 0 if asks == made_under else 1, (made_under, asks, out.getvalue()))
+                    self.assertEqual(out.getvalue().startswith('ok    fixtures:'), asks == made_under, out.getvalue())
+                with edition_env(2):
+                    self.assertIn('made under edition 1, 3 or 4', fixtures_refusal(base, 2))
+        finally:
+            for folder in made.values():
+                shutil.rmtree(folder)
 
     def test_edition_does_not_reach_answer(self):
         """The hand-written lists and `answer` on an edition 2 dossier are the same whatever the setting says."""
@@ -2235,6 +3004,199 @@ class BigMinutesTest(unittest.TestCase):
         for setting in (None, 1):
             with edition_env(setting):
                 self.assertEqual([big_minutes.answer(q, events, r) for q in queries.values() for r in (None,) + big_minutes.READERS], expected)
+
+    def test_editions_3_and_4_are_deterministic_across_processes(self):
+        for edition in (3, 4):
+            outputs = []
+            for hash_seed in ('0', '4242'):
+                code = ('import sys; sys.dont_write_bytecode=True; sys.path.insert(0, %r); import generate, generate_big, json; '
+                        'generate_big.register()\nwith generate_big.facts_in_keys():\n'
+                        '    print(json.dumps(generate.build_case("minutes", %d, 1), sort_keys=True))' % (str(ROOT / 'evalsuite'), ED_SEED))
+                with edition_env(edition):
+                    run_ = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
+                                          env=dict(os.environ, PYTHONHASHSEED=hash_seed, PYTHONDONTWRITEBYTECODE='1'))
+                self.assertEqual(run_.returncode, 0, run_.stderr[-500:])
+                outputs.append(run_.stdout)
+            self.assertEqual(outputs[0], outputs[1], f'edition {edition} differs between processes')
+            with edition_env(edition):
+                self.assertEqual(json.loads(outputs[0]), json.loads(json.dumps(build_with_facts(ED_SEED, 1))))
+
+    def test_editions_3_and_4_draw_the_same_minute_books(self):
+        """The same seed gives the same minute books and events in editions 3 and 4; only the reports (the mix of statements) differ."""
+        with edition_env(3):
+            three = build_with_facts(ED_SEED, 1)
+        with edition_env(4):
+            four = build_with_facts(ED_SEED, 1)
+        sources = lambda b: {n: t for n, t in b['files'].items() if n.startswith('sources/')}  # noqa: E731
+        self.assertEqual(sources(three), sources(four))
+        self.assertEqual(three['key']['facts']['events'], four['key']['facts']['events'])
+        self.assertNotEqual(three['files']['report-correct.md'], four['files']['report-correct.md'])
+        self.assertNotEqual(three['key']['facts']['size'], four['key']['facts']['size'])
+
+    def run_verify(self, edition, folder=None):
+        with edition_env(edition):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                failures = verify(ED_SEED, 1, folder)
+        return failures, out.getvalue()
+
+    def test_edition_3_passes_every_check(self):
+        """Every check of `verify` under edition 3, and the comparison with fixtures, on one dossier."""
+        with edition_env(3):
+            folder = write_fixtures(case(ED_SEED), ROOT / 'tmp')
+        try:
+            failures, out = self.run_verify(3, str(folder))
+        finally:
+            shutil.rmtree(folder)
+        self.assertEqual(failures, 0, out)
+        self.assertEqual(out.count('ok    '), len(CHECKS3) + 1, out)
+        print(out.split('ok    depth: ')[1].split('\n')[0])
+
+    def test_edition_4_passes_every_check(self):
+        with edition_env(4):
+            folder = write_fixtures(case(ED_SEED), ROOT / 'tmp')
+        try:
+            failures, out = self.run_verify(4, str(folder))
+        finally:
+            shutil.rmtree(folder)
+        self.assertEqual(failures, 0, out)
+        self.assertEqual(out.count('ok    '), len(CHECKS3) + 1, out)
+        print(out.split('ok    depth: ')[1].split('\n')[0])
+
+    def test_the_inventory_tables_are_those_of_the_supplement(self):
+        self.assertEqual({e: dict(t) for e, t in INV['sum_quotas'].items()}, EXPECTED_QUOTAS)
+        self.assertEqual(sorted(EXPECTED_QUOTAS), [3, 4])
+        for table in EXPECTED_QUOTAS.values():
+            self.assertEqual(sum(table.values()), 24)
+        self.assertEqual(sorted(INV['sum_statements']), ['all_count', 'all_total', 'span_count', 'span_total', 'sum_count', 'sum_total'])
+        self.assertEqual(INV['span_verbs'], ('stood higher', 'rose by', 'grew by'))
+        self.assertEqual(INV['ordinal_cap'], 12)
+        for key in ('sum_statements', 'sum_list', 'sum_kinds', 'sum_figures', 'sum_quotas', 'single_kinds', 'span_verbs',
+                    'rescission_wordings', 'procedure_sums', 'procedure_rescissions', 'ordinal_cap'):
+            self.assertIn(key, INV)
+        self.assertEqual(sorted(INV['statements']), ['award', 'balance', 'count', 'first', 'largest', 'projects', 'total'])  # no sum kind in it
+
+    def test_hand_written_sums(self):
+        print('hand-written sums:', check_hand_sums())
+
+    def test_the_round_trip_sees_a_corrupted_dossier(self):
+        """Negative controls of this module's evaluator: damage a payment a sum rests on, or the stated value of a false sum, in
+        memory, and the round trip must report it (a check that cannot fail proves nothing)."""
+        with edition_env(3):
+            built, (book, runs) = case(ED_SEED), read(ED_SEED)
+            readers = readers_in(ED_SEED)
+            round_trip3(built, book, runs, readers)                                 # undamaged: passes
+            changed, text = book_with_one_payment_changed(ED_SEED)
+            with self.assertRaisesRegex(Failed, r'(correct|mixed): (verdict|reader \w+) differs for'):
+                round_trip3(built, changed, runs_of(changed), readers)
+            nudged = built_with_false_sum_nudged(ED_SEED)
+            with self.assertRaisesRegex(Failed, r'false sum .* states \d+, but reader \w+ gets \d+'):
+                round_trip3(nudged, book, runs, readers)
+            # the damage is to copies: the cached dossier still passes
+            round_trip3(case(ED_SEED), read(ED_SEED)[0], read(ED_SEED)[1], readers)
+
+    def test_the_rules_of_choice_quota_and_text_see_a_broken_draw(self):
+        """Negative controls of the rules themselves: each doctored statement list or text must be refused, the undamaged one not."""
+        for edition in (3, 4):
+            with edition_env(edition):
+                built, (book, runs) = case(ED_SEED), read(ED_SEED)
+                both, count, projects = statements_of(ED_SEED), len(book.meetings), book.projects
+                rows = {v: key_rows(built, v) for v in both}
+                choice_rules(edition, count, runs, projects, both)
+                quota_rules(edition, count, both, rows)
+
+                def doctored(rung, edit, which=None):
+                    out = copy.deepcopy(both)
+                    for variant in out:
+                        items = [st for st in out[variant] if rung_of(st, count) == rung]
+                        for number, st in enumerate(items):
+                            if which is None or number in which:
+                                edit(st, number, items)
+                    return out
+                # two spans of one length that overlap, in both reports
+                def shift(st, number, items):
+                    if number == 1:
+                        st['since'], st['until'] = items[0]['since'] + 1, items[0]['until'] + 1
+                with self.assertRaisesRegex(Failed, 'overlap|more payments'):
+                    choice_rules(edition, count, runs, projects, doctored('span3', shift))
+                # two statements that are the same statement
+                def same(st, number, items):
+                    if number == 1:
+                        st.update({k: v for k, v in items[0].items() if k not in ('value', 'value_span', 'text')})
+                with self.assertRaisesRegex(Failed, 'the same statement'):
+                    choice_rules(edition, count, runs, projects, doctored('book', same))
+                # a named sum at a meeting outside the last third, and over a project with fewer than two payments there
+                with self.assertRaisesRegex(Failed, 'last third|fewer than two payments'):
+                    choice_rules(edition, count, runs, projects, doctored('sum8', lambda st, n, items: st.update(until=2), {0}))
+                # totals only, where half should be counts
+                with self.assertRaisesRegex(Failed, 'has \\{'):
+                    choice_rules(edition, count, runs, projects, doctored('sum8', lambda st, n, items: st.update(figure='total')))
+                # an upto sum at the last meeting is not an upto sum; the quota table sees it
+                if edition == 4:
+                    with self.assertRaisesRegex(Failed, 'fewer than three meetings|the same statement'):     # six distinct statements need three
+                        choice_rules(edition, count, runs, projects, doctored('upto', lambda st, n, items: st.update(until=items[0]['until'])))
+                    with self.assertRaisesRegex(Failed, 'an upto sum at meeting'):
+                        choice_rules(edition, count, runs, projects,
+                                     doctored('upto', lambda st, n, items: st.update(until=3 * count // 5 - 1), {0}))
+                # a statement too few of a rung, and a sum over four projects
+                lacking = copy.deepcopy(both)
+                lacking['correct'].pop()
+                with self.assertRaisesRegex(Failed, 'the text shows'):
+                    quota_rules(edition, count, lacking, rows)
+                with self.assertRaisesRegex(Failed, 'the text shows'):
+                    quota_rules(edition, count, doctored('sum5', lambda st, n, items: st.update(names=st['names'][:4])), rows)
+        with edition_env(3):
+            built, (book, _) = case(ED_SEED), read(ED_SEED)
+            sources = sources_of(built)
+            text_rules3(sources, book)
+            paragraphs = sources['procedure.md'].rstrip('\n').split('\n\n')
+
+            def without(drop):
+                return dict(sources, **{'procedure.md': '\n\n'.join(p for p in paragraphs if not drop(p)) + '\n'})
+            with self.assertRaisesRegex(Failed, 'paragraphs of procedure.md name the verbs'):
+                text_rules3(without(lambda p: '"stood higher"' in p), book)
+            with self.assertRaisesRegex(Failed, 'rescission paragraph'):
+                text_rules3(without(lambda p: p.startswith('Rescissions.')), book)
+            with self.assertRaisesRegex(Failed, 'rescission paragraph'):
+                text_rules3(dict(sources, **{'procedure.md': sources['procedure.md'].replace('was struck out', 'was lost')}), book)
+            thirteenth = next(form for form, number in book.ordinal_forms.items() if number == 12)
+            with self.assertRaisesRegex(Failed, 'beyond the twelfth'):
+                text_rules3(dict(sources, **{'minute-book-1.md': sources['minute-book-1.md'] + f'\n{thirteenth.capitalize()} was discussed.\n'}), book)
+            reordered = copy.copy(book)
+            reordered.facts = [dict(f, recipient_first=False) if f['t'] == 'pay' and f['spec']['type'] == 'first_of' else f for f in book.facts]
+            with self.assertRaisesRegex(Failed, 'before its recipient'):
+                text_rules3(sources, reordered)
+
+    def test_the_sum_task_files(self):
+        root = ROOT / 'evalsuite'
+        old = (root / 'prompts' / 'task-shown.md').read_text(encoding='utf-8').split('\n')
+        new = (root / 'prompts' / 'task-shown-sums.md').read_text(encoding='utf-8').split('\n')
+        self.assertEqual(len(old), len(new))
+        changed = [i for i, (a, b) in enumerate(zip(old, new)) if a != b]
+        self.assertEqual(len(changed), 2, changed)
+        first, second = changed
+        sentence = 'For a claim about several projects together, or about all projects, the value is asked and quotes are not required.'
+        self.assertEqual(new[first], old[first] + ' ' + sentence)
+        self.assertIn('by a description', old[second])
+        self.assertNotIn('by a description', new[second])
+        for phrase in ('a name or role fixed in another passage', 'its place in an order', 'pointing to another passage', 'needs none'):
+            self.assertIn(phrase, new[second])
+        for placeholder in ('{{brief}}', '{{method}}', '{{sheet}}', '{{minutes}}'):
+            self.assertEqual(sum(l.count(placeholder) for l in new), sum(l.count(placeholder) for l in old), placeholder)
+            self.assertGreaterEqual(sum(l.count(placeholder) for l in new), 1, placeholder)
+        arms_old = json.loads((root / 'arms-shown.json').read_text(encoding='utf-8'))
+        arms_new = json.loads((root / 'arms-shown-sums.json').read_text(encoding='utf-8'))
+        self.assertEqual(arms_new['task'], 'prompts/task-shown-sums.md')
+        self.assertEqual(dict(arms_new, task=arms_old['task']), arms_old)           # the task path is the only difference
+        import run_blind
+        loaded_old, loaded_new = run_blind.load_arms(root / 'arms-shown.json'), run_blind.load_arms(root / 'arms-shown-sums.json')
+        self.assertEqual(sorted(loaded_new), sorted(loaded_old))
+        for ident, arm in loaded_new.items():
+            self.assertEqual(arm['task'], '\n'.join(new))
+            self.assertNotEqual(arm['fingerprint'], loaded_old[ident]['fingerprint'])         # a new arm fingerprint: no pooling
+            text = run_blind.instructions(arm, 30)                                           # every placeholder is filled
+            self.assertIn(sentence, text)
+            self.assertNotIn('{{', text)
 
     @unittest.expectedFailure
     def test_lead_paragraphs_can_be_quoted(self):
