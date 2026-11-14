@@ -1789,7 +1789,7 @@ def check_single_devices(seed, index=1):
     for variant in ('correct', 'mixed'):
         for row in key_rows(built, variant):
             if is_sum_text(row['claim_text']):
-                continue                # the rule is not applied to sums (supplement 5): `check_false_sums` stands in for it
+                continue                # the rule is not applied to sums (supplement 5): `check_false_sum` stands in for it
             kind, who, until, value = read_statement(book, row['claim_text'])
             want = (kind, who, until)
             for name, devices in bundles.items():
@@ -1874,6 +1874,10 @@ def round_trip3(built, book, runs, readers):
                 need(row['semantic_state'] == 'supported' and row['error_type'] is None, f'a false statement in the correct report: {text!r}')
             if st['shape'] != 'single':
                 kinds[st['shape']] += 1
+                derivation, truth_sum = row['derivation'], sum_of(runs['truth'], projects, st)     # the key is compared with, not used
+                need(truth_sum == derivation['feasible_min'] == derivation['feasible_max'],
+                     f'the key\'s true value {derivation["feasible_min"]}..{derivation["feasible_max"]} is not the sum {truth_sum} '
+                     f'read from the text of {text!r}')
                 if row['semantic_state'] == 'refuted':
                     errors[check_false_sum(st, row, runs, projects)] += 1
                 else:
@@ -2014,6 +2018,9 @@ def check_choice_rules(seed, index=1):
             f'to {max(uses.values(), default=0)} times')
 
 
+INSTALMENT_SPECS = ('first', 'ordinal', 'first_of')     # an amount that is another payment's: its own first, its own numbered, another project's first
+
+
 def text_rules3(sources, book):
     """Text rules of editions 3 and 4 (supplement 6), read from the sources of a dossier and the facts `book` found in them."""
     books = {n: t for n, t in sources.items() if n != 'procedure.md'}
@@ -2024,9 +2031,13 @@ def text_rules3(sources, book):
         uses[number] = sum(len(re.findall(re.escape(form), t, re.I)) for t in books.values())
     need(all(n == 0 for number, n in uses.items() if number >= 12), f'a project is named by a place beyond the twelfth: {dict(uses)}')
     need(any(n for number, n in uses.items() if number < 12), 'no project is named by its place, up to the twelfth: the check is empty')
-    # where a payment's amount is stated through another project's first instalment, the recipient is named before the amount
-    first_of = [f for f in book.facts if f['t'] == 'pay' and f['spec']['type'] == 'first_of']
-    need(all(f['recipient_first'] for f in first_of), 'an amount stated through another project\'s instalment comes before its recipient')
+    # where a payment's amount is stated through an instalment (the first of another project, or the project's own first or
+    # numbered one: the kind is what this module's parser reads from the sentence), the recipient is named before the amount
+    first_of = [f for f in book.facts if f['t'] == 'pay' and f['spec']['type'] in INSTALMENT_SPECS]
+    for f in first_of:
+        need(f['recipient_first'], f'an amount stated through an instalment ({f["spec"]["type"]}) comes before its recipient: '
+                                   f'{book.blocks[f["key"]][f["order"][1]:][:160]!r}')
+    by_type = collections.Counter(f['spec']['type'] for f in first_of)
     # procedure.md: the sums paragraph, and the wordings of a rescission that the minute books use
     paragraphs = sources['procedure.md'].rstrip('\n').split('\n\n')
     sums = [p for p in paragraphs if all(v in p for v in ('"stood higher"', '"rose by"', '"grew by"'))]
@@ -2052,7 +2063,8 @@ def text_rules3(sources, book):
             for frame in frames:
                 need('close of {earlier}' in frame and 'close of {later}' in frame and
                      any(v in frame for v in ('{value} higher', 'rose by', 'grew by')), f'a span frame without both closes or a verb: {frame!r}')
-    return (f'{len(first_of)} amounts through another project\'s instalment name their recipient first; projects named by place only up to '
+    found = ', '.join(f'{n} {t}' for t, n in sorted(by_type.items())) if first_of else 'none in this dossier'
+    return (f'{len(first_of)} amounts through an instalment name their recipient first ({found}); projects named by place only up to '
             f'the twelfth ({sum(uses.values())} uses); procedure.md holds the sums paragraph and the wordings used ({dict(sorted(used.items()))})')
 
 
@@ -2136,11 +2148,17 @@ def check_pipeline(seed, index=1):
 
 
 @per_edition
+def facts_built(seed, index=1):
+    """The dossier built now with the facts in its key (cached by edition)."""
+    return build_with_facts(seed, index)
+
+
+@per_edition
 def checker_view(seed, index=1):
     """The checker's own view of the dossier built now: the key, `check_shown.Family` over its facts and `Sources` over the
     files (the stand-in for what a sheet is judged against)."""
     import check_shown
-    built = build_with_facts(seed, index)
+    built = facts_built(seed, index)
     return built['key'], check_shown.Family(big_minutes, built['key']['facts'], 'minutes'), check_shown.Sources(sources_of(built))
 
 
@@ -2181,6 +2199,57 @@ def check_basis(seed, index=1):
         need(all(any(sources.quotable(spot) for spot in spots[i]) for i in closed), f'{name}: a needed event has no quotable paragraph')
         sizes.append(len(closed))
     return f'{len(done)} statements: needed sets not empty (smallest {min(sizes)}), as found by removal, relevant, every event quotable'
+
+
+@guarded
+def check_slots(seed, index=1):
+    """Both reports list the same 24 slots in the same order: the same claim ids (read from the reports' texts), and a row of the
+    mixed report has the same query without its value, claim kind and structure as the row of the correct report."""
+    built = facts_built(seed, index)
+    ids = {v: re.findall(r'\*\*(C\d+)\.\*\*', built['files'][f'report-{v}.md']) for v in ('correct', 'mixed')}
+    need(ids['correct'] == ids['mixed'] and len(set(ids['correct'])) == len(ids['correct']) == STATEMENTS_PER_REPORT,
+         f'the reports do not list the same 24 claim ids in the same order: {ids}')
+    rows = {v: key_rows(built, v) for v in ids}
+    need(all([r['claim_id'] for r in rows[v]] == ids[v] for v in ids), 'the key\'s rows are not the reports\' claims in their order')
+    for number, (correct, mixed) in enumerate(zip(rows['correct'], rows['mixed'])):
+        need(strip_value(correct['query']) == strip_value(mixed['query']) and correct['claim_kind'] == mixed['claim_kind'],
+             f'slot {ids["correct"][number]}: the two reports ask different questions')
+    both = statements_of(seed, index)
+    need([identity(st) for st in both['correct']] == [identity(st) for st in both['mixed']],
+         'the reports\' texts ask about different things in some slot')
+    return f'{len(ids["correct"])} slots, the same claim ids and the same question (query without its value) in both reports'
+
+
+@guarded
+def check_world3(seed, index=1):
+    """The world of editions 3 and 4, from the rendered sources and this module's reading: 29 to 32 meetings, 18 to 24 projects with
+    an award, three minute books, 300,000 to 450,000 characters of sources (counted as the edition-2 shape check counts; these
+    are the bounds the generator enforces, as for edition 1: 350,000 to 420,000 is only the size the minute books are drawn
+    towards, and about one valid dossier in fifteen lies outside it), and the key's `size` is the edition."""
+    edition, built = big_minutes.current_edition(), case(seed, index)
+    book, _ = read(seed, index)
+    sources = sources_of(built)
+    need(29 <= len(book.meetings) <= 32, f'{len(book.meetings)} meetings')
+    need(18 <= len(book.projects) <= 24, f'{len(book.projects)} projects with an award')
+    need(volumes_in(sources) == list(VOLUMES[:3]) and sorted(sources) == sorted(['procedure.md'] + list(VOLUMES[:3])),
+         f'sources {sorted(sources)}')
+    size = sum(len(t) for t in sources.values())
+    need(300000 <= size <= 450000, f'{size} characters')
+    need(facts_built(seed, index)['key']['facts']['size'] == edition, 'the key does not say which edition it is')
+    return f'{len(book.meetings)} meetings, {len(book.projects)} projects with an award, 3 minute books, {size} characters, size {edition}'
+
+
+@guarded
+def check_readers_wrong(seed, index=1):
+    """Every flawed reader the dossier carries is wrong, by this module's evaluator, on at least four statements of each report."""
+    book, runs = read(seed, index)
+    both, counts = statements_of(seed, index), {}
+    for variant, sts in both.items():
+        for name in readers_in(seed, index):
+            wrong = sum(decide(runs[name], book.projects, st) != decide(runs['truth'], book.projects, st) for st in sts)
+            need(wrong >= 4, f'{variant}: reader {name} is wrong on only {wrong} statements')
+            counts.setdefault(name, []).append(wrong)
+    return 'wrong on (correct, mixed): ' + ', '.join(f'{n} {c[0]}/{c[1]}' for n, c in sorted(counts.items()))
 
 
 @guarded
@@ -2383,6 +2452,24 @@ def built_with_false_sum_nudged(seed, index=1):
     raise Failed('no false sum named after a reader')
 
 
+def sources_with_recipient_after_amount(book, sources, kind):
+    """The sources with one payment sentence of amount kind `kind` (what this module's parser read from it: `first`, `ordinal` or
+    `first_of`) rewritten in a frame of the inventory that puts the amount before the recipient. None when the dossier has none."""
+    frame = next(f for f in INV['frames']['pay'] if f.startswith('The ') and f.index('{amt}') < f.index('{proj}'))
+    for f in book.facts:
+        if f['t'] == 'pay' and f['spec']['type'] == kind:
+            block = book.blocks[f['key']]
+            for rx in book.frames['pay']:
+                for mo in rx.finditer(block):
+                    if mo.start() == f['order'][1]:
+                        new = block[:mo.start()] + frame.format(amt=mo['amt'], proj=mo['proj']) + block[mo.end():]
+                        volume = VOLUMES[f['key'][0]]
+                        blocks = sources[volume].rstrip('\n').split('\n\n')
+                        blocks[f['key'][1]] = new
+                        return dict(sources, **{volume: '\n\n'.join(blocks) + '\n'})
+    return None
+
+
 # ---------- The two editions ----------
 
 # Edition 1 as it was (module a4b125cf…): the files, the key's rows and the facts (events, passages, names, readers) of four
@@ -2531,7 +2618,10 @@ CHECKS3 = (('round trip, sums and false sums', check_round_trip3), ('one referen
            ('nothing outside the passage map reads as deciding', check_nothing_outside_the_map_decides),
            ('sums and counts of projects turn on the projects they cover', check_sums_turn_on_projects),
            ('one-project statements: lures turn on one device (sums skipped)', check_single_devices),
+           ('the world of the edition: meetings, projects, minute books, size', check_world3),
            ('quota table of the edition, 8 to 12 altered statements', check_quotas),
+           ('both reports list the same slots and questions', check_slots),
+           ('every flawed reader is wrong on at least four statements of each report', check_readers_wrong),
            ('rules of choice', check_choice_rules),
            ('text rules: places, recipients, procedure.md', check_text_rules3),
            ('every lead paragraph occurs once', check_leads3),
@@ -3092,6 +3182,13 @@ class BigMinutesTest(unittest.TestCase):
             nudged = built_with_false_sum_nudged(ED_SEED)
             with self.assertRaisesRegex(Failed, r'false sum .* states \d+, but reader \w+ gets \d+'):
                 round_trip3(nudged, book, runs, readers)
+            # the key's true value of a sum that does not match the sum read from the text
+            wrong_key = copy_built(case(ED_SEED))
+            row = next(r for r in wrong_key['key']['expectations'] if r['variant'] == 'mixed' and r['claim_kind'].startswith('minutes_sum')
+                       and r['semantic_state'] == 'refuted')
+            row['derivation'] = dict(row['derivation'], feasible_min=row['derivation']['feasible_min'] + 1)
+            with self.assertRaisesRegex(Failed, 'the key.s true value'):
+                round_trip3(wrong_key, book, runs, readers)
             # the damage is to copies: the cached dossier still passes
             round_trip3(case(ED_SEED), read(ED_SEED)[0], read(ED_SEED)[1], readers)
 
@@ -3114,10 +3211,22 @@ class BigMinutesTest(unittest.TestCase):
                                 edit(st, number, items)
                     return out
                 # two spans of one length that overlap, in both reports
+                # (built so that both spans hold enough payments and are good values: only the overlap can be refused)
+                first = next(st for st in both['correct'] if rung_of(st, count) == 'span3')
+                second = [st for st in both['correct'] if rung_of(st, count) == 'span3'][1]
+                taken = {first['since']}
+
+                def holds(since):
+                    probe = dict(second, since=since, until=since + 3)
+                    return (0 <= since and since + 3 <= count - 1 and since not in taken
+                            and sum_of(runs['truth'], projects, dict(probe, figure='count')) >= 3
+                            and good_figure(second['figure'], sum_of(runs['truth'], projects, probe)))
+                moved = next(since for since in range(first['since'] - 2, first['since'] + 3) if holds(since))
+
                 def shift(st, number, items):
                     if number == 1:
-                        st['since'], st['until'] = items[0]['since'] + 1, items[0]['until'] + 1
-                with self.assertRaisesRegex(Failed, 'overlap|more payments'):
+                        st['since'], st['until'] = moved, moved + 3
+                with self.assertRaisesRegex(Failed, 'two spans of 3 meetings overlap'):
                     choice_rules(edition, count, runs, projects, doctored('span3', shift))
                 # two statements that are the same statement
                 def same(st, number, items):
@@ -3126,8 +3235,14 @@ class BigMinutesTest(unittest.TestCase):
                 with self.assertRaisesRegex(Failed, 'the same statement'):
                     choice_rules(edition, count, runs, projects, doctored('book', same))
                 # a named sum at a meeting outside the last third, and over a project with fewer than two payments there
-                with self.assertRaisesRegex(Failed, 'last third|fewer than two payments'):
-                    choice_rules(edition, count, runs, projects, doctored('sum8', lambda st, n, items: st.update(until=2), {0}))
+                # (at the latest meeting before the last third where five projects each have two payments, over those five: only the
+                # place of the meeting can be refused)
+                early, pool = next((m, [n for n in projects if runs['truth'][('count', n, m)] >= 2]) for m in range((2 * count - 1) // 3, 0, -1)
+                                   if sum(runs['truth'][('count', n, m)] >= 2 for n in projects) >= 5)
+                self.assertLess(3 * early, 2 * count)
+                with self.assertRaisesRegex(Failed, 'not in the last third'):
+                    choice_rules(edition, count, runs, projects, doctored('sum5', lambda st, n, items: st.update(
+                        until=early, names=pool[:5]), {0}))
                 # totals only, where half should be counts
                 with self.assertRaisesRegex(Failed, 'has \\{'):
                     choice_rules(edition, count, runs, projects, doctored('sum8', lambda st, n, items: st.update(figure='total')))
@@ -3166,6 +3281,13 @@ class BigMinutesTest(unittest.TestCase):
             reordered.facts = [dict(f, recipient_first=False) if f['t'] == 'pay' and f['spec']['type'] == 'first_of' else f for f in book.facts]
             with self.assertRaisesRegex(Failed, 'before its recipient'):
                 text_rules3(sources, reordered)
+            # a real sentence rewritten with the amount before its recipient, for each way an amount can be an instalment
+            for kind in INSTALMENT_SPECS:
+                doctored_sources = sources_with_recipient_after_amount(book, sources, kind)
+                self.assertIsNotNone(doctored_sources, f'the dossier has no payment of amount kind {kind}')
+                with self.assertRaisesRegex(Failed, rf'\({kind}\) comes before its recipient'):
+                    text_rules3(doctored_sources, Book(doctored_sources))
+            self.assertIn('first', text_rules3(sources, book))
 
     def test_the_sum_task_files(self):
         root = ROOT / 'evalsuite'

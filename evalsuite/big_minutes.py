@@ -114,8 +114,9 @@ is not the last one (at least three different meetings).
     (about three draws in a hundred fail the test that every stating paragraph can be quoted and are drawn again).
     Text of editions 3 and 4 only (everything is behind the switch; editions 1 and 2 are the same bytes): `procedure.md`
     gains the paragraph `SUMS_BLOCK3` and its rescission paragraph names the wordings of the plain frames
-    (`RESCISSION_WORDINGS`); a payment stated through another project's first instalment is worded with the recipient
-    before the amount (the frames in which `{proj}` comes before `{amt}` are the only ones drawn; no frame was added);
+    (`RESCISSION_WORDINGS`); a payment whose amount is stated through an instalment (the first instalment of
+    another project, its own first instalment, or its own numbered instalment: spec types `first_of`, `first`, `ordinal`) is
+    worded with the recipient before the amount (the frames in which `{proj}` comes before `{amt}` are the only ones drawn; no frame was added);
     a project is named by its place in the order of backing only up to the twelfth place (`ORDINAL_CAP`); lead paragraphs
     are drawn as in edition 2; and a draw in which any paragraph that states an event, or serves as a lead paragraph, cannot
     be quoted (`Quotable`: the test of `check_shown.Sources.quotable`, at least 40 characters after normalising and found in
@@ -2062,10 +2063,12 @@ def sentence(rng, e, ctx, anaphor=None):
         else 'correct_pay' if kind == 'correct' else kind
     plain = frames_key in PLAIN_KINDS and rng.random() < 0.45
     frames = PLAIN_FRAMES[frames_key] if plain else FRAMES[frames_key]
-    if ctx['edition'] >= 3 and kind == 'pay' and e['spec']['type'] == 'first_of':
-        # editions 3 and 4: where the amount is stated through another project's instalment, the recipient is named
-        # before the amount ("... covered the same figure as the opening cheque that went to X for Y" leaves open which
-        # of the two projects Y is); only frames in which `{proj}` comes before `{amt}` are drawn, none was added
+    if ctx['edition'] >= 3 and kind == 'pay' and e['spec']['type'] in ('first_of', 'first', 'ordinal'):
+        # editions 3 and 4: where the amount is stated through an instalment (another project's first one, or the
+        # project's own first or numbered one), the recipient is named before the amount ("... covered the same figure
+        # as the opening cheque that went to X for Y", or "the treasurer reported the same sum as the first instalment
+        # to X", leave open which project the instalment belongs to and who got the money); only frames in which `{proj}`
+        # comes before `{amt}` are drawn, none was added
         frames = tuple(f for f in frames if f.index('{proj}') < f.index('{amt}'))
     frame = rng.choice(frames)
     if own is not None and '{proj}' in frame:
