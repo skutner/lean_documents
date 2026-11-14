@@ -29,7 +29,21 @@ import generate
 import generate_big
 import big_succession
 
-generate_big.register()
+
+_FAMILIES_BEFORE = {}
+
+
+def setUpModule():
+    """The large families are registered for the tests of this module only; `tearDownModule` puts the list back."""
+    _FAMILIES_BEFORE.update(generate.HARD_FAMILIES)
+    generate_big.register()
+
+
+def tearDownModule():
+    generate.HARD_FAMILIES.clear()
+    generate.HARD_FAMILIES.update(_FAMILIES_BEFORE)      # the list as it was found, for the modules that follow
+
+
 INV = big_succession.INVENTORY
 R_AGREE, R_NAMES, R_FIXES = big_succession.READERS
 # the two shortcuts of each bundled reader, run alone
@@ -2768,5 +2782,6 @@ class SuccessionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     if len(sys.argv) >= 4 and sys.argv[1] == '--verify':
+        generate_big.register()         # `setUpModule` does not run on this path, and the process ends with the check
         sys.exit(0 if verify(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else None) else 1)
     unittest.main()

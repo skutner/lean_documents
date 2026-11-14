@@ -22,7 +22,16 @@ sys.path.insert(0, str(ROOT / 'evalsuite'))
 sys.dont_write_bytecode = True
 import generate  # noqa: E402
 import generate_big  # noqa: E402
-generate_big.register()
+
+
+_FAMILIES_BEFORE = {}
+
+
+def setUpModule():
+    """The large families are registered for the tests of this module only; `tearDownModule` puts the list back."""
+    _FAMILIES_BEFORE.update(generate.HARD_FAMILIES)
+    generate_big.register()
+
 
 GENERATE_SHA256 = '9f166028544b24cd469116f7ee56f8d51966328b5df7742b75d16484e190ee98'
 FAMILIES_WITH_INTERFACE = ('amendments',)      # one entry per large family once its module exports the interface
@@ -35,6 +44,8 @@ TEST_RUN = Path(tempfile.mkdtemp(prefix='evalsuite-generate-big-tests-', dir=TES
 
 def tearDownModule():
     shutil.rmtree(TEST_RUN, ignore_errors=True)
+    generate.HARD_FAMILIES.clear()
+    generate.HARD_FAMILIES.update(_FAMILIES_BEFORE)      # the list as it was found, for the modules that follow
 
 
 def tree(root):

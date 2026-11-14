@@ -21,6 +21,20 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def dumps_any_integer(value):
+    """`json.dumps`, also for a sheet with an integer of more than 4300 digits, which Python 3.11 and later refuse
+    to write. The limit is lifted for the writing only: the runner and the checker read the file under the limit
+    of the interpreter they run on."""
+    if not hasattr(sys, 'set_int_max_str_digits'):
+        return json.dumps(value)
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        return json.dumps(value)
+    finally:
+        sys.set_int_max_str_digits(limit)
+
+
 class Campaign:
     """One campaign layout under `root`, with every folder where a real campaign would have it."""
 
@@ -81,7 +95,7 @@ class Campaign:
             self.calls.append(call)
             outcome = policy(call)
             if outcome.get('sheet') is not None:
-                (cwd / run_blind.SHEET).write_text(json.dumps(outcome['sheet']), encoding='utf-8')
+                (cwd / run_blind.SHEET).write_text(dumps_any_integer(outcome['sheet']), encoding='utf-8')
             return {'ended': outcome.get('ended', 'exit_0'), 'exit_code': outcome.get('exit_code', 0),
                     'seconds': outcome.get('seconds', 12.0)}
         return launch

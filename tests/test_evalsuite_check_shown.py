@@ -44,7 +44,16 @@ import generate_big  # noqa: E402
 import run_blind  # noqa: E402
 import scorecard  # noqa: E402
 from evalsuite_campaign_fixture import Campaign  # noqa: E402
-generate_big.register()
+
+
+_FAMILIES_BEFORE = {}
+
+
+def setUpModule():
+    """The large families are registered for the tests of this module only; `tearDownModule` puts the list back."""
+    _FAMILIES_BEFORE.update(generate.HARD_FAMILIES)
+    generate_big.register()
+
 
 # Two patches of `check_shown` for the length of this module's tests, undone in `tearDownModule`, and why:
 #   * `analyse` is memoised. The needed set of a statement costs one run of the interpreter for each event of the
@@ -114,6 +123,8 @@ ABSENT = object()
 def tearDownModule():
     shutil.rmtree(TEST_RUN, ignore_errors=True)
     check_shown.analyse, check_shown.read_dependencies = _ANALYSE, _READ_DEPENDENCIES      # the patches below end here
+    generate.HARD_FAMILIES.clear()
+    generate.HARD_FAMILIES.update(_FAMILIES_BEFORE)      # the list as it was found, for the modules that follow
 
 
 def fresh_folder():
@@ -2884,6 +2895,16 @@ class HostileSheetTests(unittest.TestCase):
         cls.campaign = campaign = ShownCampaign(fresh_folder(), FAMILIES[0], 1)
         rng = random.Random(5)
         huge = 10 ** 400000
+        # Python 3.11 and later refuse to turn an integer of more than 4300 digits into text or text of that many
+        # digits into an integer (`sys.get_int_max_str_digits()`). The fixture writes the sheet with the limit lifted;
+        # the runner reads it under the limit of the interpreter, so there `json.loads` raises ValueError for the
+        # sheet that holds `huge` and `read_sheet` calls the whole sheet unreadable. Python 3.9 reads it.
+        try:
+            json.loads('1' + '0' * 400000)
+            cls.reads_huge = True
+        except ValueError:
+            cls.reads_huge = False
+        within_the_limit = 10 ** 4000          # 4001 digits: read by both
 
         # A lone surrogate in a field the runner carries into findings.json (claim_id, explanation, a path, an anchor
         # or a quote) stops the runner itself at `write_json`, before this checker is reached. Only `value`, which the
@@ -2900,11 +2921,15 @@ class HostileSheetTests(unittest.TestCase):
             return {'claims': [dict(right_row(b, row), value=values[i % len(values)])
                                for i, row in enumerate(call['rows'])]}
 
-        def junk_sheet(call):
-            return {'claims': [junk(rng, b, rng.choice(call['rows']), carried_surrogates=False)
-                               for _ in range(rng.randint(10, 60))]}
+        def long_integers(call):          # as `big_integers`, with a number that every interpreter reads
+            return {'claims': [dict(right_row(b, row), value=within_the_limit) if i < 2 else right_row(b, row)
+                               for i, row in enumerate(call['rows'])]}
 
-        cls.policies = [surrogates, big_integers, surrogates_in_every_value_form, junk_sheet, junk_sheet]
+        def junk_sheet(call):
+            return {'claims': [junk(rng, b, rng.choice(call['rows']), carried_surrogates=False,
+                                    long_integers=cls.reads_huge) for _ in range(rng.randint(10, 60))]}
+
+        cls.policies = [surrogates, big_integers, surrogates_in_every_value_form, junk_sheet, junk_sheet, long_integers]
 
         def policy(call):
             return {'sheet': cls.policies[campaign.repeat_of(call) - 1](call)}
@@ -2933,8 +2958,18 @@ class HostileSheetTests(unittest.TestCase):
         for row in by_repeat[1]:                                           # a lone surrogate is an unreadable value
             self.assertEqual((row['class'], row['kind']), ('verdict_only', 'format'))
             self.assertEqual(row['value']['given'], '\\ud800')
-        for variant in ('correct', 'mixed'):                               # an enormous integer is read, and wrong
-            mine = [r for r in by_repeat[2] if r['variant'] == variant]
+        self.assert_integers_are_read_and_wrong(by_repeat[6])      # 4001 digits: read, on every interpreter
+        if self.reads_huge:                                                # 400001 digits: read where it can be
+            self.assert_integers_are_read_and_wrong(by_repeat[2])
+        else:                                                              # and where it cannot, see the next test
+            self.assertEqual({(r['class'], r['kind']) for r in by_repeat[2]}, {('unanswered', 'format')})
+            self.assertFalse(any(str((r.get('value') or {}).get('given')).startswith('<an integer of') for r in by_repeat[2]))
+        self.assertLess(self.seconds, 60)
+
+    def assert_integers_are_read_and_wrong(self, rows):
+        """An enormous integer in a sheet is read, and wrong (the first two rows of each variant carry one)."""
+        for variant in ('correct', 'mixed'):
+            mine = [r for r in rows if r['variant'] == variant]
             for index, row in enumerate(mine):
                 if index < 2:
                     form = next(r for r in self.b.rows if (r['variant'], r['claim_id']) == (variant, row['claim_id']))[
@@ -2945,7 +2980,24 @@ class HostileSheetTests(unittest.TestCase):
                     self.assertTrue(str(row['value']['given']).startswith('<an integer of '))
                 else:
                     self.assertEqual(row['class'], 'shown')
-        self.assertLess(self.seconds, 60)
+
+    def test_a_sheet_with_an_integer_of_400001_digits_is_read_or_refused_whole_by_the_interpreter(self):
+        limit = sys.get_int_max_str_digits() if hasattr(sys, 'get_int_max_str_digits') else 0
+        self.assertEqual(self.reads_huge, limit == 0 or limit >= 400001)       # what the set-up found is the limit's doing
+        units = [u for u in self.campaign.units().values() if u['repeat'] == 2]
+        self.assertEqual(len(units), 2)                                        # a review of each report
+        reviews = [r for r in self.shown['per_review'].values() if r['repeat'] == 2]
+        self.assertEqual(len(reviews), 2)
+        if self.reads_huge:                                                    # Python 3.9 to 3.10, or no limit
+            self.assertEqual({(u['status'], u['sheet']) for u in units}, {('scored', 'valid')})
+            self.assertEqual({(r['sheet'], r['answered']) for r in reviews}, {('valid', True)})
+        else:       # the runner's `json.loads` raises ValueError: no row of the sheet is kept, not just the huge one.
+            # This records what the runner does today on such an interpreter, a known limit and not a requirement:
+            # if the runner comes to keep the other rows, these lines change with it.
+            self.assertEqual({(u['status'], u['sheet']) for u in units}, {('failed', 'unreadable')})
+            self.assertEqual({r['answered'] for r in reviews}, {False})
+            self.assertEqual(self.status, 0)                                   # and the campaign goes on to the next review
+            self.assertEqual({r['repeat'] for r in self.shown['per_review'].values()}, set(range(1, 7)))
 
     def test_an_output_folder_that_does_not_exist_is_made(self):
         root = fresh_folder()
@@ -3163,14 +3215,17 @@ class FailedReviewTests(unittest.TestCase):
 # (c) Fuzz: arbitrary sheets, and the refusals
 # ---------------------------------------------------------------------------------------------------------
 
-def junk(rng, b, row, carried_surrogates=True):
+def junk(rng, b, row, carried_surrogates=True, long_integers=True):
     """A sheet row of an arbitrary shape. With `carried_surrogates` false, no lone surrogate is put where the runner
-    copies it into findings.json (it cannot write one): in `value` only."""
+    copies it into findings.json (it cannot write one): in `value` only. With `long_integers` false, no integer of
+    thousands of digits is put in `value`: the runner of Python 3.11 and later refuses a whole sheet that holds one."""
     pick = rng.choice
     big = 'x' * rng.choice((0, 1, 39, 40, 41, 10_000, 1_000_000))
     values = [None, True, False, 0, 1, -1, 3.5, 1e308, float('nan'), float('inf'), '', ' ', 'none', 'null', 'None',
               '1,480', '€1480', big, [], [1], {}, {'a': 1}, '2034-07-19', 10 ** 40, '9' * 5000, 'Head of Legal',
               '\ud800', 'a\udfffb', 10 ** 5000, -10 ** 5000, 2 ** 70, '\u202e500.000']
+    if not long_integers:
+        values = [v for v in values if not (type(v) is int and abs(v) > 10 ** 4000)]
     items = [None, 5, 'x', [], {}, {'path': 5}, {'quote': 5}, {'path': 'a', 'quote': big},
              {'path': '\ud800', 'quote': '\ud800' * 60} if carried_surrogates else {'path': 'p', 'quote': '\u00e9' * 60},
              {'quote': 'a\udfff' * 40} if carried_surrogates else {'quote': 'a\u00e9' * 40}, {'path': 'p', 'quote': None},

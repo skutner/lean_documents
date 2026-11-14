@@ -25,8 +25,21 @@ sys.path.insert(0, str(ROOT / 'evalsuite'))
 sys.dont_write_bytecode = True
 import generate  # noqa: E402
 import generate_big  # noqa: E402
-generate_big.register()
 import big_amendments as family  # noqa: E402
+
+
+_FAMILIES_BEFORE = {}
+
+
+def setUpModule():
+    """The large families are registered for the tests of this module only; `tearDownModule` puts the list back."""
+    _FAMILIES_BEFORE.update(generate.HARD_FAMILIES)
+    generate_big.register()
+
+
+def tearDownModule():
+    generate.HARD_FAMILIES.clear()
+    generate.HARD_FAMILIES.update(_FAMILIES_BEFORE)      # the list as it was found, for the modules that follow
 
 INV = family.INVENTORY
 SEEDS = (1, 2, 3, 4, 5)
@@ -2243,6 +2256,7 @@ class DependsTests(unittest.TestCase):
 
 if __name__ == '__main__':
     if len(sys.argv) >= 4 and sys.argv[1] == '--verify':
+        generate_big.register()         # `setUpModule` does not run on this path, and the process ends with the check
         try:
             family.current_size()
         except generate.GenerationError as error:
