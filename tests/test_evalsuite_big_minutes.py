@@ -1869,12 +1869,18 @@ EXPECTED_QUOTAS = {
     4: {'award': 2, 'single': 2, 'sum3': 0, 'sum5': 2, 'sum8': 4, 'upto': 6, 'projects': 2, 'span3': 2, 'span6': 2, 'book': 2},
     # edition 5 (the fifth-edition design, section 3): ten statements on the payment side, eight on the award side
     5: {'award': 2, 'single': 2, 'projects': 2, 'sum3': 0, 'sum5': 0, 'sum8': 2, 'upto': 2, 'span3': 2, 'span6': 2, 'book': 2,
-        'asum8': 2, 'aupto': 4, 'abook': 2}}
+        'asum8': 2, 'aupto': 4, 'abook': 2},
+    # edition 6 (a dense world): no statement about the number of projects holding an award and no span of three meetings
+    6: {'award': 2, 'single': 2, 'projects': 0, 'sum3': 0, 'sum5': 0, 'sum8': 4, 'upto': 8, 'span3': 0, 'span6': 2, 'book': 2,
+        'asum8': 2, 'aupto': 0, 'abook': 2}}
 # The figures of the sum rungs per report (design section 3): {rung: {figure: number}}; the rungs of edition 5 that are not
 # here are those of the first supplement (half totals, half numbers of payments, as near as the quota allows).
 EDITION5_FIGURES = {'sum8': {'total': 1, 'count': 1}, 'upto': {'total': 1, 'count': 1}, 'span3': {'total': 1, 'count': 1},
                     'span6': {'total': 1, 'count': 1}, 'book': {'total': 1, 'count': 1},
                     'asum8': {'award': 1, 'balance': 1}, 'aupto': {'award': 2, 'balance': 2}, 'abook': {'award': 1, 'balance': 1}}
+# edition 6: the same rule (half of each rung one figure, half the other, as near as the quota allows), written out for its table
+EDITION6_FIGURES = {'sum8': {'total': 2, 'count': 2}, 'upto': {'total': 4, 'count': 4}, 'span6': {'total': 1, 'count': 1},
+                    'book': {'total': 1, 'count': 1}, 'asum8': {'award': 1, 'balance': 1}, 'abook': {'award': 1, 'balance': 1}}
 AWARD_RUNGS = ('asum8', 'aupto', 'abook')
 SINGLES = ('total', 'count', 'balance', 'largest', 'first')
 STATEMENTS_PER_REPORT = 24
@@ -2079,19 +2085,24 @@ def choice_rules(edition, count, runs, projects, both, book=None):
                 pair = ('award', 'balance') if rung in AWARD_RUNGS else ('total', 'count')
                 need(set(figures) <= set(pair) and abs(figures[pair[0]] - figures[pair[1]]) <= len(items) % 2,
                      f'{variant}: {rung} has {dict(figures)}')
-                if edition == 5:
-                    need(dict(figures) == EDITION5_FIGURES[rung], f'{variant}: {rung} has {dict(figures)}, the table says {EDITION5_FIGURES[rung]}')
+                if edition >= 5:
+                    table = EDITION5_FIGURES if edition == 5 else EDITION6_FIGURES
+                    need(dict(figures) == table[rung], f'{variant}: {rung} has {dict(figures)}, the table says {table[rung]}')
         if edition == 4:
             need(len({st['until'] for st in by_rung['upto']}) >= 3, f'{variant}: the upto sums use fewer than three meetings')
-        if edition == 5:
-            need(len({st['until'] for st in by_rung['aupto']}) == 4, f'{variant}: the aupto sums use fewer than four different meetings')
+        if edition == 6:
+            need(len({st['until'] for st in by_rung['upto']}) == EXPECTED_QUOTAS[6]['upto'],
+                 f'{variant}: the eight upto sums do not use eight different meetings')
+        if edition >= 5:
+            need(len({st['until'] for st in by_rung['aupto']}) == EXPECTED_QUOTAS[edition]['aupto'],
+                 f'{variant}: the aupto sums do not use as many different meetings as there are of them')
             need(not {st['until'] for st in by_rung['aupto']} & {st['until'] for st in by_rung['upto']},
                  f'{variant}: an aupto sum is at a meeting of an upto sum')
         need(all(len(st['names']) == len(set(st['names'])) for st in
                  by_rung['sum3'] + by_rung['sum5'] + by_rung['sum8'] + by_rung['asum8']), 'repeated names')
         need(all(st['until'] == count - 1 for st in by_rung['book'] + by_rung['abook']), f'{variant}: a book sum not at the last meeting')
-        need(sorted(3 * st['until'] // count for st in by_rung['projects']) == [0, 2],
-             f'{variant}: the projects statements are not one in the first and one in the last third')
+        need(sorted(3 * st['until'] // count for st in by_rung['projects']) == ([0, 2] if EXPECTED_QUOTAS[edition]['projects'] else []),
+             f'{variant}: the projects statements are not one in the first and one in the last third (edition 6: none)')
         need(all(runs[name][('award', st['who'], st['until'])] == truth[('award', st['who'], st['until'])]
                  for st in by_rung['award'] for name in READERS), f'{variant}: a flawed reader differs on an award control')
     return collections.Counter(n for st in both['correct'] if st['shape'] == 'named' for n in st['names'])
@@ -2435,7 +2446,7 @@ def check_sums_turn_on_projects(seed, index=1):
 @guarded
 def check_pipeline(seed, index=1):
     """Build the dossier with the facts in its key, then read its keys through the real `check_shown.read_keys` (which runs
-    `check_row` on every row) with the edition variable unset and set to 1, 2, 3, 4 and 5: no refusal, and `answer`, `value_form`
+    `check_row` on every row) with the edition variable unset and set to 1, 2, 3, 4, 5 and 6: no refusal, and `answer`, `value_form`
     and `relevant` give the same for every row and every reader under every setting."""
     import blindness
     import check_shown
@@ -2448,7 +2459,7 @@ def check_pipeline(seed, index=1):
         (folder / 'draft' / f'{key["dossier_id"]}.json').write_text(json.dumps(key), encoding='utf-8')
         blindness.seal_keys(folder / 'draft', folder / 'sealed', [folder / 'arena'])
         seen, rows_read = {}, 0
-        for setting in (None, 1, 2, 3, 4, 5):
+        for setting in (None, 1, 2, 3, 4, 5, 6):
             with edition_env(setting):
                 dossier = check_shown.read_keys(folder / 'sealed')['dossiers'][key['dossier_id']]
                 rows, found = dossier['rows'], {}
@@ -2464,7 +2475,7 @@ def check_pipeline(seed, index=1):
             need(found == seen[None], f'answer, value_form or relevant differ under {big_minutes.EDITION_VARIABLE}={setting}')
     finally:
         shutil.rmtree(folder, ignore_errors=True)
-    return f'read_keys accepts {rows_read} rows with the variable unset and set to 1, 2, 3, 4, 5; answer, value_form and relevant are the same'
+    return f'read_keys accepts {rows_read} rows with the variable unset and set to 1, 2, 3, 4, 5, 6; answer, value_form and relevant are the same'
 
 
 @per_edition
@@ -2545,15 +2556,26 @@ def check_world3(seed, index=1):
     """The world of editions 3 and 4, from the rendered sources and this module's reading: 29 to 32 meetings, 18 to 24 projects with
     an award, three minute books, 300,000 to 450,000 characters of sources (counted as the edition-2 shape check counts; these
     are the bounds the generator enforces, as for edition 1: 350,000 to 420,000 is only the size the minute books are drawn
-    towards, and about one valid dossier in fifteen lies outside it), and the key's `size` is the edition."""
+    towards, and about one valid dossier in fifteen lies outside it), and the key's `size` is the edition. Edition 6 (a dense world)
+    has its own bounds: 44 to 48 meetings, 36 to 40 projects, four minute books (five from 47 meetings) and 430,000 to 510,000
+    characters. (The number of payments is not checked here; the unit test of edition 6 checks it.)"""
     edition, built = big_minutes.current_edition(), case(seed, index)
     book, _ = read(seed, index)
     sources = sources_of(built)
+    size = sum(len(t) for t in sources.values())
+    if edition == 6:
+        meetings = len(book.meetings)
+        need(44 <= meetings <= 48, f'{meetings} meetings')
+        need(36 <= len(book.projects) <= 40, f'{len(book.projects)} projects with an award')
+        books = volumes_in(sources)
+        need(len(books) == (5 if meetings >= 47 else 4) and sorted(sources) == sorted(['procedure.md'] + books), f'sources {sorted(sources)}')
+        need(430000 <= size <= 510000, f'{size} characters')
+        need(facts_built(seed, index)['key']['facts']['size'] == edition, 'the key does not say which edition it is')
+        return f'{meetings} meetings, {len(book.projects)} projects with an award, {len(books)} minute books, {size} characters, size {edition}'
     need(29 <= len(book.meetings) <= 32, f'{len(book.meetings)} meetings')
     need(18 <= len(book.projects) <= 24, f'{len(book.projects)} projects with an award')
     need(volumes_in(sources) == list(VOLUMES[:3]) and sorted(sources) == sorted(['procedure.md'] + list(VOLUMES[:3])),
          f'sources {sorted(sources)}')
-    size = sum(len(t) for t in sources.values())
     need(300000 <= size <= 450000, f'{size} characters')
     need(facts_built(seed, index)['key']['facts']['size'] == edition, 'the key does not say which edition it is')
     return f'{len(book.meetings)} meetings, {len(book.projects)} projects with an award, 3 minute books, {size} characters, size {edition}'
@@ -3373,7 +3395,7 @@ CHECKS5 = (('round trip, sums and false sums', check_round_trip3), ('one referen
 
 
 def checks_of(edition):
-    return CHECKS5 if edition == 5 else CHECKS3 if edition >= 3 else CHECKS + (EDITION2_CHECKS if edition == 2 else ())
+    return CHECKS5 if edition >= 5 else CHECKS3 if edition >= 3 else CHECKS + (EDITION2_CHECKS if edition == 2 else ())
 
 
 def fixtures_folder(fixtures, seed, index):
@@ -3383,14 +3405,14 @@ def fixtures_folder(fixtures, seed, index):
 
 def fixtures_refusal(base, edition):
     """None, or the reason a fixtures folder cannot be of `edition`. Only its shape is looked at: a fourth minute book means
-    edition 2 (editions 1, 3, 4 and 5 have three); among editions 1, 3, 4 and 5 the comparison of bytes decides."""
+    edition 2 or 6 (editions 1, 3, 4 and 5 have three); among editions 1, 3, 4 and 5, and between 2 and 6, the comparison of bytes decides."""
     four = any((base / name).exists() for name in ('sources/minute-book-4.md', 'minute-book-4.md'))
-    if four and edition != 2:
-        return (f'{base} was made under edition 2 (it has minute-book-4.md) and {big_minutes.EDITION_VARIABLE} asks for edition '
-                f'{edition}: set {big_minutes.EDITION_VARIABLE}=2 and run again')
-    if not four and edition == 2:
+    if four and edition not in (2, 6):
+        return (f'{base} was made under edition 2 (it has minute-book-4.md; edition 6 has four or five minute books too) and '
+                f'{big_minutes.EDITION_VARIABLE} asks for edition {edition}: set {big_minutes.EDITION_VARIABLE}=2 or 6 and run again')
+    if not four and edition in (2, 6):
         return (f'{base} was made under edition 1, 3, 4 or 5 (it lacks minute-book-4.md) and {big_minutes.EDITION_VARIABLE} asks for '
-                f'edition 2: set {big_minutes.EDITION_VARIABLE}=1 (or leave it unset), 3, 4 or 5 and run again')
+                f'edition {edition}: set {big_minutes.EDITION_VARIABLE}=1 (or leave it unset), 3, 4 or 5 and run again')
     return None
 
 
@@ -3408,8 +3430,8 @@ def compare_fixtures(built, base):
 def verify(seed, index, fixtures=None):
     """Run the checks on exactly one draw and, given a fixtures folder, compare the rebuilt files with it byte for
     byte. Prints one line per check; returns the number of failures. The draw is built under the edition that
-    BIG_MINUTES_EDITION names (1 when it is not set; editions 1 to 5 exist), and a fixtures folder whose shape is not that
-    of the edition is refused before any check: edition 2 has a fourth minute book, the others never do."""
+    BIG_MINUTES_EDITION names (1 when it is not set; editions 1 to 6 exist), and a fixtures folder whose shape is not that
+    of the edition is refused before any check: editions 2 and 6 have a fourth minute book, the others never do."""
     try:
         edition = big_minutes.current_edition()
     except generate.GenerationError as error:
@@ -3719,10 +3741,10 @@ class BigMinutesTest(unittest.TestCase):
 
     def test_edition_switch(self):
         self.assertEqual(big_minutes.current_edition(), 1)                    # not set: edition 1
-        for raw, want in (('1', 1), ('2', 2), ('3', 3), ('4', 4), ('5', 5)):
+        for raw, want in (('1', 1), ('2', 2), ('3', 3), ('4', 4), ('5', 5), ('6', 6)):
             with edition_env(raw):
                 self.assertEqual(big_minutes.current_edition(), want)
-        for raw in ('', '0', '6', '12', '2 ', ' 1', 'one', '1.0', 'two', '34', '03', '-1', '5th', '05', '55'):
+        for raw in ('', '0', '7', '12', '2 ', ' 1', 'one', '1.0', 'two', '34', '03', '-1', '5th', '05', '55'):
             with edition_env(raw):
                 with self.assertRaises(generate.GenerationError, msg=repr(raw)):
                     big_minutes.current_edition()
@@ -3792,12 +3814,12 @@ class BigMinutesTest(unittest.TestCase):
                 self.assertEqual(out.getvalue().count('\n'), 1, out.getvalue())          # refused before any check
             finally:
                 shutil.rmtree(folder)
-        for raw in ('6', 'x', '0', ''):                     # editions 1 to 5 exist; nothing else does
+        for raw in ('7', 'x', '0', ''):                     # editions 1 to 6 exist; nothing else does
             with edition_env(raw):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     self.assertEqual(verify(1, 1), 1, raw)
-                self.assertIn('must be 1, 2, 3, 4 or 5', out.getvalue())
+                self.assertIn('must be 1, 2, 3, 4, 5 or 6', out.getvalue())
                 self.assertEqual(out.getvalue().count('\n'), 1, out.getvalue())
 
     def test_a_three_book_folder_is_accepted_by_editions_1_3_4_and_5_and_the_bytes_decide(self):
@@ -3925,9 +3947,43 @@ class BigMinutesTest(unittest.TestCase):
         self.assertEqual(out.count('ok    '), len(CHECKS5) + 1, out)
         print(out.split('ok    depth: ')[1].split('\n')[0])
 
+    def test_edition_6_draws_a_dense_world(self):
+        """One edition-6 dossier only (a build takes seconds; `--verify` under BIG_MINUTES_EDITION=6 runs every check of the edition on
+        a dossier, and is how several seeds are checked): its world (44 to 48 meetings, 36 to 40 projects, four or five minute books,
+        430,000 to 510,000 characters), many payments to a project, whole positive amounts that keep every close within the award (the
+        interpreter reports no problem), numbered instalments up to the fifth only, the table of the edition per report, and the key's
+        size. The full set of checks is not run here: it takes minutes on a dossier of this size."""
+        with edition_env(6):
+            built = facts_built(ED_SEED, 1)
+        facts = built['key']['facts']
+        self.assertEqual(facts['size'], 6)
+        events = facts['events']
+        sources = sources_of(built)
+        books = sorted(n for n in sources if n.startswith('minute-book-'))
+        meetings = len({e['date'] for e in events if e['kind'] != 'names'} | {e['date'] for e in events})
+        self.assertIn(len(books), (4, 5))
+        self.assertEqual(sorted(sources), sorted(['procedure.md'] + books))
+        self.assertTrue(430000 <= sum(len(t) for t in sources.values()) <= 510000)
+        self.assertTrue(36 <= len(facts['names']) <= 40, len(facts['names']))
+        self.assertTrue(40 <= meetings <= 48, meetings)
+        pays = [e for e in events if e['kind'] == 'pay']
+        per_project = collections.Counter(e['subject'] for e in pays)
+        self.assertTrue(400 <= len(pays) <= 800, len(pays))
+        self.assertTrue(all(6 <= n <= 20 for n in per_project.values()), sorted(per_project.values()))
+        self.assertGreaterEqual(sum(n >= 14 for n in per_project.values()), len(per_project) // 2)
+        flat, problems, resolved = big_minutes._run(events)
+        self.assertEqual(problems, [])
+        self.assertTrue(all(isinstance(v, int) and v > 0 for v in resolved.values()))
+        self.assertTrue(all(e['spec'].get('k', 2) <= 5 for e in pays))
+        # the table of the edition, per report: the one-project statements merge into `single`
+        for variant in ('correct', 'mixed'):
+            kinds = collections.Counter(r['claim_kind'][len('minutes_'):] for r in key_rows(built, variant))
+            singles = sum(kinds.pop(k, 0) for k in SINGLES)
+            self.assertEqual({**kinds, 'single': singles}, {k: v for k, v in EXPECTED_QUOTAS[6].items() if v}, variant)
+
     def test_the_inventory_tables_are_those_of_the_supplement(self):
         self.assertEqual({e: dict(t) for e, t in INV['sum_quotas'].items()}, EXPECTED_QUOTAS)
-        self.assertEqual(sorted(EXPECTED_QUOTAS), [3, 4, 5])
+        self.assertEqual(sorted(EXPECTED_QUOTAS), [3, 4, 5, 6])
         for table in EXPECTED_QUOTAS.values():
             self.assertEqual(sum(table.values()), 24)
         self.assertEqual(sorted(INV['sum_statements']), ['all_award', 'all_balance', 'all_count', 'all_total', 'span_count', 'span_total',

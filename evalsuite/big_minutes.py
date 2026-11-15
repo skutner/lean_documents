@@ -71,7 +71,7 @@ Flawed readers (each a specific shortcut; the interpreter switches):
                                  correction that points at something it does not see changes nothing, and a
                                  payment whose amount it cannot work out at all is skipped.
 
-Edition. The environment variable BIG_MINUTES_EDITION (1, 2, 3, 4 or 5; unset means 1; anything else is an error) says which
+Edition. The environment variable BIG_MINUTES_EDITION (1, 2, 3, 4, 5 or 6; unset means 1; anything else is an error) says which
 edition of the generator draws the dossier. Edition 1 is the dossier described above, byte for byte as it was before
 editions existed. Edition 2 is about one and a half times as large (30 to 36 projects over 44 to 48 meetings, four or
 five minute books, 570,000 to 630,000 characters), its 24 statements per report are 7 about the number of projects holding
@@ -148,6 +148,27 @@ or a variation of it minuted at or before that meeting, where the world has them
 the paragraph of `procedure.md` on sums is `SUMS_BLOCK5` (`SUMS_BLOCK3` and the award-side paragraph `AWARD_SIDE`), and the
 paragraph on amounts defined by reference gains the sentence `INSTALMENT_OWN` (whose instalment is meant); the statement frames
 are the keys `sum_award`, `sum_balance`, `all_award` and `all_balance` of `SUM_STATEMENTS`.
+
+Edition 6 (a dense world). The text frames, the procedure (that of edition 5), the interpreter, the flawed readers and the checker's
+interface are edition 5's; the world is not: 36 to 40 projects drawn from edition 2's pools over 44 to 48 meetings (four minute
+books, five from 47 meetings), and 16 to 20 payments to a project where the calendar allows (a project awarded later gets fewer, at
+least 6; about 480 to 670 payments in all) in a dossier of 430,000 to 510,000 characters (drawn towards 440,000 to 480,000; the filler
+only tops up what the events leave). `case['size']` is 6. `plan_project6` draws a project: the months of every event first (a payment
+every one or two meetings, awards early, at most one award at each of the first fourteen meetings, so that the first
+awards in the order of backing are each alone at theirs; one deciding matter per project per meeting), the amounts last, against what the
+interpreter reads: no payment takes the gross total paid above the least award in force (corrections applied from the start,
+a variation) from its meeting on; the balance of the award is the last payment of a project in two, only where no lowering of the
+award follows it; every figure is a whole number of pounds of at least 1,000. A project is paid by regular instalments: its first
+payment is about the least award in force from its meeting on, divided by the payments planned (times a share of 0.7 to 1 where the
+last payment is not the balance), and "a sum equal to the first instalment" is the commonest way a later one is
+stated (`WEIGHTS6`; the numbered instalments stay at the second to the fifth, the fractions at the existing ones and only where the
+result is a whole number of pounds that fits). Returns and corrections of payments are drawn in proportion to the payments (the rates
+of edition 1 per payment); corrections of payments only for a payment from the sixth on, which no other amount refers to. A sentence of
+the minutes is drawn again, with another frame, form of reference or amount phrase, while the dossier has said the same sentence
+before (`sentence`): no sentence carries a count of its own. `QUOTAS[6]` gives per report 2 awards in force, 2 about one project,
+and 4 `sum8`, 8 `upto`, 2 `span6`, 2 `book` (half totals, half numbers of payments), 2 `asum8` and 2 `abook` (one sum of awards in
+force and one of unpaid balances each); no statement about the number of projects holding an award, no `span3`, no `aupto`. The
+picker serves a rung whose quota is 0 by skipping it (`projects` too).
 """
 import bisect
 import datetime
@@ -200,12 +221,16 @@ SPONSORS2 = SPONSORS + ('Beacon Allotment Holders', 'Riverside Reading Room Trus
                         'Ivy Lane Chapel Trust', 'Barley Mow Friends')
 # What an edition changes: meetings, projects, minute books and size of the text, and the mix of statements per report.
 EDITION_VARIABLE = 'BIG_MINUTES_EDITION'
-EDITIONS = (1, 2, 3, 4, 5)
+EDITIONS = (1, 2, 3, 4, 5, 6)
 SETTINGS = {1: {'meetings': (29, 32), 'projects': (18, 24), 'books': 3, 'size': (350000, 420000), 'bounds': (300000, 450000),
                 'places': PLACES, 'buildings': BUILDINGS, 'works': WORKS, 'sponsors': SPONSORS},
             2: {'meetings': (44, 48), 'projects': (30, 36), 'books': None, 'size': (570000, 630000), 'bounds': (550000, 650000),
                 'places': PLACES2, 'buildings': BUILDINGS2, 'works': WORKS2, 'sponsors': SPONSORS2}}
 SETTINGS[3] = SETTINGS[4] = SETTINGS[5] = SETTINGS[1]          # editions 3, 4 and 5 are edition 1's world and size, with the sums
+# Edition 6 (a dense world): edition 2's pools and calendar, 36 to 40 projects with many payments each, in a dossier no longer than
+# edition 2's; `payments` is the number of payments a project is drawn with (see `plan_project6`).
+SETTINGS[6] = {'meetings': (44, 48), 'projects': (36, 40), 'books': None, 'size': (440000, 480000), 'bounds': (430000, 510000),
+               'places': PLACES2, 'buildings': BUILDINGS2, 'works': WORKS2, 'sponsors': SPONSORS2, 'payments': (16, 20)}
 # Edition 2: statements per report by kind (the unpaid award in force is not asked), and of them the controls (every
 # flawed reader right); the other 18 are statements on which a flawed reader is wrong.
 MIX2 = {'projects': 7, 'total': 6, 'count': 6, 'balance': 2, 'largest': 2, 'first': 1, 'award': 0}
@@ -213,12 +238,12 @@ CONTROLS2 = {'projects': 2, 'total': 2, 'count': 1, 'balance': 1}
 
 
 def current_edition():
-    """The edition asked for by BIG_MINUTES_EDITION: 1 when it is not set; an error when it is set to anything but 1, 2, 3, 4 or 5."""
+    """The edition asked for by BIG_MINUTES_EDITION: 1 when it is not set; an error when it is set to anything but 1, 2, 3, 4, 5 or 6."""
     raw = os.environ.get(EDITION_VARIABLE)
     if raw is None:
         return 1
-    if raw not in ('1', '2', '3', '4', '5'):
-        raise generate.GenerationError('%s must be 1, 2, 3, 4 or 5, not %r' % (EDITION_VARIABLE, raw))
+    if raw not in ('1', '2', '3', '4', '5', '6'):
+        raise generate.GenerationError('%s must be 1, 2, 3, 4, 5 or 6, not %r' % (EDITION_VARIABLE, raw))
     return int(raw)
 
 
@@ -576,7 +601,10 @@ QUOTAS = {3: {'award': 2, 'single': 2, 'sum3': 2, 'sum5': 4, 'sum8': 6, 'upto': 
               'book': 2},
           # edition 5: ten statements on the payment side, eight on the award side (one award, one balance per pair)
           5: {'award': 2, 'single': 2, 'projects': 2, 'sum3': 0, 'sum5': 0, 'sum8': 2, 'upto': 2, 'span3': 2, 'span6': 2,
-              'book': 2, 'asum8': 2, 'aupto': 4, 'abook': 2}}
+              'book': 2, 'asum8': 2, 'aupto': 4, 'abook': 2},
+          # edition 6 (a dense world): the sums over every project weigh most, as many of them as the picker can serve
+          6: {'award': 2, 'single': 2, 'projects': 0, 'sum3': 0, 'sum5': 0, 'sum8': 4, 'upto': 8, 'span3': 0, 'span6': 2,
+              'book': 2, 'asum8': 2, 'aupto': 0, 'abook': 2}}
 SINGLE_KINDS = ('total', 'count', 'balance', 'largest', 'first')
 ORDINAL_CAP = 12      # editions 3 and 4 name a project by its place in the order of backing only up to this place
 # Where the frames of a sum put its figures: `{names}` the named projects (joined as `SUM_LIST` says), `{when}` the one
@@ -1429,12 +1457,255 @@ def plan_project(rng, p, projects, dates, events, busy):
     return mine
 
 
-def draw_log(rng, projects, dates):
+ORDINAL_AWARDS6 = 14       # edition 6: at most one award at each meeting before this one (a project is named by its place in the order of backing only if its award is alone at its meeting)
+MIN_PAY6 = 1000              # edition 6: the least payment, and the least award a project is drawn with per payment it gets
+AWARD_PER_PAY6 = 2500
+# Edition 6: how a payment's amount is stated, as weights of the draw among the ways that fit the project at that point. A project is
+# paid by regular instalments: its first payment is its award (as corrected) divided by the payments planned, to the nearest 500, and
+# "a sum equal to the first instalment" is the commonest way a later payment is stated (while the instalment still fits what is
+# left of the award). A numbered instalment (second to fifth, each number once in a project), a fraction of the award at one meeting
+# or in force (each fraction once per way, and only where the result is a whole number of pounds that fits), another project's first
+# instalment (each project once) and "the sum authorised at" are rarer; the balance of the award is the last payment of one project
+# in two (where no lowering of the award follows it).
+WEIGHTS6 = {'abs': 3, 'auth': 1.5, 'first': 30, 'ordinal': 1, 'frac_award': 1, 'frac_current': 1, 'first_of': 1}
+RETURNS_PER_PAY6 = 0.086     # the rates of edition 1 (0.3 returns and 0.22 payment corrections per project of 3.5 payments), per payment
+CORRECTIONS_PER_PAY6 = 0.063
+
+
+def stochastic_count(rng, mean):
+    return int(mean) + (1 if rng.random() < mean - int(mean) else 0)
+
+
+def plan_project6(rng, p, projects, dates, events, busy, firsts):
+    """Edition 6: the events of one project of a dense world (16 to 20 payments where the calendar allows, at least 6), or None when
+    the draw does not fit. The structure (months of every event) is drawn first; the amounts last, in the order of the payments,
+    against what the interpreter will read: the award in force after any correction (a correction applies from the start) and
+    variation, and the payments counted so far (a payment stated by reference is worth what it refers to, a returned one counts no
+    more from the meeting of its return). No payment takes the gross total paid above the least award in force from its meeting on,
+    so that no close has more paid than awarded; the balance of the award is only drawn where no lowering of the award follows it.
+    `firsts` maps a project to (month, amount) of its first payment, for the first instalment another project's payment may repeat."""
+    count = len(dates)
+    mine, taken = [], set()
+
+    def add(kind, m, **fields):
+        event = new_event(events + mine, kind, m, p, projects, dates, **fields)
+        mine.append(event)
+        taken.add((p, m))
+        return event
+
+    def free(low, high):
+        return free_meeting(rng, p, low, high, busy | taken)
+
+    def reserve(m):
+        if m is not None:
+            taken.add((p, m))
+        return m
+    early = {e['m'] for e in events if e['kind'] == 'award' and e['m'] < ORDINAL_AWARDS6}
+    for _ in range(40):
+        award_m = 2 + int((count - 10) * rng.random() ** 2.0)      # early awards: they leave the calendar to the payments
+        if award_m >= ORDINAL_AWARDS6 or award_m not in early:      # ... but no two awards in one of the first meetings, so that the
+            break                                                    # first awards in the order of backing are each alone at theirs
+    intro_m = rng.randint(max(0, award_m - 5), award_m - 1)
+    pays_n = min(rng.randint(*SETTINGS[6]['payments']), count - 1 - award_m)
+    rescinded = rng.random() < 0.12
+    amount = 500 * rng.randint(24, 180) if rescinded else 500 * rng.randint(max(24, 8 * pays_n), 16 * pays_n)
+    add('intro', intro_m, sponsor=projects[p]['sponsor'])
+    award = add('award', award_m, amount=amount)
+    if intro_m <= award_m - 2 and rng.random() < 0.25:
+        add('defer_award', rng.randint(intro_m + 1, award_m - 1), amount=amount if rng.random() < 0.5 else amount + 500 * rng.randint(2, 10))
+    if rescinded:
+        rescind_m = free(award_m + 1, min(count - 1, award_m + 6))
+        if rescind_m is None:
+            return None
+        if rescind_m - 1 > award_m and rng.random() < 0.4:
+            fix_m = free(award_m + 1, rescind_m - 1)
+            if fix_m is not None:
+                add('correct', fix_m, target=award['id'], target_kind='award', target_m=award_m,
+                    new=amount + rng.choice((-1, 1)) * 500 * rng.randint(2, 16))
+        if rng.random() < 0.3 and rescind_m - 1 > award_m:
+            vary_m = free(award_m + 1, rescind_m - 1)
+            if vary_m is not None:
+                add('vary', vary_m, sign=rng.choice((-1, 1)), delta=draw_delta(rng))
+        if rng.random() < 0.3 and rescind_m - 1 > award_m:
+            fell_m = free(award_m + 1, rescind_m - 1)
+            if fell_m is not None:
+                add('fell_vary', fell_m, sign=rng.choice((-1, 1)), delta=draw_delta(rng))
+        add('rescind', rescind_m)
+        add_outside(rng, add, free, award_m, rescind_m - 1)
+        return mine
+    # -- structure: the months of the payments (gaps of one or two meetings, no gap wider than the room left allows) ...
+    pay_months, month = [], award_m
+    for number in range(pays_n):
+        left = pays_n - number - 1
+        month += 2 if month + 2 + left <= count - 1 and rng.random() < 0.4 else 1
+        pay_months.append(reserve(month))
+    # ... of a correction of the award, and a variation of it (which may not lower it below what the payments need) ...
+    floor = AWARD_PER_PAY6 * pays_n
+    award_now, fix_m = amount, None
+    if rng.random() < 0.3:
+        fix_m = reserve(free(award_m + 1, count - 1))
+        if fix_m is not None:
+            step, sign = 500 * rng.randint(2, 16), rng.choice((-1, 1))
+            award_now = amount + sign * step if amount + sign * step >= floor else amount + step
+    after, vary_m, vary_sign, vary_delta = award_now, None, 0, None
+    if rng.random() < 0.4:
+        vary_m = reserve(free(award_m + 1, count - 1))
+        if vary_m is not None:
+            vary_sign, vary_delta = rng.choice((-1, 1)), draw_delta(rng)
+            step = vary_delta['money'] if 'money' in vary_delta else award_now * fraction_of(vary_delta['frac'])
+            if award_now + vary_sign * step < floor:
+                vary_sign = 1
+            after = whole(award_now + vary_sign * step)
+    # ... of the corrections of payments (only of a payment from the sixth on, which no other amount is stated through) and of the
+    # returns, as many as the payments allow
+    corrections, returns = {}, {}
+    eligible = list(range(5, pays_n))
+    for i in rng.sample(eligible, min(stochastic_count(rng, CORRECTIONS_PER_PAY6 * pays_n), len(eligible))):
+        at = reserve(free(pay_months[i] + 1, count - 1))
+        if at is not None:
+            corrections[i] = at
+    pool = [i for i in range(pays_n) if i not in corrections]
+    for i in rng.sample(pool, min(stochastic_count(rng, RETURNS_PER_PAY6 * pays_n), len(pool))):
+        at = reserve(free(pay_months[i] + 1, count - 1))
+        if at is not None:
+            returns[i] = at
+    # -- amounts, payment by payment
+    balance_last = rng.random() < 0.5
+    share = 1.0 if balance_last else rng.uniform(0.7, 1.0)
+    amounts, specs, originals, used = [], [], {}, {'first': False, 'ordinal': set(), 'frac_award': set(), 'frac_current': set(),
+                                                    'first_of': set(), 'amount': set()}
+    others = [q for q in range(p) if q in firsts]
+    gross = 0
+
+    def rounded(x):
+        return max(MIN_PAY6, 500 * round(x / 500))
+
+    def distinct(x, upper):
+        """x, or the nearest multiple of 500 within [MIN_PAY6, upper] that no abs payment (or its correction) of the project has."""
+        for shift in (0, 500, -500, 1000, -1000, 1500, -1500, 2000, -2000, 3000, -3000):
+            y = x + shift
+            if MIN_PAY6 <= y <= upper and y not in used['amount']:
+                return y
+        return min(x, upper)
+    for i in range(pays_n):
+        m, left = pay_months[i], pays_n - i - 1
+        now = after if vary_m is not None and vary_m < m else award_now
+        top = min(now, after) if vary_m is not None else award_now       # the least award in force from this meeting on
+        net = sum(a for j, a in enumerate(amounts) if not (j in returns and returns[j] < m))
+        room = top - gross
+        upper = room - left * MIN_PAY6
+        if upper < MIN_PAY6:
+            return None
+        fair = max(MIN_PAY6, (share * top - gross) / (left + 1))
+        top_abs = int(upper // 500 * 500)
+        x_abs = min(top_abs, rounded(fair) if i == 0 else rounded(fair * rng.uniform(0.6, 1.4)))     # the first payment is the regular instalment
+        options = []
+        if i in corrections or i == 0:
+            options = [('abs', 1, distinct(x_abs, top_abs), None)]
+        elif i == pays_n - 1 and balance_last and top == now and now - net >= MIN_PAY6:
+            options = [('balance', 1, now - net, None)]
+        else:
+            options.append(('abs', WEIGHTS6['abs'], distinct(x_abs, top_abs), None))
+            slots = [mm for mm in range(award_m + 1, m) if (p, mm) not in busy | taken]
+            if slots:
+                options.append(('auth', WEIGHTS6['auth'], distinct(rounded(fair * rng.uniform(0.6, 1.4)), top_abs), slots))
+            limit = min(upper, room / 2)
+            if i >= 1 and MIN_PAY6 <= amounts[0] <= min(limit, 1.6 * fair):
+                options.append(('first', WEIGHTS6['first'], amounts[0], None))
+            ks = [k for k in range(2, min(i, 5) + 1) if k not in used['ordinal'] and MIN_PAY6 <= amounts[k - 1] <= limit]
+            if ks:
+                options.append(('ordinal', WEIGHTS6['ordinal'], None, ks))
+            for kind, figure in (('frac_award', award_now), ('frac_current', now)):
+                if kind == 'frac_current' and i < 1:
+                    continue
+                fracs = [f for f in REAL_FRACTIONS if f not in used[kind] and (figure * fraction_of(f)).denominator == 1
+                         and MIN_PAY6 <= figure * fraction_of(f) <= limit]
+                if fracs:
+                    options.append((kind, WEIGHTS6[kind], None, fracs))
+            reachable = [q for q in others if firsts[q][0] < m and q not in used['first_of'] and MIN_PAY6 <= firsts[q][1] <= limit]
+            if reachable:
+                options.append(('first_of', WEIGHTS6['first_of'], None, reachable))
+        kind, _, figure, extra = options[rng.choices(range(len(options)), [o[1] for o in options])[0]]
+        spec = {'type': 'abs' if kind == 'auth' else kind}
+        if kind == 'abs':
+            figure = int(figure)
+            spec['amount'] = originals[i] = figure
+            if i in corrections:
+                for sign in rng.sample((-1, 1), 2):
+                    original = figure - sign * 500 * rng.randint(1, 6)
+                    if original >= MIN_PAY6 and original not in used['amount']:
+                        spec['amount'] = originals[i] = original
+                        used['amount'].add(original)
+                        break
+                else:
+                    del corrections[i]
+            used['amount'].add(figure)
+        elif kind == 'auth':
+            figure, at = int(figure), rng.choice(extra)
+            reserve(at)
+            spec = {'type': 'authorised', 'at': at}
+            used['amount'].add(figure)
+        elif kind == 'first':
+            figure, used['first'] = amounts[0], True
+        elif kind == 'ordinal':
+            k = rng.choice(extra)
+            spec['k'], figure = k, amounts[k - 1]
+            used['ordinal'].add(k)
+        elif kind in ('frac_award', 'frac_current'):
+            frac = rng.choice(extra)
+            figure = (award_now if kind == 'frac_award' else now) * fraction_of(frac)
+            spec.update(frac=list(frac), **({'award_m': award_m} if kind == 'frac_award' else {}))
+            used[kind].add(frac)
+        elif kind == 'first_of':
+            q = rng.choice(extra)
+            spec['other'] = projects[q]['full']
+            figure = firsts[q][1]
+            used['first_of'].add(q)
+        elif kind == 'balance':
+            pass
+        figure = whole(Fraction(figure))
+        if not isinstance(figure, int) or figure < MIN_PAY6:
+            return None
+        amounts.append(figure)
+        specs.append(spec)
+        gross += figure
+    # -- the events, in the order of the payments
+    pays = []
+    for i in range(pays_n):
+        spec = specs[i]
+        if spec['type'] == 'authorised':
+            note = add('authorise', spec.pop('at'), amount=amounts[i])
+            spec['auth'] = note['id']
+        pays.append(add('pay', pay_months[i], spec=spec))
+    firsts[p] = (pay_months[0], amounts[0])
+    for i, at in sorted(returns.items()):
+        add('return', at, target=pays[i]['id'], target_m=pay_months[i])
+    for i, at in sorted(corrections.items()):
+        add('correct', at, target=pays[i]['id'], target_kind='pay', target_m=pay_months[i], new=amounts[i])
+    if fix_m is not None:
+        add('correct', fix_m, target=award['id'], target_kind='award', target_m=award_m, new=award_now)
+    if vary_m is not None:
+        add('vary', vary_m, sign=vary_sign, delta=vary_delta)
+    for kind, chance in (('fell_vary', 0.3), ('defer_vary', 0.2)):
+        if rng.random() < chance:
+            decoy_m = free(award_m + 1, count - 1)
+            if decoy_m is not None:
+                add(kind, decoy_m, sign=rng.choice((-1, 1)), delta=draw_delta(rng))
+    if rng.random() < 0.22:
+        decoy_m = free(award_m + 1, count - 2)
+        if decoy_m is not None:
+            add('authorise', decoy_m, amount=rounded(amount / pays_n * rng.uniform(0.6, 1.6)))
+    add_outside(rng, add, free, award_m, count - 1)
+    return mine
+
+
+def draw_log(rng, projects, dates, edition=1):
     """Every project's events, each project drawn so that the whole log is consistent under the procedure."""
-    events, busy = [], set()
+    events, busy, firsts = [], set(), {}
     for p in range(len(projects)):
         for _ in range(80):
-            planned = plan_project(rng, p, projects, dates, events, busy)
+            planned = plan_project(rng, p, projects, dates, events, busy) if edition < 6 else plan_project6(
+                rng, p, projects, dates, events, busy, firsts)
             if planned is None:
                 continue
             candidate = events + planned
@@ -2153,6 +2424,31 @@ def merge(old, new):
 
 
 def sentence(rng, e, ctx, anaphor=None):
+    """One event as one sentence of the minutes (`sentence_once`). Edition 6 draws a sentence again, with another frame, form of
+    reference or amount phrase, while the dossier has said the very same sentence before: with 16 to 20 payments to a project from
+    the same tables, equal sentences would otherwise make most draws unquotable. The sentence still states what the event is and
+    carries no number of its own (no count, no running total); what the draw recorded about it (`named_by`, `amount_by`, the form
+    of the last reference) is put back before each new draw."""
+    if ctx['edition'] < 6:
+        return sentence_once(rng, e, ctx, anaphor)
+    before = {key: list(e[key]) if key in e else None for key in ('named_by', 'amount_by')}, ctx['last_form']
+    for _ in range(60):
+        text = sentence_once(rng, e, ctx, anaphor)
+        if text not in ctx['said']:
+            break
+        for key, value in before[0].items():
+            if value is None:
+                e.pop(key, None)
+            else:
+                e[key] = list(value)
+        ctx['last_form'] = before[1]
+        if anaphor is not None:
+            anaphor = rng.choice(ANAPHORS)       # any of them points back to the paragraph above
+    ctx['said'].add(text)
+    return text
+
+
+def sentence_once(rng, e, ctx, anaphor=None):
     """One event as one sentence of the minutes. `anaphor` points back to the paragraph above instead of naming the
     project; some events are told without the verbs of deciding and paying."""
     kind = e['kind']
@@ -2319,7 +2615,10 @@ def told(rng, ctx, e, m):
     earns the correction only, not the minute it corrects, which keeps the way its own paragraph names its project; an
     answer that rests on a correction quotes the corrected entry too."""
     roles = [(e['id'], 'states')]
-    if e['kind'] in ANAPHORIC and not (e['kind'] == 'pay' and e['spec']['type'] == 'first_of') and rng.random() < 0.4:
+    # edition 6: a payment stated as "the first instalment" is common, and with no name of the project in it the sentences that point
+    # back to the paragraph above would run out of different wordings, so it points back less often
+    chance = 0.1 if ctx['edition'] >= 6 and e['kind'] == 'pay' and e['spec']['type'] == 'first' else 0.4
+    if e['kind'] in ANAPHORIC and not (e['kind'] == 'pay' and e['spec']['type'] == 'first_of') and rng.random() < chance:
         lead = lead_paragraph(rng, ctx, e['p'], m)
         if lead:
             naming = names_event(ctx, e, m)
@@ -2559,6 +2858,7 @@ class Ablation:
 
 
 WHY = {}
+STATS = {}          # counts kept for whoever measures the picker (never read by the generator): candidates tried and refused, by rung
 
 
 def kind_counts():
@@ -3007,7 +3307,7 @@ def pick_slots3(rng, events, projects, dates, truth, readers, cites, resolved, e
             return fail('single')
         take(best)
         used.add(best['kind'])
-    for third in (0, 2):                                        # one meeting in the first and one in the last third
+    for third in ((0, 2) if quota['projects'] else ()):          # one meeting in the first and one in the last third
         for pool in (lures, candidates):                        # a lure if there is one, else any good value
             options = [c for c in pool if c['kind'] == 'projects' and meetings.index(c['date']) * 3 // count_m == third
                        and c not in chosen and allowed(c)]
@@ -3023,7 +3323,9 @@ def pick_slots3(rng, events, projects, dates, truth, readers, cites, resolved, e
         """A statement about a sum as a candidate, or None when the true value is not a good one."""
         query = sum_query(rung, figure, subjects, since, until)
         value = sum_value(query, truth, names)
+        STATS[(rung, figure, 'tried')] = STATS.get((rung, figure, 'tried'), 0) + 1
         if not good_sum(figure, value):
+            STATS[(rung, figure, 'not a good value')] = STATS.get((rung, figure, 'not a good value'), 0) + 1
             return None
         if figure in AWARD_FIGURES:
             # on the whole log every part is established for the truth and for each of the four readers (the picker does not
@@ -3031,9 +3333,11 @@ def pick_slots3(rng, events, projects, dates, truth, readers, cites, resolved, e
             parts = list(subjects) if subjects else names
             for flat in (truth, *readers.values()):
                 if any(flat.get(f'{figure}|{n}|{until}') is None for n in parts):
+                    STATS[(rung, figure, 'part not established')] = STATS.get((rung, figure, 'part not established'), 0) + 1
                     return None
             if figure == 'balance' and any(isinstance(truth[f'balance|{n}|{until}'], (int, Fraction))
                                            and truth[f'balance|{n}|{until}'] < 0 for n in parts):
+                STATS[(rung, figure, 'negative part')] = STATS.get((rung, figure, 'negative part'), 0) + 1
                 return None
         theirs = {r: sum_value(query, base, names) for r, base in readers.items()}
         return {'kind': rung, 'query': query, 'figure': figure, 'value': value, 'theirs': theirs,
@@ -3321,7 +3625,7 @@ def build_context(rng, projects, dates, events, edition=1):
     award = {e['p']: e['m'] for e in events if e['kind'] == 'award'}
     ctx = {'projects': projects, 'dates': dates, 'events': by_id, 'members': rng.sample(MEMBERS, len(MEMBERS)),
            'sponsors': list(SETTINGS[edition]['sponsors']), 'places': list(SETTINGS[edition]['places']),
-           'edition': edition, 'leads': set()}
+           'edition': edition, 'leads': set(), 'said': set()}
     officers = rng.sample(OFFICERS, 3)
     ctx.update(chair=officers[0], treasurer=officers[1], secretary=officers[2])
 
@@ -3411,7 +3715,7 @@ def render_book(rng, projects, dates, events, ctx):
 def attempt(rng, edition=1):
     dates = draw_calendar(rng, edition)
     projects = draw_projects(rng, edition)
-    events = draw_log(rng, projects, dates)
+    events = draw_log(rng, projects, dates, edition)
     if events is None:
         return None
     events = add_restatements(rng, events, projects, dates)
@@ -3476,7 +3780,7 @@ def build(rng):
     `meetings` and `projects` for a checker). A draw that does not satisfy the family's requirements is redrawn
     from the same source, so the same seed always gives the same bytes."""
     edition = current_edition()
-    for _ in range(40 if edition == 1 else 80 if edition == 2 else 120):
+    for _ in range(40 if edition == 1 else 80 if edition == 2 else 120 if edition < 6 else 200):
         case = attempt(rng, edition)
         if case is not None:
             return case
