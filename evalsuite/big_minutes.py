@@ -152,7 +152,8 @@ are the keys `sum_award`, `sum_balance`, `all_award` and `all_balance` of `SUM_S
 Edition 6 (a dense world). The text frames, the procedure (that of edition 5), the interpreter, the flawed readers and the checker's
 interface are edition 5's; the world is not: 36 to 40 projects drawn from edition 2's pools over 44 to 48 meetings (four minute
 books, five from 47 meetings), and 16 to 20 payments to a project where the calendar allows (a project awarded later gets fewer, at
-least 6; about 480 to 670 payments in all) in a dossier of 430,000 to 510,000 characters (drawn towards 440,000 to 480,000; the filler
+least 6; about 480 to 670 payments in all, and the generator hands out only a dossier with 450 to 700: `PAYMENTS6`, checked last in
+`attempt`, redraws the dossier otherwise) in a dossier of 430,000 to 510,000 characters (drawn towards 440,000 to 480,000; the filler
 only tops up what the events leave). `case['size']` is 6. `plan_project6` draws a project: the months of every event first (a payment
 every one or two meetings, awards early, at most one award at each of the first fourteen meetings, so that the first
 awards in the order of backing are each alone at theirs; one deciding matter per project per meeting), the amounts last, against what the
@@ -165,7 +166,8 @@ stated (`WEIGHTS6`; the numbered instalments stay at the second to the fifth, th
 result is a whole number of pounds that fits). Returns and corrections of payments are drawn in proportion to the payments (the rates
 of edition 1 per payment); corrections of payments only for a payment from the sixth on, which no other amount refers to. A sentence of
 the minutes is drawn again, with another frame, form of reference or amount phrase, while the dossier has said the same sentence
-before (`sentence`): no sentence carries a count of its own. `QUOTAS[6]` gives per report 2 awards in force, 2 about one project,
+before (`sentence`; a dossier in which 60 redraws of a sentence all repeat is redrawn, as `--verify` refuses a sentence said twice): no
+sentence carries a count of its own. `QUOTAS[6]` gives per report 2 awards in force, 2 about one project,
 and 4 `sum8`, 8 `upto`, 2 `span6`, 2 `book` (half totals, half numbers of payments), 2 `asum8` and 2 `abook` (one sum of awards in
 force and one of unpaid balances each); no statement about the number of projects holding an award, no `span3`, no `aupto`. The
 picker serves a rung whose quota is 0 by skipping it (`projects` too).
@@ -1457,13 +1459,15 @@ def plan_project(rng, p, projects, dates, events, busy):
     return mine
 
 
+PAYMENTS6 = (450, 700)    # edition 6: the least and the most payments in all that a dossier handed out may have (about 1 world in 100 has fewer than 450)
 ORDINAL_AWARDS6 = 14       # edition 6: at most one award at each meeting before this one (a project is named by its place in the order of backing only if its award is alone at its meeting)
 MIN_PAY6 = 1000              # edition 6: the least payment, and the least award a project is drawn with per payment it gets
 AWARD_PER_PAY6 = 2500
 # Edition 6: how a payment's amount is stated, as weights of the draw among the ways that fit the project at that point. A project is
-# paid by regular instalments: its first payment is its award (as corrected) divided by the payments planned, to the nearest 500, and
-# "a sum equal to the first instalment" is the commonest way a later payment is stated (while the instalment still fits what is
-# left of the award). A numbered instalment (second to fifth, each number once in a project), a fraction of the award at one meeting
+# paid by regular instalments: its first payment is the least award in force from its meeting on (after any correction or variation)
+# times a share (1, or 0.7 to 1), divided by the payments planned, to the nearest 500 (at least MIN_PAY6), and "a sum equal to the
+# first instalment" is the commonest way a later payment is stated (while the instalment still fits what is left of the award). A
+# numbered instalment (second to fifth, each number once in a project), a fraction of the award at one meeting
 # or in force (each fraction once per way, and only where the result is a whole number of pounds that fits), another project's first
 # instalment (each project once) and "the sum authorised at" are rarer; the balance of the award is the last payment of one project
 # in two (where no lowering of the award follows it).
@@ -1711,6 +1715,7 @@ def draw_log(rng, projects, dates, edition=1):
             candidate = events + planned
             link(candidate)
             if _run(candidate)[1]:
+                firsts.pop(p, None)      # edition 6: a rejected plan leaves no first payment for a later one to name
                 continue
             events = candidate
             busy |= {(e['p'], e['m']) for e in planned}
@@ -2444,6 +2449,8 @@ def sentence(rng, e, ctx, anaphor=None):
         ctx['last_form'] = before[1]
         if anaphor is not None:
             anaphor = rng.choice(ANAPHORS)       # any of them points back to the paragraph above
+    else:
+        ctx['repeated'] = True       # every redraw repeated: a duplicate is returned, which --verify refuses, so `attempt` redraws the dossier
     ctx['said'].add(text)
     return text
 
@@ -3633,7 +3640,7 @@ def build_context(rng, projects, dates, events, edition=1):
     rank_of = {e['p']: number for number, e in enumerate(ranked) if sum(x['m'] == e['m'] for x in ranked) == 1}
     ctx['rank_of'] = rank_of
     introduced = {e['p']: e['id'] for e in events if e['kind'] == 'intro'}
-    ctx.update(names_events=[], last_form=None)
+    ctx.update(names_events=[], last_form=None, repeated=False)
 
     def depends(p, form):
         """What fixes a form of reference to project p: nothing for the full name and the short forms (the procedure
@@ -3772,7 +3779,13 @@ def attempt(rng, edition=1):
                           'sponsor_form': p['sponsor_ref']} for p in projects]}
     if edition >= 2:
         case['size'] = edition
-    return case if preflight(case, rng) else None
+    if not preflight(case, rng):
+        return None
+    # The last test, after every use of the random source: a dossier outside what its own --verify allows is redrawn, and one inside
+    # keeps its bytes. Edition 6: the number of payments (the events of kind `pay`), and no sentence said twice.
+    if edition == 6 and (ctx['repeated'] or not PAYMENTS6[0] <= sum(e['kind'] == 'pay' for e in events) <= PAYMENTS6[1]):
+        return None
+    return case
 
 
 def build(rng):

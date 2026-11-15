@@ -21,10 +21,22 @@ The same reading side recomputes them from the text: a project that holds no awa
 cannot establish, adds nothing to either figure. `CHECKS5` is its check list. The hand-written logs of the award side
 (`HAND_AWARD_CASES`, `HAND_AWARD_SUBSETS`, `HAND_AWARD_READERS`) carry values written down from the procedure's rules.
 
+Edition 6 (BIG_MINUTES_EDITION=6) is edition 5's text, procedure, interpreter and readers in a dense world: 36 to 40 projects over 44 to
+48 meetings, 16 to 20 payments to a project where the calendar allows, 450 to 700 payments in all. A dossier of it is expensive (`--verify`
+under edition 6 takes 10 to 20 minutes, by the load of the machine), so the unit suite builds ONE (`facts_built`, through the cache), reads it once
+with this module's own parser (`dense_view`) and holds that reading to the rules of the edition: the independent round trip of every
+statement, the quota table and the rules of choice written out in this module, the readers wrong on four statements, the world and the
+density (`world6`), what the amounts of the text must be (`dense_rules`: whole, at least 1,000, no close with more paid than awarded,
+regular first instalments, each way of stating an amount used once), every event told once with the values of the log
+(`events_told`), this module's evaluator against the interpreter's `state` at every close for the truth and the four readers
+(`whole_base_agrees`), the procedure (that of edition 5) and the same bytes in a second process. `CHECKS6` is the check list of
+`--verify` (all of `CHECKS5` and these, run on one more dossier). Editions 2 to 5 are pinned as they were at commit 5d1ca73d.
+
 Item 9 of the fifth-edition design (the unchanged files), a command and not a test of this tree, run from `lean_documents`:
     git diff --quiet 7e4beca9 -- evalsuite/check_shown.py evalsuite/generate_big.py evalsuite/generate.py evalsuite/run_blind.py \
         evalsuite/prompts/task-shown-sums.md evalsuite/arms-shown-sums.json
-(exit status 0); `test_the_six_files_are_those_of_commit_7e4beca9` runs it where that commit is in the repository's history.
+(exit status 0; the same against 5d1ca73d, the commit edition 6 is built on);
+`test_the_six_files_are_those_of_commits_7e4beca9_and_5d1ca73d` runs both where those commits are in the repository's history.
 """
 import collections
 import contextlib
@@ -398,7 +410,7 @@ class Book:
         for earlier, later in zip(hits, hits[1:]):
             if later[0] < earlier[1]:
                 self.errors.append(f'overlapping readings in {text[earlier[0]:later[1]]!r}')
-        for start, _, kind, mo in hits:
+        for start, end, kind, mo in hits:
             g = mo.groupdict()
             who = self.resolve(g['proj'], key) if g.get('proj') else g.get('full')
             before = len(self.facts)
@@ -426,6 +438,7 @@ class Book:
                 self.add(key, m, text, 'intro', who, sponsor=g['sponsor'], start=start)
             for fact in self.facts[before:]:
                 fact['ref'] = g.get('proj')         # the words that name the project in this sentence
+                fact['end'] = end                   # and where the sentence ends in its paragraph (`order` holds where it starts)
 
     def add(self, key, m, text, t, who, start, **fields):
         fact = {'t': t, 'm': m, 'p': who, 'key': key, 'full': who in text, 'order': (key, start)}
@@ -1688,13 +1701,16 @@ def check_hand_cases(seed=None, index=None):
             f'needed set), {len(HAND_SUBSETS)} subsets with {sum(len(s[3]) for s in HAND_SUBSETS)} values')
 
 
-def check_no_running_totals(seed, index=1):
+def no_running_totals(sources):
     pattern = re.compile(r'\b(to date|so far|in total|altogether|cumulative|running total|in all|payments to date)\b', re.I)
-    sources = sources_of(case(seed, index))
     for name in volumes_in(sources):
         for block in sources[name].split('\n\n'):
             need(not pattern.search(block), f'a running total in {name}: {block[:120]!r}')
     return 'no running totals in the minute books'
+
+
+def check_no_running_totals(seed, index=1):
+    return no_running_totals(sources_of(case(seed, index)))
 
 
 DECIDING = ('award', 'vary', 'correct', 'rescind', 'pay', 'return')
@@ -1987,10 +2003,14 @@ def check_round_trip3(seed, index=1):
     return round_trip3(built, book, runs, readers_in(seed, index))
 
 
+def statements_in(built, book):
+    """{variant: [statement dict]} of both reports of a built dossier, read by `book`."""
+    return {v: [statement_of(book, t) for t in report_statements(built, v)] for v in ('correct', 'mixed')}
+
+
 def statements_of(seed, index=1):
     """{variant: [statement dict]} of both reports of the dossier."""
-    built, (book, _) = case(seed, index), read(seed, index)
-    return {v: [statement_of(book, t) for t in report_statements(built, v)] for v in ('correct', 'mixed')}
+    return statements_in(case(seed, index), read(seed, index)[0])
 
 
 def quota_rules(edition, count, both, rows):
@@ -2266,19 +2286,19 @@ def check_rescission_frames(seed=None, index=None):
     """Item 7 of the design: whatever a seed draws, every frame of a rescission that the minute books can use holds a wording that the
     procedure names. What the procedure names is read from its rescission paragraph as rendered: the verbs of its first sentence
     (as stems) and the wordings it puts in quotation marks; a frame is accepted only by one of those. Checked on the procedure of
-    each of the three editions."""
+    each of the four editions (edition 6 is read from the dossier `facts_built` already holds: a second dense build is not made)."""
     frames = INV['frames']['rescind']
     need(frames, 'no frame of a rescission')
-    for edition in (3, 4, 5):
+    for edition in (3, 4, 5, 6):
         with edition_env(edition):
-            sources = sources_of(case(ED_SEED))
+            sources = sources_of(facts_built(ED_SEED) if edition == 6 else case(ED_SEED))
         paragraphs = [p for p in sources['procedure.md'].rstrip('\n').split('\n\n') if p.startswith('Rescissions.')]
         need(len(paragraphs) == 1, f'edition {edition}: {len(paragraphs)} rescission paragraphs')
         unnamed = rescission_frames_unnamed(frames, paragraphs[0])
         need(not unnamed, f'edition {edition}: the rescission frame {unnamed[0] if unnamed else ""!r} holds none of the verbs and wordings '
                           f'the procedure names {rescission_verbs_and_wordings(paragraphs[0])}')
     return (f'{len(frames)} rescission frames each hold a verb or a wording that the rescission paragraph itself names (read from the '
-            f'rendered procedure), in the procedures of editions 3, 4 and 5')
+            f'rendered procedure), in the procedures of editions 3, 4, 5 and 6')
 
 
 @per_edition
@@ -2355,13 +2375,16 @@ def check_award_side(seed, index=1):
 
 @guarded
 def check_text_rules5(seed, index=1):
-    """Text rules of edition 5 (design, section 4) on the dossier: the rules of editions 3 and 4, and the procedure of edition 5 on
+    return text_rules5(sources_of(case(seed, index)), read(seed, index)[0])
+
+
+def text_rules5(sources, book):
+    """Text rules of edition 5 (design, section 4), which edition 6 keeps, on the sources of a dossier and the facts `book` read: the
+    rules of editions 3 and 4, and the procedure of edition 5 on
     the award side. The procedure is read as text: the sums paragraph says what the awards in force and the unpaid balances of several
     projects together are, that a project holding no award in force adds nothing, that each wording of a balance frame means the award
     in force at that close less the total paid by then, that a correction minuted at any meeting is read into the figure and that a
     variation or a rescission minuted after the close is not, and the procedure says whose instalment is meant."""
-    sources = sources_of(case(seed, index))
-    book = read(seed, index)[0]
     done = text_rules3(sources, book, 5)
     paragraphs = sources['procedure.md'].rstrip('\n').split('\n\n')
     sums = [p for p in paragraphs if all(v in p for v in ('"stood higher"', '"rose by"', '"grew by"'))][0]
@@ -2388,11 +2411,12 @@ def check_text_rules5(seed, index=1):
 def check_procedures_differ(seed=None, index=None):
     """The procedure of edition 5 names the balance wordings that are new ("remained unpaid", "still to be paid", the one-project "short
     of being fully paid"; "unpaid balance" is in the procedures of editions 3 and 4 already) and the instalment sentence (its marker is
-    the clause "with no other project named as having been paid it"), and the procedures of editions 3 and 4 name none of them."""
+    the clause "with no other project named as having been paid it"), and the procedures of editions 3 and 4 name none of them. The
+    procedure of edition 6 is that of edition 5, byte for byte."""
     texts = {}
-    for edition in (3, 4, 5):
+    for edition in (3, 4, 5, 6):
         with edition_env(edition):
-            texts[edition] = sources_of(case(ED_SEED))['procedure.md']
+            texts[edition] = sources_of(facts_built(ED_SEED) if edition == 6 else case(ED_SEED))['procedure.md']
     markers = BALANCE_WORDINGS[1:] + (ONE_PROJECT_BALANCE_WORDING, 'with no other project named as having been paid it')
     for edition in (3, 4):
         for marker in markers:
@@ -2401,6 +2425,7 @@ def check_procedures_differ(seed=None, index=None):
         need(marker in texts[5], f'the procedure of edition 5 does not name {marker!r}')
     need(texts[3] == texts[4], 'the procedures of editions 3 and 4 differ')
     need(texts[5] != texts[4] and len(texts[5]) > len(texts[4]), 'the procedure of edition 5 is not longer than that of edition 4')
+    need(texts[6] == texts[5], 'the procedure of edition 6 is not that of edition 5')
     return 'the procedure of edition 5 names the award-side wordings, those of editions 3 and 4 do not'
 
 
@@ -2443,6 +2468,14 @@ def check_sums_turn_on_projects(seed, index=1):
 
 # ---------- The real pipeline and the basis, through the frozen checker ----------
 
+def scratch_folder(prefix, parent=None):
+    """A new empty folder under `parent` (the repository's ignored `tmp` folder by default), made with the parent where a fresh clone or
+    worktree has none."""
+    parent = Path(parent) if parent is not None else ROOT / 'tmp'
+    parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
+
+
 @guarded
 def check_pipeline(seed, index=1):
     """Build the dossier with the facts in its key, then read its keys through the real `check_shown.read_keys` (which runs
@@ -2452,7 +2485,7 @@ def check_pipeline(seed, index=1):
     import check_shown
     built = build_with_facts(seed, index)                  # under the edition that is set now
     key = built['key']
-    folder = Path(tempfile.mkdtemp(prefix='big-minutes-keys-', dir=str(ROOT / 'tmp')))
+    folder = scratch_folder('big-minutes-keys-')
     try:
         (folder / 'draft').mkdir()
         (folder / 'arena').mkdir()
@@ -2551,6 +2584,35 @@ def check_slots(seed, index=1):
     return f'{len(ids["correct"])} slots, the same claim ids and the same question (query without its value) in both reports'
 
 
+def world6(built, book, sources):
+    """The world of edition 6 (a dense world), from the rendered sources and this module's reading of them: 44 to 48 meetings, 36 to 40
+    projects with an award, four minute books (five from 47 meetings) and the preamble that names them (`volumes 1 to N`), 430,000 to
+    510,000 characters, the key says `size` 6, no name or sponsor used twice (one introduction per project, each sponsor once), and the
+    density: 450 to 700 payments in all (design: about 480 to 670), at most 20 to a project, and at least half of the projects that are
+    paid with 14 or more. `built` is the dossier built with its facts."""
+    size = sum(len(t) for t in sources.values())
+    meetings, projects = len(book.meetings), len(book.projects)
+    need(44 <= meetings <= 48, f'{meetings} meetings')
+    need(36 <= projects <= 40, f'{projects} projects with an award')
+    books = volumes_in(sources)
+    need(len(books) == (5 if meetings >= 47 else 4) and sorted(sources) == sorted(['procedure.md'] + books), f'sources {sorted(sources)}')
+    need(430000 <= size <= 510000, f'{size} characters')
+    need(built['key']['facts']['size'] == 6, 'the key does not say which edition it is')
+    for variant in ('correct', 'mixed'):
+        need(f'volumes 1 to {len(books)}' in built['files'][f'report-{variant}.md'], f'the {variant} report names other volumes than there are')
+    intros = [f for f in book.facts if f['t'] == 'intro']
+    need(len(intros) == projects == len({f['p'] for f in intros}) == len({f['sponsor'] for f in intros}),
+         f'{len(intros)} introductions for {projects} projects: a project or a sponsor is used twice, or one is not introduced')
+    per_project = collections.Counter(f['p'] for f in book.facts if f['t'] == 'pay')
+    total = sum(per_project.values())
+    need(PAYMENT_BOUNDS[0] <= total <= PAYMENT_BOUNDS[1], f'{total} payments in all (the bounds are {PAYMENT_BOUNDS})')
+    need(max(per_project.values()) <= 20, f'a project with {max(per_project.values())} payments')
+    dense = sum(n >= 14 for n in per_project.values())
+    need(2 * dense >= len(per_project), f'only {dense} of {len(per_project)} paid projects have 14 or more payments')
+    return (f'{meetings} meetings, {projects} projects with an award, {len(books)} minute books, {size} characters, size 6; {total} payments '
+            f'in all, {dense} of {len(per_project)} paid projects with 14 or more')
+
+
 @guarded
 def check_world3(seed, index=1):
     """The world of editions 3 and 4, from the rendered sources and this module's reading: 29 to 32 meetings, 18 to 24 projects with
@@ -2558,20 +2620,14 @@ def check_world3(seed, index=1):
     are the bounds the generator enforces, as for edition 1: 350,000 to 420,000 is only the size the minute books are drawn
     towards, and about one valid dossier in fifteen lies outside it), and the key's `size` is the edition. Edition 6 (a dense world)
     has its own bounds: 44 to 48 meetings, 36 to 40 projects, four minute books (five from 47 meetings) and 430,000 to 510,000
-    characters. (The number of payments is not checked here; the unit test of edition 6 checks it.)"""
+    characters, and its density: 450 to 700 payments in all, no project with more than 20, and at least half of the projects that are
+    paid with 14 or more (`world6`)."""
     edition, built = big_minutes.current_edition(), case(seed, index)
     book, _ = read(seed, index)
     sources = sources_of(built)
     size = sum(len(t) for t in sources.values())
     if edition == 6:
-        meetings = len(book.meetings)
-        need(44 <= meetings <= 48, f'{meetings} meetings')
-        need(36 <= len(book.projects) <= 40, f'{len(book.projects)} projects with an award')
-        books = volumes_in(sources)
-        need(len(books) == (5 if meetings >= 47 else 4) and sorted(sources) == sorted(['procedure.md'] + books), f'sources {sorted(sources)}')
-        need(430000 <= size <= 510000, f'{size} characters')
-        need(facts_built(seed, index)['key']['facts']['size'] == edition, 'the key does not say which edition it is')
-        return f'{meetings} meetings, {len(book.projects)} projects with an award, {len(books)} minute books, {size} characters, size {edition}'
+        return world6(facts_built(seed, index), book, sources)
     need(29 <= len(book.meetings) <= 32, f'{len(book.meetings)} meetings')
     need(18 <= len(book.projects) <= 24, f'{len(book.projects)} projects with an award')
     need(volumes_in(sources) == list(VOLUMES[:3]) and sorted(sources) == sorted(['procedure.md'] + list(VOLUMES[:3])),
@@ -2581,17 +2637,21 @@ def check_world3(seed, index=1):
     return f'{len(book.meetings)} meetings, {len(book.projects)} projects with an award, 3 minute books, {size} characters, size {edition}'
 
 
-@guarded
-def check_readers_wrong(seed, index=1):
-    """Every flawed reader the dossier carries is wrong, by this module's evaluator, on at least four statements of each report."""
-    book, runs = read(seed, index)
-    both, counts = statements_of(seed, index), {}
+def readers_wrong(both, projects, runs, readers):
+    """Every flawed reader of `readers` is wrong, by this module's evaluator, on at least four statements of each report."""
+    counts = {}
     for variant, sts in both.items():
-        for name in readers_in(seed, index):
-            wrong = sum(decide(runs[name], book.projects, st) != decide(runs['truth'], book.projects, st) for st in sts)
+        for name in readers:
+            wrong = sum(decide(runs[name], projects, st) != decide(runs['truth'], projects, st) for st in sts)
             need(wrong >= 4, f'{variant}: reader {name} is wrong on only {wrong} statements')
             counts.setdefault(name, []).append(wrong)
     return 'wrong on (correct, mixed): ' + ', '.join(f'{n} {c[0]}/{c[1]}' for n, c in sorted(counts.items()))
+
+
+@guarded
+def check_readers_wrong(seed, index=1):
+    """Every flawed reader the dossier carries is wrong, by this module's evaluator, on at least four statements of each report."""
+    return readers_wrong(statements_of(seed, index), read(seed, index)[0].projects, read(seed, index)[1], readers_in(seed, index))
 
 
 @guarded
@@ -3201,6 +3261,287 @@ def sources_with_recipient_after_amount(book, sources, kind):
     return None
 
 
+# ---------- Edition 6: a dense world ----------
+#
+# Written from the docstring of the edition in `big_minutes` ("Edition 6 (a dense world)") and the rendered text. The numbers below are
+# written out here, from that docstring, and are compared with the text, never read from the generator. What the text of edition 6
+# shows is edition 5's (the same frames, the same procedure): what is new is the world, and so the amounts and how often each way of
+# stating an amount is used. `--verify` runs these on one dossier (`CHECKS6`); the unit suite on the one dossier it builds.
+
+PAYMENT_BOUNDS = (450, 700)       # the payments in all that `world6` accepts; the generator's own `PAYMENTS6` must be these two numbers
+EARLY_AWARD_MEETINGS = 14       # at most one award at each of the first fourteen meetings (a project is named by its place only then)
+FIRST_FIGURE = (fractions.Fraction(3, 5), fractions.Fraction(11, 10))   # first instalment x payments / least award in force: share 0.7 to 1, +-250 pounds
+FIRST_COMMON = 'first'          # "a sum equal to the first instalment" is the commonest way a later payment is stated
+
+
+@per_edition
+def dense_view(seed, index=1):
+    """One dossier of the edition that is set, built with its facts (`facts_built`, which is cached: no second build), read once by this
+    module's own parser, with the truth's and every flawed reader's reading and the readers the key names: (built, book, runs, readers)."""
+    built = facts_built(seed, index)
+    book = Book(sources_of(built))
+    return built, book, runs_of(book), tuple(built['key']['facts']['readers'])
+
+
+def payments_by_project(book):
+    """The payments of each paid project in the order of the minutes, as this module's parser read them."""
+    out = collections.defaultdict(list)
+    for f in sorted((f for f in book.facts if f['t'] == 'pay'), key=lambda f: (f['m'], f['order'])):
+        out[f['p']].append(f)
+    return out
+
+
+def sentences_once(book):
+    """No sentence of the minutes that states an event occurs twice in the dossier (edition 6 draws a sentence again while the dossier has
+    said it: with 16 to 20 payments to a project from the same tables, equal sentences would make most draws unquotable)."""
+    said = collections.Counter(book.blocks[f['key']][f['order'][1]:f['end']] for f in book.facts if f['t'] != 'restate')
+    twice = sorted(s for s, n in said.items() if n > 1)
+    need(not twice, f'{len(twice)} sentences are said twice, for example {twice[0] if twice else ""!r}')
+    return sum(said.values())
+
+
+def early_awards_once(book):
+    """At most one award at each of the first fourteen meetings, so that the first awards in the order of backing are each alone at theirs."""
+    early = collections.Counter(f['m'] for f in book.facts if f['t'] == 'award' and f['m'] < EARLY_AWARD_MEETINGS)
+    need(all(n == 1 for n in early.values()), f'two awards at meeting {[m for m, n in early.items() if n > 1][:1]} of the first {EARLY_AWARD_MEETINGS}')
+
+
+def dense_rules(book, runs):
+    """What the rendered text of an edition 6 dossier must show of its payments and amounts (docstring of the edition), recomputed by
+    this module's reader: (1) a project that is paid has 6 to 20 payments, 16 or more unless the calendar allows no more (the meetings after
+    its award), a project that is not paid was rescinded; (2) every payment's amount is established, whole and at least 1,000, and so is
+    every stated award, absolute payment and correction; (3) at no close is more paid to a project than its award in force (the balance of
+    the truth is never negative), and for all projects the unpaid balance is the awards in force less the total paid; (4) the first payment
+    of a project is stated in pounds and is its regular instalment (the least award in force from its meeting on, divided by the payments,
+    within a share of 0.7 to 1 and a rounding); (5) each numbered instalment, each fraction (of the award at a meeting, and of the award
+    then in force) and each other project's first instalment is used once in a project, another project's first payment was minuted at an
+    earlier meeting, the balance of the award is only the last payment of a project, and a payment is corrected only from the sixth on;
+    (6) "a sum equal to the first instalment" is the commonest way a later payment is stated; (7) at most one award at each of the first
+    fourteen meetings; (8) no sentence is said twice."""
+    truth, count = runs['truth'], len(book.meetings)
+    by_project = payments_by_project(book)
+    award_at = {f['p']: f['m'] for f in book.facts if f['t'] == 'award'}
+    rescinded = {f['p'] for f in book.facts if f['t'] == 'rescind'}
+    for p in book.projects:
+        items = by_project.get(p, [])
+        if not items:
+            need(p in rescinded, f'{p} has no payment and no rescission')
+            continue
+        need(6 <= len(items) <= 20, f'{len(items)} payments to {p}')
+        need(len(items) >= 16 or len(items) == count - 1 - award_at[p],
+             f'{len(items)} payments to {p}, awarded at meeting {award_at[p]} of {count}: the calendar allows {count - 1 - award_at[p]}')
+    types = collections.Counter()
+    corrected = [(f['p'], f['when']) for f in book.facts if f['t'] == 'correct' and f['target'] == 'pay']
+    for p, items in by_project.items():
+        first = items[0]
+        need(first['spec']['type'] == 'abs', f'the first payment to {p} is stated as {first["spec"]["type"]}, not in pounds')
+        used = collections.Counter()
+        for number, f in enumerate(items):
+            spec = f['spec']
+            kind = spec['type']
+            if number:
+                types[kind] += 1
+            if kind == 'ordinal':
+                used[(kind, spec['k'])] += 1
+            elif kind in ('frac_award', 'frac_current'):
+                used[(kind, spec['frac'])] += 1
+            elif kind == 'first_of':
+                used[(kind, spec['other'])] += 1
+                other = by_project.get(spec['other'])
+                need(other and other[0]['m'] < f['m'], f'{p} repeats the first instalment of {spec["other"]}, paid at a meeting not before')
+            elif kind == 'balance':
+                need(number == len(items) - 1, f'the balance of the award is not the last payment of {p}')
+        need(all(n == 1 for n in used.values()), f'{p} states an amount in the same way twice: {[k for k, n in used.items() if n > 1][:1]}')
+        held = [truth[('award', p, c)] for c in range(first['m'], count) if truth[('award', p, c)] not in (None, 'none')]
+        need(len(held) == count - first['m'], f'{p} holds no award at {count - first["m"] - len(held)} of the closes from its first payment on')
+        share = fractions.Fraction(first['spec']['amount'] * len(items)) / min(held)
+        need(FIRST_FIGURE[0] <= share <= FIRST_FIGURE[1],
+             f'the first instalment of {p} is not regular: {first["spec"]["amount"]} x {len(items)} payments against a least award of {min(held)}')
+    for p, when in corrected:
+        number = next(i for i, f in enumerate(by_project[p]) if f['m'] == when)
+        need(number >= 5, f'a correction of payment number {number + 1} of {p}: only a payment from the sixth on is corrected')
+    amounts = set()
+    for n in book.names:
+        for m in range(count):
+            need(truth[('total', n, m)] is not None, f'the total paid to {n} at meeting {m} is not established')
+            amounts.update(truth[('amounts', n, m)])
+    need(amounts and all(fractions.Fraction(a).denominator == 1 and a >= 1000 for a in amounts),
+         f'a payment that is not a whole number of pounds, or is under 1,000: {sorted(a for a in amounts if fractions.Fraction(a).denominator != 1 or a < 1000)[:3]}')
+    stated = [f['spec']['amount'] for f in book.facts if f['t'] == 'pay' and f['spec']['type'] == 'abs'] + \
+             [f['new'] for f in book.facts if f['t'] == 'correct'] + [f['amount'] for f in book.facts if f['t'] == 'award']
+    need(all(a >= 1000 for a in stated), f'a stated amount under 1,000: {sorted(stated)[:3]}')
+    for m in range(count):
+        for n in book.projects:
+            need(part_of(truth, n, 'balance', m) >= 0, f'more paid to {n} than its award in force at meeting {m}')
+        awards = sum(part_of(truth, n, 'award', m) for n in book.projects)
+        paid = sum(truth[('total', n, m)] for n in book.projects)
+        need(sum(part_of(truth, n, 'balance', m) for n in book.projects) == awards - paid, f'meeting {m}: the unpaid balances are not the awards less the total paid')
+    others = [n for k, n in types.items() if k != FIRST_COMMON]
+    need(types[FIRST_COMMON] > max(others, default=0), f'"the first instalment" is not the commonest way a later payment is stated: {dict(types)}')
+    early_awards_once(book)
+    told = sentences_once(book)
+    return (f'{sum(len(v) for v in by_project.values())} payments to {len(by_project)} projects, every amount whole and at least 1,000, no close with more '
+            f'paid than awarded, regular first instalments, each way of stating an amount once per project, "the first instalment" '
+            f'{types[FIRST_COMMON]} of {sum(types.values())} later payments; {told} sentences, none said twice')
+
+
+def stated_values_positive_whole(both):
+    """Every value a statement of either report states (true or false, one project or a sum; not the date of "first paid in full") is a
+    positive whole number."""
+    done = 0
+    for variant, sts in both.items():
+        for st in sts:
+            if st['shape'] == 'single' and st['kind'] == 'first':
+                continue
+            value = fractions.Fraction(st['value'])
+            need(value.denominator == 1 and value > 0, f'{variant}: {st["text"]!r} states {st["value"]}, not a positive whole number')
+            done += 1
+    return f'all {done} stated values (the dates of "first paid in full" apart) are positive whole numbers'
+
+
+def calendar_of(book, events):
+    """The meeting dates (ISO) as the headings of the minute books give them (a meeting may hold no event: the log of seed 1 has 43 dates
+    for 44 meetings), and the check that every event of the log is at one of them."""
+    need(all(day is not None for _, _, day in book.meetings), 'a heading without a day')
+    dates = [f'{year:04d}-{month:02d}-{day:02d}' for year, month, day in book.meetings]
+    need(dates == sorted(set(dates)), 'the headings are not in the order of the calendar')
+    need({e['date'] for e in events} <= set(dates), f'an event of the log is at a date that is no heading: {sorted({e["date"] for e in events} - set(dates))[:2]}')
+    return dates
+
+
+def events_told(built, book):
+    """Every event of the key's log is told once, by one passage, with the values the log gives, and the text tells nothing else: the
+    passages that state an event hold exactly one fact of its kind, project and meeting, which carries the event's values, and the
+    facts read are the log's events (edition 1's `test_text_tells_each_event_once` and `test_event_log_passages_and_state_function`,
+    on the key's facts)."""
+    facts = built['key']['facts']
+    events, by_id = facts['events'], {e['id']: e for e in facts['events']}
+    dates = calendar_of(book, events)
+    told = collections.Counter((f['t'], f['p'], f['m']) for f in book.facts)
+    logged = collections.Counter((e['kind'], e['subject'], dates.index(e['date'])) for e in events if e['kind'] != 'names')
+    need(told == logged, f'the text and the log tell different events: {list((told - logged).items())[:2]} / {list((logged - told).items())[:2]}')
+    here_of = collections.defaultdict(list)
+    for f in book.facts:
+        here_of[f['key']].append(f)
+    seen = set()
+    for entry in facts['passages']:
+        need(sorted(entry) == ['event_ids', 'file', 'paragraph', 'role'], f'a passage entry with {sorted(entry)}')
+        if entry['role'] != 'states':
+            continue
+        here = here_of[(VOLUMES.index(entry['file']), entry['paragraph'])]
+        for event_id in entry['event_ids']:
+            event = by_id[event_id]
+            seen.add(event_id)
+            matches = [f for f in here if f['t'] == event['kind'] and f['p'] == event['subject'] and f['m'] == dates.index(event['date'])]
+            need(len(matches) == 1, f'{event_id}: {len(matches)} facts read from its passage')
+            need(same_values(event, matches[0], by_id), f'{event_id} ({event["kind"]}): the text does not carry the values of the log')
+    need(seen == {i for i, e in by_id.items() if e['kind'] != 'names'}, 'an event is told by no passage')
+    return f'{len(seen)} events told once each, by one passage, with the values of the log; the text tells no other'
+
+
+def whole_base_agrees(built, book, runs):
+    """This module's evaluator, which reads the text, gives at every close the same figure as the interpreter's `state` of the log, for
+    the truth and for each of the four flawed readers (edition 1's `test_whole_base_and_reader_bases_match_independent_reading`, on a
+    dense log): total, award, balance, number of payments, largest payment, number of projects holding an award, first full payment."""
+    events = built['key']['facts']['events']
+    dates = calendar_of(book, events)
+    checked = {}
+    for name in ('truth',) + READERS + ('full_name_only',):
+        base, mine, done = big_minutes.state(events, None if name == 'truth' else name, dates), runs[name], 0
+        for key, value in base.items():
+            kind, who, until = key.split('|')
+            if kind == 'first':
+                found = mine[('first', who, None)]
+                theirs = 'never' if found is None else dates[found]
+            elif kind == 'projects':
+                theirs = mine[('projects', None, dates.index(until))]
+            else:
+                theirs = mine[(kind, who, dates.index(until))]
+                if theirs is None and kind in ('balance', 'largest'):
+                    theirs = 'none'
+            need(value == theirs, f'{name}: {key} is {value!r} by the interpreter and {theirs!r} by this module\'s reading of the text')
+            done += 1
+        need(done > 2000, f'{name}: only {done} figures compared')
+        checked[name] = done
+    return f'{sum(checked.values())} figures at every close (truth and four readers) are the interpreter\'s, by this module\'s reading of the text'
+
+
+def same_in_second_process(built, other, label='a second process'):
+    need(json.loads(json.dumps(built)) == other, f'the dossier built in {label} is not the one built here')
+
+
+def build_in_another_process(edition, seed, index, hash_seed):
+    """The dossier with its facts as JSON, built by a new Python process (another string-hash seed) under BIG_MINUTES_EDITION=`edition`."""
+    code = ('import sys; sys.dont_write_bytecode=True; sys.path.insert(0, %r); import generate, generate_big, json; '
+            'generate_big.register()\nwith generate_big.facts_in_keys():\n'
+            '    print(json.dumps(generate.build_case("minutes", %d, %d), sort_keys=True))' % (str(ROOT / 'evalsuite'), seed, index))
+    with edition_env(edition):
+        run_ = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True,
+                              env=dict(os.environ, PYTHONHASHSEED=hash_seed, PYTHONDONTWRITEBYTECODE='1'))
+    need(run_.returncode == 0, f'the build in the other process failed: {run_.stderr[-300:]}')
+    return json.loads(run_.stdout)
+
+
+def procedure_of(edition, seed=None):
+    with edition_env(edition):
+        return sources_of(facts_built(ED_SEED if seed is None else seed, 1))['procedure.md']
+
+
+def procedure6_is_that_of_5(procedure):
+    """The procedure of edition 6 is that of edition 5, byte for byte (and is not that of edition 4 or 3)."""
+    five = procedure_of(5)
+    need(procedure == five, 'the procedure of edition 6 is not that of edition 5')
+    need(hashlib.sha256(procedure.encode()).hexdigest() == EDITION_PINS[(5, 1, 1)][0]['sources/procedure.md'], 'the procedure is not edition 5\'s as pinned')
+    need(procedure != procedure_of(4), 'the procedure of edition 6 is that of edition 4')
+    return 'the procedure of edition 6 is that of edition 5, byte for byte'
+
+
+@guarded
+def check_dense_rules(seed, index=1):
+    built, book, runs, _ = dense_view(seed, index)
+    return dense_rules(book, runs) + '; ' + stated_values_positive_whole(statements_in(built, book))
+
+
+@guarded
+def check_events_told(seed, index=1):
+    built, book, runs, _ = dense_view(seed, index)
+    return events_told(built, book)
+
+
+@guarded
+def check_whole_base(seed, index=1):
+    built, book, runs, _ = dense_view(seed, index)
+    return whole_base_agrees(built, book, runs)
+
+
+@guarded
+def check_procedure6(seed, index=1):
+    return procedure6_is_that_of_5(procedure_of(6, seed))
+
+
+@guarded
+def check_second_process6(seed, index=1):
+    """The same bytes in two other processes (string-hash seeds 0 and 4242): the dossier with its facts, as JSON, equals the one built here."""
+    built = facts_built(seed, index)
+    for hash_seed in ('0', '4242'):
+        same_in_second_process(built, build_in_another_process(6, seed, index, hash_seed), f'a process with PYTHONHASHSEED={hash_seed}')
+    return 'a dossier built in two other processes (PYTHONHASHSEED 0 and 4242) is the dossier built here, with its facts'
+
+
+def pin_differences(built, pin):
+    """What differs between a built dossier (with its facts) and a pin (files by SHA-256, the key's rows, the key's facts without the
+    interpreter's hash): a list of what differs; empty when the dossier is as pinned."""
+    files, rows, facts = pin
+    differences = [n for n, text in sorted(built['files'].items()) if files.get(n) != hashlib.sha256(text.encode()).hexdigest()]
+    differences += [n for n in sorted(files) if n not in built['files']]
+    if canonical_sha(built['key']['expectations']) != rows:
+        differences.append('the key\'s rows')
+    if canonical_sha({k: v for k, v in built['key']['facts'].items() if k != 'interpreter_sha256'}) != facts:
+        differences.append('the key\'s facts')
+    return differences
+
+
+
 # ---------- The two editions ----------
 
 # Edition 1 as it was (module a4b125cf…): the files, the key's rows and the facts (events, passages, names, readers) of four
@@ -3239,6 +3580,45 @@ EDITION1_PINS = {
               'sources/procedure.md': '85befebd9996ea33b529daacb9b1f4238b7d640fa9f8acbea4a1d3a1a032b14b'},
              'c5aba9a44715b7183a2eff6d2ff086e68094b9c53571102005ba3c895c1dbc3a',
              'c9d6a6fb4f0b90544836c94d5fd0c470f32155d167377eb16a9512574fce62bb'),
+}
+# Editions 2 to 5 as they were at commit 5d1ca73d (the commit edition 6 is built on; the module's output for these draws was identical to
+# this tree's, observed on 17 draws of editions 1 to 5 in separate processes): the files, the key's rows and the key's facts without the
+# interpreter's hash, by SHA-256, as for edition 1 above. Keyed (edition, seed, index): edition 2 is the dossier of five minute books.
+EDITION_PINS = {
+    (2, 8, 1): ({
+        'report-correct.md': '6c04d3cdfce3e5a4b0915e3ca26cd348355ac092d8320deddf0dc3efbae2ce0f',
+        'report-mixed.md': '29ca34e23af3b2b8db9869c5ae810fd9665c27a0b5d4038d3dd6a51a08b315ab',
+        'sources/minute-book-1.md': 'c25e5d579597bb6f4d4a04d453a695f0a09c6575f860727a006b5f7259c60867',
+        'sources/minute-book-2.md': '8cde8562b458d8d76ce883115b2ccd6af340040302eddaa82d548ca751d4a260',
+        'sources/minute-book-3.md': 'e593a63e2b4410db3c47ced94726c48531a718def1edbd8c032c445bf0c10168',
+        'sources/minute-book-4.md': '3aed212bf4627481ea627ac902363b878e439cbf38749f9f9f235f593c720a1c',
+        'sources/minute-book-5.md': 'db671a2f5545d08ecdf6be15320f562d2133a8f55ba2dc8519bf9303702a19ae',
+        'sources/procedure.md': '85befebd9996ea33b529daacb9b1f4238b7d640fa9f8acbea4a1d3a1a032b14b',
+    }, '7f92a188760e7213c556656eb688bc5e05e2e37212d504d48eadc57c457799da', '0b86bc3f5ec702093c0d28adedce998d49b04430ed616273fd64edebeffb8f06'),
+    (3, 1, 1): ({
+        'report-correct.md': 'bb0e143b853ca4198960c857801e9025a188fdd0f1808b24e7d87382caf67302',
+        'report-mixed.md': '61dd4f651074f4a001a9211a217a62d0989dcfb16215aee53590157db5286f5e',
+        'sources/minute-book-1.md': '02ffdc7894ce0be64c703c4ce30578d842217c18a77eff0957ddaa8f314a7dfb',
+        'sources/minute-book-2.md': '42db109e9d3272819a8b649edcf67e28ea213b3151458585fff736cc76318442',
+        'sources/minute-book-3.md': '46917676682e70649f5868b0d27c379019e05cda94872d8eb6cf3946f26c1c16',
+        'sources/procedure.md': 'bd1a348eb3e3d77e52620cdac9503c10e3b6403ae2d9e8a93b67575b7d7d4ec5',
+    }, '28385a2aa2485415428c1ffb0f394f79cdb81d0ca48d0cec4f23335deaa7ce2e', 'da0dc6b3403dd277620c0aa1b0a94de014057fadecfaf7335d7ba3e46b2c17c1'),
+    (4, 1, 1): ({
+        'report-correct.md': '9a87a04090810147a82a356d96a4128d1ff36c33d1d022f0093a842753690203',
+        'report-mixed.md': '88149fa6a87da5b3cc371aea2a07ae78dd6eccfff2aa3d432c86f19ea2db4489',
+        'sources/minute-book-1.md': '02ffdc7894ce0be64c703c4ce30578d842217c18a77eff0957ddaa8f314a7dfb',
+        'sources/minute-book-2.md': '42db109e9d3272819a8b649edcf67e28ea213b3151458585fff736cc76318442',
+        'sources/minute-book-3.md': '46917676682e70649f5868b0d27c379019e05cda94872d8eb6cf3946f26c1c16',
+        'sources/procedure.md': 'bd1a348eb3e3d77e52620cdac9503c10e3b6403ae2d9e8a93b67575b7d7d4ec5',
+    }, '1b236f67c7d9567f0eb4cc02989c579beded8dd6fb9168cf8aafc021d9b977c9', '001e11b6ab9004f23d9cd033e8ffb72cdf22603b0d658705825bb22d57b44f98'),
+    (5, 1, 1): ({
+        'report-correct.md': 'e79c8eaa678388a6e5609afb7aa1bd644b3b501e25e10478e174d7f4bf2cfffc',
+        'report-mixed.md': '9009bbdbcdb1127c4f0d53df75716aa2e294390ca6495832cef052e1b9b0ff2c',
+        'sources/minute-book-1.md': '02ffdc7894ce0be64c703c4ce30578d842217c18a77eff0957ddaa8f314a7dfb',
+        'sources/minute-book-2.md': '42db109e9d3272819a8b649edcf67e28ea213b3151458585fff736cc76318442',
+        'sources/minute-book-3.md': '46917676682e70649f5868b0d27c379019e05cda94872d8eb6cf3946f26c1c16',
+        'sources/procedure.md': '91789a50e53138ca3c550e03ef14c70a2f3a188ec77bf428247f44fc77e44eb7',
+    }, 'f5771f61cfdd27430ca66cbda5a6139f4c3e7d5f8b5dd75f475fcb3f87743ea6', '4a035be9dd2f6629875752602579ea4487668b3362f03995953d99d8d690babe'),
 }
 # Edition 2 draws that the unit tests build: every check runs on EDITION2_FULL (a dossier of five minute books), the cheaper
 # ones (size, mix, leads) on EDITION2_SEEDS too; the other draws are verified with `--verify` under BIG_MINUTES_EDITION=2.
@@ -3394,8 +3774,15 @@ CHECKS5 = (('round trip, sums and false sums', check_round_trip3), ('one referen
            ('depth', check_depth))
 
 
+CHECKS6 = CHECKS5 + (('dense world: payments, amounts, regular instalments, every way of stating an amount once', check_dense_rules),
+                     ('every event told once, with the values of the log', check_events_told),
+                     ('this evaluator and the interpreter agree at every close, truth and four readers', check_whole_base),
+                     ('the procedure is that of edition 5', check_procedure6),
+                     ('the same bytes in two other processes', check_second_process6))
+
+
 def checks_of(edition):
-    return CHECKS5 if edition >= 5 else CHECKS3 if edition >= 3 else CHECKS + (EDITION2_CHECKS if edition == 2 else ())
+    return CHECKS6 if edition == 6 else CHECKS5 if edition == 5 else CHECKS3 if edition >= 3 else CHECKS + (EDITION2_CHECKS if edition == 2 else ())
 
 
 def fixtures_folder(fixtures, seed, index):
@@ -3462,7 +3849,7 @@ def case_dossier(seed, edition, index=1):
 
 
 def write_fixtures(built, parent):
-    folder = Path(tempfile.mkdtemp(prefix='big-minutes-edition-', dir=str(parent)))
+    folder = scratch_folder('big-minutes-edition-', parent)
     for name, text in built['files'].items():
         target = folder / built['dossier'] / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -3750,6 +4137,7 @@ class BigMinutesTest(unittest.TestCase):
                     big_minutes.current_edition()
                 with self.assertRaises(generate.GenerationError, msg=repr(raw)):
                     generate.build_case('minutes', 1, 1)
+        self.assertEqual(big_minutes.EDITIONS, (1, 2, 3, 4, 5, 6))             # the editions that exist: the list is pinned
         default = build_with_facts(1, 1)
         with edition_env(1):
             one = build_with_facts(1, 1)
@@ -3801,7 +4189,7 @@ class BigMinutesTest(unittest.TestCase):
                 shutil.rmtree(folder)
 
     def test_verify_refuses_fixtures_of_the_other_edition(self):
-        for made_under, asks in ((2, None), (2, 1), (1, 2), (2, 3), (2, 4), (3, 2), (4, 2), (2, 5), (5, 2)):
+        for made_under, asks in ((2, None), (2, 1), (1, 2), (2, 3), (2, 4), (3, 2), (4, 2), (2, 5), (5, 2), (1, 6), (3, 6), (4, 6), (5, 6)):
             with edition_env(made_under):
                 folder = write_fixtures(case(1), ROOT / 'tmp')
             try:
@@ -3849,7 +4237,7 @@ class BigMinutesTest(unittest.TestCase):
     def test_edition_does_not_reach_answer(self):
         """The hand-written lists and `answer` on an edition 2 dossier are the same whatever the setting says."""
         results = []
-        for setting in (None, 1, 2):
+        for setting in (None, 1, 2, 6):
             with edition_env(setting):
                 results.append(check_hand_cases())
         self.assertEqual(len(set(results)), 1)
@@ -3857,7 +4245,7 @@ class BigMinutesTest(unittest.TestCase):
             events, queries = made_of(1)['events'], statement_queries(1)
             expected = [big_minutes.answer(q, events, r) for q in queries.values() for r in (None,) + big_minutes.READERS]
             check_answers(1)
-        for setting in (None, 1):
+        for setting in (None, 1, 6):
             with edition_env(setting):
                 self.assertEqual([big_minutes.answer(q, events, r) for q in queries.values() for r in (None,) + big_minutes.READERS], expected)
 
@@ -3960,12 +4348,12 @@ class BigMinutesTest(unittest.TestCase):
         events = facts['events']
         sources = sources_of(built)
         books = sorted(n for n in sources if n.startswith('minute-book-'))
-        meetings = len({e['date'] for e in events if e['kind'] != 'names'} | {e['date'] for e in events})
+        dates_with_events = len({e['date'] for e in events})          # the dates the log has an event at: a meeting may hold none (seed 1: 43 of 44)
         self.assertIn(len(books), (4, 5))
         self.assertEqual(sorted(sources), sorted(['procedure.md'] + books))
         self.assertTrue(430000 <= sum(len(t) for t in sources.values()) <= 510000)
         self.assertTrue(36 <= len(facts['names']) <= 40, len(facts['names']))
-        self.assertTrue(40 <= meetings <= 48, meetings)
+        self.assertTrue(43 <= dates_with_events <= 48, dates_with_events)
         pays = [e for e in events if e['kind'] == 'pay']
         per_project = collections.Counter(e['subject'] for e in pays)
         self.assertTrue(400 <= len(pays) <= 800, len(pays))
@@ -3980,6 +4368,450 @@ class BigMinutesTest(unittest.TestCase):
             kinds = collections.Counter(r['claim_kind'][len('minutes_'):] for r in key_rows(built, variant))
             singles = sum(kinds.pop(k, 0) for k in SINGLES)
             self.assertEqual({**kinds, 'single': singles}, {k: v for k, v in EXPECTED_QUOTAS[6].items() if v}, variant)
+
+    def test_edition_6_is_read_back_from_its_text(self):
+        """The one dense dossier the unit suite builds (the cache of `facts_built`: no second build), read once by this module's own
+        parser, is held to the rules of the edition: no unreadable sentence, every statement of both reports and every flawed reader's
+        verdict recomputed from the text (false sums included), the quota table and the rules of choice written out in this module, every
+        reader wrong on four statements, 8 to 12 altered statements, the world and its density, the amounts, every event told once with
+        the values of the log, this evaluator against the interpreter at every close, the text rules and the procedure of edition 5."""
+        with edition_env(6):
+            built, book, runs, readers = dense_view(ED_SEED)
+            sources, count = sources_of(built), len(book.meetings)
+            self.assertEqual(book.errors, [])
+            self.assertTrue(3 <= len(readers) <= 4 and set(readers) <= set(READERS + ('full_name_only',)), readers)
+            print('edition 6, round trip:', round_trip3(built, book, runs, readers))
+            both = statements_in(built, book)
+            quota_rules(6, count, both, {v: key_rows(built, v) for v in both})
+            uses = choice_rules(6, count, runs, book.projects, both, book)
+            print(f'edition 6, rules of choice: named sums over {len(uses)} projects, each used {min(uses.values())} to {max(uses.values())} times')
+            print('edition 6, readers:', readers_wrong(both, book.projects, runs, readers))
+            altered = sum(a != b for a, b in zip(report_statements(built, 'correct'), report_statements(built, 'mixed')))
+            self.assertTrue(ALTERED[0] <= altered <= ALTERED[1], altered)
+            for step in (world6(built, book, sources), dense_rules(book, runs), stated_values_positive_whole(both), events_told(built, book), whole_base_agrees(built, book, runs),
+                         text_rules5(sources, book), no_running_totals(sources), procedure6_is_that_of_5(sources['procedure.md'])):
+                print('edition 6:', step)
+
+    def test_the_rules_of_edition_6_see_a_broken_world(self):
+        """Negative controls of the new checks, on copies of the dense dossier's facts (the text is not read again): each planted defect
+        must be refused, the undamaged dossier not."""
+        with edition_env(6):
+            built, book, runs, readers = dense_view(ED_SEED)
+        sources, count = sources_of(built), len(book.meetings)
+
+        def doctored(change):
+            facts = [dict(f, spec=dict(f['spec'])) if 'spec' in f else dict(f) for f in book.facts]
+            change(facts, [f for f in facts if f['t'] == 'pay'])
+            changed = copy.copy(book)
+            changed.facts = facts
+            return changed, runs_of(changed)
+
+        def later(facts, kind='pay'):
+            """The payments of the doctored facts of each paid project, in the order of the minutes."""
+            out = collections.defaultdict(list)
+            for f in sorted((f for f in facts if f['t'] == 'pay'), key=lambda f: (f['m'], f['order'])):
+                out[f['p']].append(f)
+            return out
+        dense_rules(book, runs)                                                       # undamaged: passes
+
+        def refused(message, change):
+            changed, changed_runs = doctored(change)
+            with self.assertRaisesRegex(Failed, message):
+                dense_rules(changed, changed_runs)
+
+        def too_many(facts, pays):                                  # a 21st payment to a project
+            items = later(facts, 'pay')
+            last = max(items.values(), key=len)[-1]
+            facts.append(dict(last, spec=dict(last['spec']), order=(last['order'][0], last['order'][1] + 1)))
+            facts.append(dict(last, spec=dict(last['spec']), order=(last['order'][0], last['order'][1] + 2)))
+        refused(r'\d+ payments to ', too_many)
+
+        def pay_of(facts, kind, no_balance=False):
+            """A payment of `kind`, not the first of its project (of a project whose award is not paid off by a balance payment if asked)."""
+            return next(f for items in later(facts, 'pay').values() for f in items[1:] if f['spec']['type'] == kind
+                        and not (no_balance and any(g['spec']['type'] == 'balance' for g in items)))
+        refused('not a whole number of pounds, or is under 1,000', lambda facts, pays: pay_of(facts, 'abs')['spec'].update(amount=999))
+        refused('not a whole number of pounds, or is under 1,000',
+                lambda facts, pays: pay_of(facts, 'frac_award')['spec'].update(frac=fractions.Fraction(7001, 7003)))
+        refused('more paid to', lambda facts, pays: pay_of(facts, 'abs', True)['spec'].update(amount=10 ** 6))
+        refused('holds no award at|is not established', lambda facts, pays: pay_of(facts, 'first')['spec'].update(type='ordinal', k=5))   # an amount that is not established
+
+        def ordinal_twice(facts, pays):                             # an ordinal payment, and a later one of the project stated the same way
+            for items in later(facts, 'pay').values():
+                ordinals = [i for i, f in enumerate(items) if f['spec']['type'] == 'ordinal']
+                firsts = [i for i, f in enumerate(items) if f['spec']['type'] == 'first' and ordinals and i > ordinals[0]]
+                if firsts:
+                    items[firsts[0]]['spec'].clear()
+                    items[firsts[0]]['spec'].update(items[ordinals[0]]['spec'])
+                    return
+            raise AssertionError('no project with an ordinal payment and a later payment stated as the first instalment')
+        refused('in the same way twice', ordinal_twice)
+
+        def irregular(facts, pays):                                 # a first instalment of 1,000 against an award of tens of thousands
+            next(items for items in later(facts, 'pay').values())[0]['spec'].update(amount=1000)
+        refused('is not regular', irregular)
+
+        def corrected_early(facts, pays):                           # a correction of the second payment
+            fix = next(f for f in facts if f['t'] == 'correct' and f['target'] == 'pay')
+            fix['when'] = later(facts, 'pay')[fix['p']][1]['m']
+        refused('only a payment from the sixth on is corrected', corrected_early)
+
+        def no_first(facts, pays):                                  # every "first instalment" stated in pounds instead
+            firsts = {p: items[0]['spec']['amount'] for p, items in later(facts, 'pay').items()}
+            for f in pays:
+                if f['spec']['type'] == 'first':
+                    f['spec'] = {'type': 'abs', 'amount': firsts[f['p']]}
+        refused('is not the commonest way', no_first)
+
+        def balance_early(facts, pays):                             # the balance of the award as the second payment of a project
+            for items in later(facts, 'pay').values():
+                if items[-1]['spec']['type'] == 'balance':
+                    items[1]['spec'].clear()
+                    items[1]['spec'].update(type='balance')
+                    return
+        refused('is not the last payment of', balance_early)
+        # a project that is neither paid nor rescinded
+        paid = next(iter(payments_by_project(book)))
+        changed, changed_runs = doctored(lambda facts, pays: facts.__setitem__(slice(None), [f for f in facts if not (f['t'] == 'pay' and f['p'] == paid)]))
+        with self.assertRaisesRegex(Failed, 'has no payment and no rescission'):
+            dense_rules(changed, changed_runs)
+        # a first payment that is not stated in pounds
+        refused('not in pounds', lambda facts, pays: later(facts)[next(iter(later(facts)))][0].__setitem__('spec', {'type': 'first'}))
+
+        def first_of_before(facts, pays):                           # a payment that repeats the first instalment of a project paid first later
+            items = later(facts)
+            f = min((f for fs in items.values() for f in fs if f['spec']['type'] == 'first_of'), key=lambda f: f['m'])
+            f['spec']['other'] = next(p for p, fs in items.items() if p != f['p'] and fs[0]['m'] > f['m'])
+        refused('paid at a meeting not before', first_of_before)
+
+        def small_award(facts, pays):                               # an award under 1,000 (of a rescinded project: nothing is paid on it)
+            rescinded = next(f['p'] for f in facts if f['t'] == 'rescind')
+            next(f for f in facts if f['t'] == 'award' and f['p'] == rescinded)['amount'] = 900
+        refused('a stated amount under 1,000', small_award)
+
+        def few(facts, pays):                                       # eight payments where the calendar allows sixteen or more
+            items = later(facts)
+            gone = {id(f) for f in next(fs for fs in items.values() if len(fs) >= 16)[8:]}
+            facts[:] = [f for f in facts if id(f) not in gone]
+        refused('the calendar allows', few)
+
+        def rescinded_late(facts, pays):                            # a paid project whose award does not stand at every close from its first payment
+            facts.append({'t': 'rescind', 'm': count - 2, 'p': next(iter(later(facts))), 'key': (0, 0), 'order': ((0, 0), 0), 'full': True})
+        refused('holds no award at', rescinded_late)
+        # the calendar the headings give
+        events = built['key']['facts']['events']
+        calendar_of(book, events)
+        for what, damage, message in (('no day', lambda b: setattr(b, 'meetings', [(y, m, None) for y, m, _ in b.meetings]), 'heading without a day'),
+                                      ('order', lambda b: setattr(b, 'meetings', list(reversed(b.meetings))), 'not in the order of the calendar')):
+            damaged = copy.copy(book)
+            damage(damaged)
+            with self.assertRaisesRegex(Failed, message):
+                calendar_of(damaged, events)
+        with self.assertRaisesRegex(Failed, 'no heading'):
+            calendar_of(book, events + [dict(events[0], date='1999-01-01')])
+        # two awards at one of the first fourteen meetings
+        early_awards_once(book)
+        early = next(f for f in book.facts if f['t'] == 'award' and f['m'] < EARLY_AWARD_MEETINGS)
+        two = copy.copy(book)
+        two.facts = book.facts + [dict(early, p=next(p for p in book.projects if p != early['p']))]
+        with self.assertRaisesRegex(Failed, 'two awards at meeting'):
+            early_awards_once(two)
+        # no sentence is said twice
+        said = copy.copy(book)
+        said.facts = book.facts + [dict(next(f for f in book.facts if f['t'] == 'pay'))]
+        with self.assertRaisesRegex(Failed, 'said twice'):
+            sentences_once(said)
+        self.assertGreater(sentences_once(book), 600)
+        # a stated value that is not a positive whole number, true or false
+        both = statements_in(built, book)
+        stated_values_positive_whole(both)
+        for change in (dict(value=0), dict(value=fractions.Fraction(3, 2)), dict(value=-5)):
+            zero = copy.deepcopy(both)
+            next(st for st in zero['mixed'] if st['shape'] == 'single' and st['kind'] != 'first').update(change)
+            with self.assertRaisesRegex(Failed, 'not a positive whole number'):
+                stated_values_positive_whole(zero)
+        # every event told once, with the values of the log
+        events_told(built, book)
+        gone = copy.copy(book)
+        gone.facts = [f for f in book.facts if f is not next(g for g in book.facts if g['t'] == 'pay')]
+        with self.assertRaisesRegex(Failed, 'tell different events'):
+            events_told(built, gone)
+        changed, _ = doctored(lambda facts, pays: pay_of(facts, 'abs')['spec'].update(amount=1500))
+        with self.assertRaisesRegex(Failed, 'does not carry the values of the log'):
+            events_told(built, changed)
+        # this evaluator and the interpreter agree at every close
+        whole_base_agrees(built, book, runs)
+        changed, changed_runs = doctored(lambda facts, pays: pay_of(facts, 'abs')['spec'].update(amount=pay_of(facts, 'abs')['spec']['amount'] + 1000))
+        with self.assertRaisesRegex(Failed, 'by the interpreter and'):
+            whole_base_agrees(built, changed, changed_runs)
+        # the world and its density
+        world6(built, book, sources)
+        with self.assertRaisesRegex(Failed, 'sources'):
+            world6(built, book, {n: t for n, t in sources.items() if n != 'minute-book-2.md'})
+        thin = copy.copy(book)
+        thin.facts = [f for f in book.facts if not (f['t'] == 'pay' and f['m'] % 3 == 0)]
+        with self.assertRaisesRegex(Failed, 'payments in all|have 14 or more'):
+            world6(built, thin, sources)
+        sparse = copy.copy(book)
+        sparse.facts = [f for f in book.facts if not (f['t'] == 'pay' and f['order'][1] % 2)]
+        with self.assertRaisesRegex(Failed, 'payments in all|have 14 or more'):
+            world6(built, sparse, sources)
+        dear = copy.copy(book)
+        busiest = max(payments_by_project(book).items(), key=lambda item: len(item[1]))[0]
+        dear.facts = book.facts + [dict(f) for f in book.facts if f['t'] == 'pay' and f['p'] == busiest]
+        with self.assertRaisesRegex(Failed, r'a project with \d\d payments'):
+            world6(built, dear, sources)
+        twice = copy.copy(book)
+        twice.facts = book.facts + [next(f for f in book.facts if f['t'] == 'intro')]
+        with self.assertRaisesRegex(Failed, 'used twice'):
+            world6(built, twice, sources)
+        with self.assertRaisesRegex(Failed, 'names other volumes'):
+            world6(dict(built, files=dict(built['files'], **{'report-mixed.md': built['files']['report-mixed.md'].replace('volumes 1 to', 'volumes 2 to')})), book, sources)
+        # a reader that is no worse than the truth is wrong on no statement
+        both = statements_in(built, book)
+        readers_wrong(both, book.projects, runs, readers)
+        with self.assertRaisesRegex(Failed, 'is wrong on only 0 statements'):
+            readers_wrong(both, book.projects, dict(runs, **{readers[0]: runs['truth']}), readers)
+        # the procedure is that of edition 5
+        procedure6_is_that_of_5(sources['procedure.md'])
+        with self.assertRaisesRegex(Failed, 'is not that of edition 5'):
+            procedure6_is_that_of_5(sources['procedure.md'] + 'An added sentence.\n')
+        # the same bytes in another process
+        same_in_second_process(built, json.loads(json.dumps(built)))
+        with self.assertRaisesRegex(Failed, 'is not the one built here'):
+            same_in_second_process(built, dict(json.loads(json.dumps(built)), dossier='another'))
+        # a running total in a minute book
+        with self.assertRaisesRegex(Failed, 'a running total'):
+            no_running_totals(dict(sources, **{'minute-book-1.md': sources['minute-book-1.md'] + '\nThe payments to date came to a great deal.\n'}))
+
+    def test_the_rules_of_choice_and_quota_see_a_broken_dense_dossier(self):
+        """Negative controls of the quota table and the rules of choice of edition 6, on doctored statement lists of the dense dossier."""
+        with edition_env(6):
+            built, book, runs, readers = dense_view(ED_SEED)
+        both, count, projects, truth = statements_in(built, book), len(book.meetings), book.projects, runs['truth']
+        rows = {v: key_rows(built, v) for v in both}
+        choice_rules(6, count, runs, projects, both, book)
+        quota_rules(6, count, both, rows)
+
+        def doctored(rung, edit, which=None):
+            out = copy.deepcopy(both)
+            for variant in out:
+                items = [st for st in out[variant] if rung_of(st, count) == rung]
+                for number, st in enumerate(items):
+                    if which is None or number in which:
+                        edit(st, number, items)
+            return out
+        # the eight upto sums are at eight different meetings: two of them (of different figures, so that they are not the same statement)
+        # at one meeting, where the sum is still a good value
+        upto = [st for st in both['correct'] if rung_of(st, count) == 'upto']
+        self.assertEqual(len({st['until'] for st in upto}), 8)
+        other = next(i for i, st in enumerate(upto) if st['figure'] != upto[0]['figure'] and good_figure(
+            st['figure'], sum_of(truth, projects, dict(st, until=upto[0]['until']))))
+        with self.assertRaisesRegex(Failed, 'do not use eight different meetings'):
+            choice_rules(6, count, runs, projects, doctored('upto', lambda st, n, items: st.update(until=items[0]['until']), {other}), book)
+        with self.assertRaisesRegex(Failed, 'the same statement'):               # the same two with one figure
+            choice_rules(6, count, runs, projects, doctored('upto', lambda st, n, items: st.update(
+                {k: v for k, v in items[0].items() if k not in ('value', 'value_span', 'text')}) if n == other else None), book)
+        with self.assertRaisesRegex(Failed, 'an upto sum at meeting'):
+            choice_rules(6, count, runs, projects, doctored('upto', lambda st, n, items: st.update(until=3 * count // 5 - 1), {0}), book)
+        # the figures of a rung: only totals where half should be numbers of payments
+        for rung in ('sum8', 'upto'):
+            with self.assertRaisesRegex(Failed, 'has \\{'):
+                choice_rules(6, count, runs, projects, doctored(rung, lambda st, n, items: st.update(figure='total')), book)
+        # the rungs that are not asked: the number of projects holding an award, a span of three meetings, a sum of awards up to a meeting
+        extra = {'shape': 'single', 'kind': 'projects', 'who': None, 'until': count // 3, 'value': 5, 'text': 'After a meeting, 5 projects held an award in force.'}
+        with_projects = {v: sts + [extra] for v, sts in both.items()}
+        with self.assertRaisesRegex(Failed, 'the text shows'):
+            quota_rules(6, count, with_projects, rows)
+        with self.assertRaisesRegex(Failed, 'projects statements are not one in the first and one in the last third'):
+            choice_rules(6, count, runs, projects, with_projects, book)
+        with self.assertRaisesRegex(Failed, 'the text shows'):
+            quota_rules(6, count, doctored('span6', lambda st, n, items: st.update(since=st['until'] - 3), {0}), rows)
+        with self.assertRaisesRegex(Failed, 'the text shows'):
+            quota_rules(6, count, doctored('upto', lambda st, n, items: st.update(figure='award'), {0}), rows)
+        # a statement too few; a claim kind that is not the one the text shows
+        lacking = copy.deepcopy(both)
+        lacking['correct'].pop()
+        with self.assertRaisesRegex(Failed, 'the text shows'):
+            quota_rules(6, count, lacking, rows)
+        with self.assertRaisesRegex(Failed, 'the claim kinds are not those'):
+            quota_rules(6, count, both, {v: [dict(r, claim_kind='minutes_upto') if r['claim_kind'] == 'minutes_book' else r for r in rows[v]] for v in rows})
+        # a named sum over eight projects of two payments each, at a meeting outside the last third
+        for early in range((2 * count - 1) // 3, 0, -1):
+            pool = [n for n in projects if truth[('count', n, early)] >= 2]
+            if len(pool) >= 8:
+                break
+        self.assertLess(3 * early, 2 * count)
+        with self.assertRaisesRegex(Failed, 'not in the last third'):
+            choice_rules(6, count, runs, projects, doctored('sum8', lambda st, n, items: st.update(until=early, names=pool[:8]), {0}), book)
+        # a sum that is not a good value, and a stated value that is not positive
+        with self.assertRaisesRegex(Failed, 'states a value that is not positive'):
+            choice_rules(6, count, runs, projects, doctored('book', lambda st, n, items: st.update(value=0), {0}), book)
+
+    def test_edition_6_is_the_same_bytes_in_another_process(self):
+        """One process only (the check of `--verify` runs two): the dense dossier with its facts, built by a new process with another
+        string-hash seed, is the one built here (the unit suite builds it once; this builds the same draw a second time)."""
+        with edition_env(6):
+            built = facts_built(ED_SEED)
+        same_in_second_process(built, build_in_another_process(6, ED_SEED, 1, '4242'))
+
+    def test_editions_2_to_5_are_as_they_were_at_commit_5d1ca73d(self):
+        """The pins of editions 2 to 5 (files, key rows and key facts of one draw each, from the module of commit 5d1ca73d), as
+        `test_edition_1_is_unchanged` pins edition 1: edition 6 must not have changed them. The pins see a changed file, row or fact."""
+        for (edition, seed, index), pin in EDITION_PINS.items():
+            with edition_env(edition):
+                built = facts_built(seed, index)
+            self.assertEqual(pin_differences(built, pin), [], (edition, seed, index))
+        with edition_env(5):
+            five = facts_built(ED_SEED)
+        pin = EDITION_PINS[(5, 1, 1)]
+        damaged = dict(five, files=dict(five['files'], **{'report-mixed.md': five['files']['report-mixed.md'] + ' '}))
+        self.assertEqual(pin_differences(damaged, pin), ['report-mixed.md'])
+        damaged = dict(five, key=dict(five['key'], expectations=five['key']['expectations'][:-1]))
+        self.assertEqual(pin_differences(damaged, pin), ['the key\'s rows'])
+        damaged = dict(five, key=dict(five['key'], facts=dict(five['key']['facts'], size=7)))
+        self.assertEqual(pin_differences(damaged, pin), ['the key\'s facts'])
+        self.assertEqual(sorted(EDITION_PINS), [(2, 8, 1), (3, 1, 1), (4, 1, 1), (5, 1, 1)])
+
+    def test_the_check_lists_of_editions_5_and_6(self):
+        """Seed-free: edition 6's list is edition 5's (32 checks, unchanged) and the new checks of the dense world; nothing else is added to
+        edition 5's list."""
+        self.assertEqual(len(CHECKS5), 32)
+        self.assertIs(checks_of(5), CHECKS5)
+        self.assertIs(checks_of(6), CHECKS6)
+        self.assertEqual(CHECKS6[:len(CHECKS5)], CHECKS5)
+        self.assertEqual([c for _, c in CHECKS6[len(CHECKS5):]], [check_dense_rules, check_events_told, check_whole_base, check_procedure6, check_second_process6])
+        self.assertEqual(len({name for name, _ in CHECKS6}), len(CHECKS6))
+        for edition in (3, 4):
+            self.assertIs(checks_of(edition), CHECKS3)
+
+    def test_the_scratch_folder_is_made_with_its_parent(self):
+        """`check_pipeline` and the tests that write fixtures work in a clone or worktree that has no `tmp` folder."""
+        with tempfile.TemporaryDirectory() as base:
+            parent = Path(base) / 'missing' / 'tmp'
+            self.assertFalse(parent.exists())
+            folder = scratch_folder('probe-', parent)
+            self.assertTrue(folder.is_dir() and folder.parent == parent)
+            self.assertEqual(write_fixtures({'dossier': 'd', 'files': {'a.md': 'x'}}, Path(base) / 'again' / 'tmp').name[:len('big-minutes-edition-')],
+                             'big-minutes-edition-')
+            # and the real pipeline check, in a tree with no `tmp` folder (an edition 5 dossier: the cheapest the check takes)
+            import unittest.mock as mock
+            tree = Path(base) / 'clone'
+            tree.mkdir()
+            with mock.patch.object(sys.modules[__name__], 'ROOT', tree), edition_env(5):
+                self.assertFalse((tree / 'tmp').exists())
+                self.assertIn('read_keys accepts 48 rows', check_pipeline(ED_SEED))
+            self.assertEqual([p.name for p in (tree / 'tmp').iterdir()], [])         # the check made `tmp` and removed its own folder
+
+    def test_fixtures_of_edition_6_have_four_or_five_minute_books(self):
+        """`fixtures_refusal` for edition 6 and the shape of a folder (no dossier is built): a folder with a fourth minute book is not
+        refused by editions 2 and 6 and is by the others; one without is refused by editions 2 and 6 and not by the others."""
+        with tempfile.TemporaryDirectory() as base:
+            three, four = Path(base) / 'three', Path(base) / 'four'
+            for folder in (three, four):
+                (folder / 'sources').mkdir(parents=True)
+            (four / 'sources' / 'minute-book-4.md').write_text('x', encoding='utf-8')
+            for edition in (1, 3, 4, 5):
+                with edition_env(edition):
+                    self.assertIsNone(fixtures_refusal(three, edition), edition)
+                    self.assertIn('made under edition 2 (it has minute-book-4.md; edition 6 has four or five minute books too)', fixtures_refusal(four, edition))
+            for edition in (2, 6):
+                with edition_env(edition):
+                    self.assertIsNone(fixtures_refusal(four, edition), edition)
+                    self.assertIn('made under edition 1, 3, 4 or 5', fixtures_refusal(three, edition))
+
+    def test_a_rejected_paying_plan_leaves_no_first_instalment_behind(self):
+        """Regression test of `draw_log` under edition 6 (no dossier is built: one log is drawn). A plan of a project that pays is
+        rejected by the interpreter, and the project is then drawn again as one that pays nothing (a rescinded one): the first payment
+        the rejected plan recorded for other projects to repeat must be gone, or a later project states a payment through the first
+        instalment of a project that has none. The rejection and the second plan are forced as the fixer's scratch script did."""
+        import unittest.mock as mock
+        rng = random.Random(5)
+        dates, projects = big_minutes.draw_calendar(rng, 6), big_minutes.draw_projects(rng, 6)
+        real_plan, real_run = big_minutes.plan_project6, big_minutes._run
+        seen = {'entry': [], 'runs': 0, 'calls0': 0}
+
+        def plan(rng_, p, projects_, dates_, events, busy, firsts):
+            seen['entry'].append((p, 0 in firsts))                 # does the first-payment map still name project 0?
+            if p == 0:
+                seen['calls0'] += 1
+                if seen['calls0'] == 2:                            # the second plan of project 0 pays nothing (it is rescinded)
+                    for _ in range(500):
+                        out = real_plan(rng_, p, projects_, dates_, events, busy, dict(firsts))
+                        if out is not None and not any(e['kind'] == 'pay' for e in out):
+                            return out
+                    raise AssertionError('no plan without a payment in 500 draws')
+            return real_plan(rng_, p, projects_, dates_, events, busy, firsts)
+
+        def run(candidate, *args, **kwargs):
+            seen['runs'] += 1
+            return (None, ['forced rejection']) if seen['runs'] == 1 else real_run(candidate, *args, **kwargs)
+        with mock.patch.object(big_minutes, 'plan_project6', plan), mock.patch.object(big_minutes, '_run', run):
+            events = big_minutes.draw_log(rng, projects, dates, 6)
+        self.assertIsNotNone(events)
+        self.assertGreaterEqual(seen['calls0'], 2)
+        self.assertEqual([p for p, named in seen['entry'] if named], [], 'a plan was drawn while the map held a first payment of project 0')
+        paid = {e['subject'] for e in events if e['kind'] == 'pay'}
+        self.assertNotIn(projects[0]['full'], paid)
+        through = [e['spec']['other'] for e in events if e['kind'] == 'pay' and e['spec']['type'] == 'first_of']
+        self.assertTrue(through, 'no payment is stated through another project\'s first instalment: the test sees nothing')
+        self.assertLessEqual(set(through), paid)                    # every first instalment repeated is one that was paid
+
+    def test_the_generator_enforces_the_payments_of_edition_6(self):
+        """The generator hands out only an edition-6 dossier with 450 to 700 payments and no sentence said twice (`PAYMENTS6`, and the
+        flag `ctx['repeated']` that `sentence` sets when its 60 redraws all repeat; both tested by `attempt` after its last use of the
+        random source). `world6`'s two numbers are `PAYMENTS6`, compared with literals written here; an attempt under a range no world
+        meets, and an attempt in which a sentence gives up, hand out nothing, and the same attempt under the real range hands out the
+        cached dossier (two further attempts on the draw of seed 1 are built here: about two seconds each)."""
+        import unittest.mock as mock
+        self.assertEqual(big_minutes.PAYMENTS6, (450, 700))
+        self.assertEqual(PAYMENT_BOUNDS, (450, 700))
+        self.assertEqual(PAYMENT_BOUNDS, tuple(big_minutes.PAYMENTS6))
+        with edition_env(6):
+            built, book, runs, readers = dense_view(ED_SEED)
+            events = built['key']['facts']['events']
+            pays = sum(e['kind'] == 'pay' for e in events)
+            self.assertTrue(big_minutes.PAYMENTS6[0] <= pays <= big_minutes.PAYMENTS6[1], pays)
+            stream = lambda: random.Random(f'evalsuite:{generate.GENERATOR_VERSION}:{ED_SEED}:1:minutes')    # noqa: E731
+            real = big_minutes.attempt(stream(), 6)                      # the first attempt of the draw the cached dossier comes from
+            self.assertIsNotNone(real, 'the first attempt of seed 1 is refused: pick another draw for this test')
+            self.assertEqual(sum(e['kind'] == 'pay' for e in real['events']), pays)
+            with mock.patch.object(big_minutes, 'PAYMENTS6', (10 ** 6, 10 ** 6 + 1)):
+                self.assertIsNone(big_minutes.attempt(stream(), 6))
+            real_sentence = big_minutes.sentence
+
+            def gives_up(rng, e, ctx, anaphor=None):
+                text = real_sentence(rng, e, ctx, anaphor)
+                ctx['repeated'] = ctx['repeated'] or ctx['edition'] == 6 and len(ctx['said']) > 100      # as if its 60 redraws had all repeated
+                return text
+            with mock.patch.object(big_minutes, 'sentence', gives_up):
+                self.assertIsNone(big_minutes.attempt(stream(), 6))
+        # the flag itself, with no dossier: `sentence` sets it when every redraw says what the dossier has said
+        ctx = {'edition': 6, 'said': set(), 'last_form': None, 'repeated': False}
+        with mock.patch.object(big_minutes, 'sentence_once', lambda rng, e, ctx, anaphor=None: 'The same sentence.'):
+            self.assertEqual(big_minutes.sentence(random.Random(1), {}, ctx), 'The same sentence.')
+            self.assertFalse(ctx['repeated'])                            # said for the first time
+            self.assertEqual(big_minutes.sentence(random.Random(1), {}, ctx, 'the matter above'), 'The same sentence.')
+            self.assertTrue(ctx['repeated'])                             # said again, and no redraw differs: the dossier is refused
+        ctx = {'edition': 6, 'said': set(), 'last_form': None, 'repeated': False}
+        texts = iter(f'Sentence {n}.' for n in range(1000))
+        with mock.patch.object(big_minutes, 'sentence_once', lambda rng, e, ctx, anaphor=None: next(texts)):
+            for _ in range(5):
+                big_minutes.sentence(random.Random(1), {}, ctx)
+        self.assertFalse(ctx['repeated'])                                # redraws that differ never set it
+        # world6's numbers are the generator's: 449 and 701 payments are refused, 450 and 700 are not refused for their number
+        with edition_env(6):
+            for total, refused in ((449, True), (450, False), (700, False), (701, True)):
+                doctored = copy.copy(book)
+                have = [f for f in book.facts if f['t'] == 'pay']
+                rest = [f for f in book.facts if f['t'] != 'pay']
+                doctored.facts = rest + [dict(have[i % len(have)], order=(have[i % len(have)]['order'][0], i)) for i in range(total)]
+                try:
+                    world6(built, doctored, sources_of(built))
+                    message = ''
+                except Failed as error:
+                    message = str(error)
+                self.assertEqual('payments in all' in message, refused, (total, message))
 
     def test_the_inventory_tables_are_those_of_the_supplement(self):
         self.assertEqual({e: dict(t) for e, t in INV['sum_quotas'].items()}, EXPECTED_QUOTAS)
@@ -4133,7 +4965,7 @@ class BigMinutesTest(unittest.TestCase):
         print('hand-written award-side sums:', check_hand_award_sums())
         print('evaluator on the hand-written award-side sums:', check_evaluator_on_hand_award_cases())
         results = []
-        for setting in (None, 1, 2, 5):                                    # `answer` does not read the edition variable
+        for setting in (None, 1, 2, 5, 6):                                  # `answer` does not read the edition variable
             with edition_env(setting):
                 results.append(check_hand_award_sums())
         self.assertEqual(len(set(results)), 1)
@@ -4350,28 +5182,35 @@ class BigMinutesTest(unittest.TestCase):
             # no balance statement of the dossier says "fully paid"
             self.assertNotIn('fully paid', ' '.join(st['text'] for st in both['correct'] if st['shape'] != 'single' and st['figure'] == 'balance'))
 
-    def test_the_six_files_are_those_of_commit_7e4beca9(self):
-        """Item 9 of the design, where the commit is in the history of this repository: the six files the build must not touch are
-        those of commit 7e4beca9 (the command is in the docstring of this module)."""
+    def test_the_six_files_are_those_of_commits_7e4beca9_and_5d1ca73d(self):
+        """Item 9 of the design, where the commits are in the history of this repository: the six files the build must not touch are
+        those of commit 7e4beca9 (edition 5's base) and of 5d1ca73d (edition 5 itself, the commit edition 6 is built on); the commands
+        are in the docstring of this module. A commit that is not in this repository's history is reported as skipped by name, and
+        at least one of the two must be there."""
         files = ('evalsuite/check_shown.py', 'evalsuite/generate_big.py', 'evalsuite/generate.py', 'evalsuite/run_blind.py',
                  'evalsuite/prompts/task-shown-sums.md', 'evalsuite/arms-shown-sums.json')
         try:
             top = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=ROOT, capture_output=True, text=True)
-            known = subprocess.run(['git', 'cat-file', '-e', '7e4beca9^{commit}'], cwd=ROOT, capture_output=True)
+            known = {commit: subprocess.run(['git', 'cat-file', '-e', f'{commit}^{{commit}}'], cwd=ROOT, capture_output=True).returncode == 0
+                     for commit in ('7e4beca9', '5d1ca73d')}
         except OSError:
             self.skipTest('git is not available')
         if top.returncode != 0 or Path(top.stdout.strip()).resolve() != ROOT:
             self.skipTest(f'{ROOT} is not the top of its own git repository (git resolves {top.stdout.strip() or "none"}): '
                           'the comparison would be vacuous')
-        if known.returncode != 0:
-            self.skipTest('commit 7e4beca9 is not in this repository')
-        for name in files:        # the blob of each file as committed at 7e4beca9 against the file in this tree
-            want = subprocess.run(['git', 'rev-parse', f'7e4beca9:{name}'], cwd=ROOT, capture_output=True, text=True)
-            have = subprocess.run(['git', 'hash-object', '--', name], cwd=ROOT, capture_output=True, text=True)
-            self.assertEqual((want.returncode, have.returncode), (0, 0), name)
-            self.assertEqual(have.stdout.strip(), want.stdout.strip(), f'{name} differs from commit 7e4beca9')
-        done = subprocess.run(['git', 'diff', '--quiet', '7e4beca9', '--'] + list(files), cwd=ROOT, capture_output=True)
-        self.assertEqual(done.returncode, 0, 'one of the six files differs from commit 7e4beca9')
+        if not any(known.values()):
+            self.skipTest('neither commit 7e4beca9 nor 5d1ca73d is in this repository')
+        for commit, there in known.items():
+            if not there:
+                print(f'commit {commit} is not in this repository: its comparison is skipped')
+                continue
+            for name in files:        # the blob of each file as committed at the commit against the file in this tree
+                want = subprocess.run(['git', 'rev-parse', f'{commit}:{name}'], cwd=ROOT, capture_output=True, text=True)
+                have = subprocess.run(['git', 'hash-object', '--', name], cwd=ROOT, capture_output=True, text=True)
+                self.assertEqual((want.returncode, have.returncode), (0, 0), name)
+                self.assertEqual(have.stdout.strip(), want.stdout.strip(), f'{name} differs from commit {commit}')
+            done = subprocess.run(['git', 'diff', '--quiet', commit, '--'] + list(files), cwd=ROOT, capture_output=True)
+            self.assertEqual(done.returncode, 0, f'one of the six files differs from commit {commit}')
 
     def test_the_sum_task_files(self):
         root = ROOT / 'evalsuite'
