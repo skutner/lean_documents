@@ -71,7 +71,7 @@ Flawed readers (each a specific shortcut; the interpreter switches):
                                  correction that points at something it does not see changes nothing, and a
                                  payment whose amount it cannot work out at all is skipped.
 
-Edition. The environment variable BIG_MINUTES_EDITION (1, 2, 3 or 4; unset means 1; anything else is an error) says which
+Edition. The environment variable BIG_MINUTES_EDITION (1, 2, 3, 4 or 5; unset means 1; anything else is an error) says which
 edition of the generator draws the dossier. Edition 1 is the dossier described above, byte for byte as it was before
 editions existed. Edition 2 is about one and a half times as large (30 to 36 projects over 44 to 48 meetings, four or
 five minute books, 570,000 to 630,000 characters), its 24 statements per report are 7 about the number of projects holding
@@ -124,6 +124,30 @@ is not the last one (at least three different meetings).
     `INVENTORY` carry everything a text parser needs (`sum_statements`, `sum_list`, `sum_kinds`, `sum_figures`, `sum_quotas`,
     `single_kinds`, `span_verbs`, `rescission_wordings`, `procedure_sums`, `procedure_rescissions`, `ordinal_cap`); `statements`, `frames` and the other
     keys of the inventory are unchanged.
+
+Edition 5 (sums on the award side). The world, the size and the text of editions 3 and 4 (`SETTINGS[5]` is `SETTINGS[1]`);
+`case['size']` is 5. A sum may now be over two more figures of a project at the close of a meeting (`AWARD_FIGURES`): `award`
+(the award in force after the meeting, every correction applied from the start) and `balance` (the award in force less the
+total paid). Both are already in the flat dict of `_run` (`award|<project>|<date>`, `balance|<project>|<date>`). In a sum a
+part that is `'none'` (no award in force: none made yet, or rescinded) or `None` (not established: on a subset that lacks the
+project's award) adds nothing; a part may be negative (a reader's balance, or the truth's on a subset) and is added as it stands.
+`total` and `count` keep their rule (a part that is not established makes the sum not established). Three new rungs in
+`SUM_KINDS`: `asum8` (eight named projects, each holding an award in force at the meeting named), `aupto` (every project, up to
+a meeting in the last two fifths of the book, not the last) and `abook` (every project, the last meeting); their claim kinds are
+`minutes_asum8`, `minutes_aupto`, `minutes_abook`, and their query is `sum_query(rung, 'award'|'balance', subjects, None, until)`
+(key `sum|award||<until>|*` or `sum|balance||<until>|<names joined by ;>`). There are no spans on the award side. `answer`,
+`value_form` and `relevant` do not read the edition. `QUOTAS[5]` gives 24 statements: the ten payment-side statements of
+edition 4's kinds (two awards in force as controls, two about one project, two about the number of projects holding an award,
+and two each of `sum8`, `upto`, `span3`, `span6`, `book`) and eight on the award side (`asum8` one sum of awards in force and
+one of unpaid balances, `aupto` two and two at four different meetings, `abook` one and one). `pick_slots3` serves the award
+rungs: it refuses a statement in which, on the whole log, a part is not established for the truth or for any of the four
+flawed readers, and a true balance sum with a negative part; for a sum of awards in force it takes as its basis the award-side
+events of the projects held, for a sum of balances those and the payments. A named award-side sum is over projects that each
+hold an award in force at the meeting named, and as many as `AWARD_RICH` (three) of them rest on a correction of their award
+or a variation of it minuted at or before that meeting, where the world has them. Text of edition 5 only:
+the paragraph of `procedure.md` on sums is `SUMS_BLOCK5` (`SUMS_BLOCK3` and the award-side paragraph `AWARD_SIDE`), and the
+paragraph on amounts defined by reference gains the sentence `INSTALMENT_OWN` (whose instalment is meant); the statement frames
+are the keys `sum_award`, `sum_balance`, `all_award` and `all_balance` of `SUM_STATEMENTS`.
 """
 import bisect
 import datetime
@@ -176,12 +200,12 @@ SPONSORS2 = SPONSORS + ('Beacon Allotment Holders', 'Riverside Reading Room Trus
                         'Ivy Lane Chapel Trust', 'Barley Mow Friends')
 # What an edition changes: meetings, projects, minute books and size of the text, and the mix of statements per report.
 EDITION_VARIABLE = 'BIG_MINUTES_EDITION'
-EDITIONS = (1, 2, 3, 4)
+EDITIONS = (1, 2, 3, 4, 5)
 SETTINGS = {1: {'meetings': (29, 32), 'projects': (18, 24), 'books': 3, 'size': (350000, 420000), 'bounds': (300000, 450000),
                 'places': PLACES, 'buildings': BUILDINGS, 'works': WORKS, 'sponsors': SPONSORS},
             2: {'meetings': (44, 48), 'projects': (30, 36), 'books': None, 'size': (570000, 630000), 'bounds': (550000, 650000),
                 'places': PLACES2, 'buildings': BUILDINGS2, 'works': WORKS2, 'sponsors': SPONSORS2}}
-SETTINGS[3] = SETTINGS[4] = SETTINGS[1]          # editions 3 and 4 are edition 1's world and size, with the sums
+SETTINGS[3] = SETTINGS[4] = SETTINGS[5] = SETTINGS[1]          # editions 3, 4 and 5 are edition 1's world and size, with the sums
 # Edition 2: statements per report by kind (the unpaid award in force is not asked), and of them the controls (every
 # flawed reader right); the other 18 are statements on which a flawed reader is wrong.
 MIX2 = {'projects': 7, 'total': 6, 'count': 6, 'balance': 2, 'largest': 2, 'first': 1, 'award': 0}
@@ -189,12 +213,12 @@ CONTROLS2 = {'projects': 2, 'total': 2, 'count': 1, 'balance': 1}
 
 
 def current_edition():
-    """The edition asked for by BIG_MINUTES_EDITION: 1 when it is not set; an error when it is set to anything but 1, 2, 3 or 4."""
+    """The edition asked for by BIG_MINUTES_EDITION: 1 when it is not set; an error when it is set to anything but 1, 2, 3, 4 or 5."""
     raw = os.environ.get(EDITION_VARIABLE)
     if raw is None:
         return 1
-    if raw not in ('1', '2', '3', '4'):
-        raise generate.GenerationError('%s must be 1, 2, 3 or 4, not %r' % (EDITION_VARIABLE, raw))
+    if raw not in ('1', '2', '3', '4', '5'):
+        raise generate.GenerationError('%s must be 1, 2, 3, 4 or 5, not %r' % (EDITION_VARIABLE, raw))
     return int(raw)
 
 
@@ -532,8 +556,16 @@ QUERIES = {
 SUM_KINDS = {'sum3': {'shape': 'named', 'size': 3}, 'sum5': {'shape': 'named', 'size': 5},
              'sum8': {'shape': 'named', 'size': 8}, 'upto': {'shape': 'all', 'size': None},
              'book': {'shape': 'all', 'size': None}, 'span3': {'shape': 'span', 'size': 3},
-             'span6': {'shape': 'span', 'size': 6}}
+             'span6': {'shape': 'span', 'size': 6},
+             # edition 5: the award side (named: eight projects each holding an award in force; all: every project)
+             'asum8': {'shape': 'named', 'size': 8}, 'aupto': {'shape': 'all', 'size': None},
+             'abook': {'shape': 'all', 'size': None}}
 SUM_FIGURES = ('total', 'count')      # the total paid, or the number of payments, of a project at the close of a meeting
+# Edition 5: the figures of the award side, at the close of a meeting: the award in force (every correction applied from the
+# start) and the unpaid balance (the award in force less the total paid). `SUM_FIGURES` stays what editions 3 and 4 draw from.
+AWARD_FIGURES = ('award', 'balance')
+AWARD_RUNGS = ('asum8', 'aupto', 'abook')
+AWARD_RICH = 3      # a named award-side sum is over projects at least this many of which rest on a correction or a variation
 # Statements per report of editions 3 and 4, by rung: `award` (the award in force of one project: the controls), `single` (one
 # project: a total, a number of payments, an unpaid balance, a largest payment or a first full payment; two different kinds),
 # `projects` (the number of projects holding an award, one meeting in the first and one in the last third of the book) and the
@@ -541,7 +573,10 @@ SUM_FIGURES = ('total', 'count')      # the total paid, or the number of payment
 QUOTAS = {3: {'award': 2, 'single': 2, 'sum3': 2, 'sum5': 4, 'sum8': 6, 'upto': 0, 'projects': 2, 'span3': 2, 'span6': 2,
               'book': 2},
           4: {'award': 2, 'single': 2, 'sum3': 0, 'sum5': 2, 'sum8': 4, 'upto': 6, 'projects': 2, 'span3': 2, 'span6': 2,
-              'book': 2}}
+              'book': 2},
+          # edition 5: ten statements on the payment side, eight on the award side (one award, one balance per pair)
+          5: {'award': 2, 'single': 2, 'projects': 2, 'sum3': 0, 'sum5': 0, 'sum8': 2, 'upto': 2, 'span3': 2, 'span6': 2,
+              'book': 2, 'asum8': 2, 'aupto': 4, 'abook': 2}}
 SINGLE_KINDS = ('total', 'count', 'balance', 'largest', 'first')
 ORDINAL_CAP = 12      # editions 3 and 4 name a project by its place in the order of backing only up to this place
 # Where the frames of a sum put its figures: `{names}` the named projects (joined as `SUM_LIST` says), `{when}` the one
@@ -565,7 +600,44 @@ SUM_STATEMENTS = {
                    'The total paid to all projects together grew by {value} between the close of {earlier} and the close of {later}.'),
     'span_count': ('The number of payments made to all projects stood {value} higher at the close of {later} than at the close of {earlier}.',
                    'Across all projects, the number of payments made rose by {value} from the close of {earlier} to the close of {later}.',
-                   'The number of payments made to all projects together grew by {value} between the close of {earlier} and the close of {later}.')}
+                   'The number of payments made to all projects together grew by {value} between the close of {earlier} and the close of {later}.'),
+    # edition 5 (the award side). Awards say "in force"; balances say "unpaid balance", "remained unpaid" or "still to be paid"
+    # (never "fully paid": the procedure defines that as a fact about the first meeting at which a project was fully paid).
+    # No frame of a balance says "in force", so that the two figures are told apart by the text alone.
+    'sum_award': ('After {when}, the awards in force for {names} together came to {value}.',
+                  'At the close of {when}, the awards held in force by {names} added up to {value}.',
+                  'Once {when} had ended, {names} taken together held awards in force worth {value}.'),
+    'sum_balance': ('After {when}, the unpaid balance of the awards to {names} together was {value}.',
+                    'Once {when} was over, {value} of the awards to {names} together remained unpaid.',
+                    'At the close of {when}, {value} was still to be paid on the awards to {names} taken together.'),
+    'all_award': ('After {when}, the awards in force across all projects came to {value} in all.',
+                  'At the close of {when}, all projects between them held awards in force of {value}.',
+                  'Once {when} had ended, the sum of the awards in force over all projects was {value}.'),
+    'all_balance': ('After {when}, the unpaid balance across all projects was {value}.',
+                    'Once {when} was over, {value} of the awards to all projects remained unpaid.',
+                    'At the close of {when}, {value} was still to be paid on the awards to all projects together.')}
+BALANCE_WORDINGS = ('unpaid balance', 'remained unpaid', 'still to be paid')      # what the balance frames say (edition 5)
+assert all('in force' in f and 'fully paid' not in f and '{when}' in f for k in ('sum_award', 'all_award') for f in SUM_STATEMENTS[k])
+assert all(sum(w in f for w in BALANCE_WORDINGS) == 1 and 'fully paid' not in f and 'in force' not in f and '{when}' in f
+           for k in ('sum_balance', 'all_balance') for f in SUM_STATEMENTS[k])
+
+
+def _frame_pattern(frame):
+    return re.compile('^' + re.sub(r'\\\{[a-z0-9]+\\\}', '.+', re.escape(frame)) + '$')
+
+
+def _frame_clashes():
+    """The pairs of frames of which the text of one fits the pattern of the other (a placeholder fits any text), at least one of the
+    two being a frame of the award side: an independent parser must be able to tell every new frame from every other by its text."""
+    frames = [(f'{k}[{i}]', f) for k, fs in list(STATEMENTS.items()) + list(SUM_STATEMENTS.items()) for i, f in enumerate(fs)]
+    fresh = {f'{k}[{i}]' for k in ('sum_award', 'sum_balance', 'all_award', 'all_balance') for i in range(3)}
+    sample = {'proj': 'Corbin Lane Hostel', 'names': 'Corbin Lane Hostel and Tanner Row Hall', 'when': 'the meeting of 12 May 2036',
+              'earlier': 'the meeting of 12 May 2036', 'later': 'the meeting of 12 June 2036', 'value': '5'}
+    return [(a, b) for a, f in frames for b, g in frames if a != b and (a in fresh or b in fresh)
+            and _frame_pattern(g).match(f.format(**sample))]
+
+
+assert not _frame_clashes(), _frame_clashes()
 SUM_LIST = {'separator': ', ', 'last': ' and '}
 SPAN_VERBS = ('stood higher', 'rose by', 'grew by')      # what the new paragraph of the procedure names (see `SUM_STATEMENTS`)
 # The ways the plain frames say that an award ended; the rescission paragraph of editions 3 and 4 names them.
@@ -595,6 +667,23 @@ SUMS_BLOCK3 = (
     'is into every figure.')
 assert all(any(w in f for f in PLAIN_FRAMES['rescind'] + FRAMES['rescind']) and w in RESCISSIONS_BLOCK3
            for w in RESCISSION_WORDINGS)
+# Edition 5 only: what the sums of the award side are (the paragraph of editions 3 and 4 stays as it is, and this follows it in
+# the same paragraph), and whose instalment is meant (a sentence of the paragraph on amounts defined by reference).
+AWARD_SIDE = (
+    'The same holds for awards and balances. A statement about the awards in force of several named projects "together", or of '
+    '"all projects", is about the sum, over those projects, of the award in force for each of them after the meeting the '
+    'statement names, as this note defines it for one project. A statement about their unpaid balance is about the sum, over the '
+    'same projects, of the unpaid balance of each of them: the award in force for it at the close of that meeting less the total '
+    'paid to it by then. Every wording of an unpaid balance, in a statement about one project or about several, means that '
+    'figure, the award in force at that close less the total paid by then: an "unpaid balance", a sum that "remained unpaid", '
+    'a sum "still to be paid" on the award, or an award that stood a sum "short of being fully paid". None of these means the '
+    'first meeting at which a project was fully paid. A project that holds no award in '
+    'force at that close, because none had yet been made for it or because it had been rescinded, adds nothing to the sum of '
+    'the awards or to the sum of the balances. A correction of an award minuted at any meeting, including one after the close '
+    'the statement names, is read into the figure at that close; a variation or a rescission minuted after that close is not.')
+SUMS_BLOCK5 = SUMS_BLOCK3 + ' ' + AWARD_SIDE
+INSTALMENT_OWN = ('In a payment to a project, "the first instalment", "the opening payment", "the opening cheque" or a numbered '
+                  'instalment, with no other project named as having been paid it, is that project\'s own instalment.')
 
 
 INVENTORY = {      # the tables of the larger edition 2 (the first entries of each are those of edition 1)
@@ -611,7 +700,10 @@ INVENTORY = {      # the tables of the larger edition 2 (the first entries of ea
     # new keys of editions 3 and 4 (nothing above is changed by them)
     'sum_statements': SUM_STATEMENTS, 'sum_list': SUM_LIST, 'sum_kinds': SUM_KINDS, 'sum_figures': SUM_FIGURES,
     'sum_quotas': QUOTAS, 'single_kinds': SINGLE_KINDS, 'span_verbs': SPAN_VERBS, 'rescission_wordings': RESCISSION_WORDINGS,
-    'procedure_sums': SUMS_BLOCK3, 'procedure_rescissions': RESCISSIONS_BLOCK3, 'ordinal_cap': ORDINAL_CAP}
+    'procedure_sums': SUMS_BLOCK3, 'procedure_rescissions': RESCISSIONS_BLOCK3, 'ordinal_cap': ORDINAL_CAP,
+    # new keys of edition 5 (nothing above is changed by them)
+    'award_figures': AWARD_FIGURES, 'award_rungs': AWARD_RUNGS, 'balance_wordings': BALANCE_WORDINGS,
+    'procedure_sums5': SUMS_BLOCK5, 'procedure_instalment': INSTALMENT_OWN}
 
 
 # ---------- The facts: projects, calendar, event log ----------
@@ -1088,11 +1180,14 @@ def sum_names(query, flat):
 
 
 def figure_sum(flat, figure, names, date):
-    """The figure (`total` or `count`) of every project of `names` at the close of the meeting `date`, added exactly (a
-    `Fraction`); None as soon as one is not established."""
+    """The figure (`total` or `count`, or in edition 5 `award` or `balance`) of every project of `names` at the close of the
+    meeting `date`, added exactly (a `Fraction`). For `total` and `count`: None as soon as one is not established. For `award`
+    and `balance` a part that is `'none'` (no award in force) or not established adds nothing, so the sum is always a number."""
     total = Fraction(0)
     for name in names:
         value = flat.get(f'{figure}|{name}|{date}')
+        if figure in AWARD_FIGURES and (value is None or value == NONE_VALUE):
+            continue
         if value is None:
             return None
         total += Fraction(value)
@@ -2031,7 +2126,8 @@ PROCEDURE_BLOCKS = (
 
 def procedure_blocks(edition):
     """The paragraphs of `procedure.md`: editions 1 and 2 as they always were; editions 3 and 4 name the plain wordings of a
-    rescission and gain the paragraph on sums before the paragraph on other figures."""
+    rescission and gain the paragraph on sums before the paragraph on other figures; edition 5 has that paragraph with the award
+    side added, and says whose instalment is meant in the paragraph on amounts defined by reference."""
     if edition < 3:
         return PROCEDURE_BLOCKS
     blocks = []
@@ -2039,7 +2135,11 @@ def procedure_blocks(edition):
         if block.startswith('Rescissions. '):
             block = RESCISSIONS_BLOCK3
         elif block.startswith('Other figures. '):
-            blocks.append(SUMS_BLOCK3)
+            blocks.append(SUMS_BLOCK3 if edition < 5 else SUMS_BLOCK5)
+        elif block.startswith('Amounts defined by reference. ') and edition >= 5:
+            before = 'is the sum of that other project first instalment. '
+            assert block.count(before) == 1
+            block = block.replace(before, before + INSTALMENT_OWN + ' ')
         blocks.append(block)
     return tuple(blocks)
 
@@ -2806,7 +2906,11 @@ def pick_slots3(rng, events, projects, dates, truth, readers, cites, resolved, e
     statements about one project and the number of projects holding an award keep the order by reader name. A sum is
     chosen from `CANDIDATES` drawn at random, preferring a lure that adds most to the readers' quotas, and
     only if `answer` (the whole log, and every reader) gives the value the flat dict gives and removing one payment changes it
-    (a statement with an empty basis would be `not_checkable`)."""
+    (a statement with an empty basis would be `not_checkable`). Edition 5 adds the rungs of `AWARD_RUNGS` after `book`, each
+    figure alternating from `AWARD_FIGURES` (see the module's docstring): `award_named` for `asum8`, `whole` for `aupto` (a
+    meeting not used by an earlier `upto` or `aupto`, never a fallback) and `abook`; `evaluate` refuses a sum of the award side in
+    which a part is not established on the whole log for the truth or any of the four readers, or in which a part of a true
+    balance is negative; `has_basis` uses the award-side events (and, for a balance, the payments)."""
     quota = QUOTAS[edition]
     meetings = [d.isoformat() for d in dates]
     count_m = len(meetings)
@@ -2921,6 +3025,16 @@ def pick_slots3(rng, events, projects, dates, truth, readers, cites, resolved, e
         value = sum_value(query, truth, names)
         if not good_sum(figure, value):
             return None
+        if figure in AWARD_FIGURES:
+            # on the whole log every part is established for the truth and for each of the four readers (the picker does not
+            # know which readers the dossier will carry), and no part of a true balance is negative
+            parts = list(subjects) if subjects else names
+            for flat in (truth, *readers.values()):
+                if any(flat.get(f'{figure}|{n}|{until}') is None for n in parts):
+                    return None
+            if figure == 'balance' and any(isinstance(truth[f'balance|{n}|{until}'], (int, Fraction))
+                                           and truth[f'balance|{n}|{until}'] < 0 for n in parts):
+                return None
         theirs = {r: sum_value(query, base, names) for r, base in readers.items()}
         return {'kind': rung, 'query': query, 'figure': figure, 'value': value, 'theirs': theirs,
                 'seen': (figure, tuple(subjects or ()), since, until),
@@ -2933,8 +3047,16 @@ def pick_slots3(rng, events, projects, dates, truth, readers, cites, resolved, e
         return answer(q, whole_log) == c['value'] and all(answer(q, whole_log, r) == v for r, v in c['theirs'].items())
 
     def has_basis(c):
-        """Removing one payment of the sum changes its value (so that the set of events it turns on is not empty)."""
+        """Removing one payment of the sum changes its value (so that the set of events it turns on is not empty). For a sum of
+        awards in force the events are those of the award side of the projects (an award, a correction of an award, a variation
+        or a rescission: the first three only up to the close, a correction at any meeting); for a sum of balances those and the
+        payments."""
         q = c['query']
+        if q['figure'] in AWARD_FIGURES:
+            side = [e for e in whole_log if (q['subjects'] is None or e['subject'] in q['subjects'])
+                    and ((e['kind'] in ('award', 'vary', 'rescind') or (q['figure'] == 'balance' and e['kind'] == 'pay'))
+                         and e['date'] <= q['until'] or (e['kind'] == 'correct' and e['target_kind'] == 'award'))]
+            return any(answer(q, [x for x in whole_log if x['id'] != e['id']]) != c['value'] for e in reversed(side))
         pays = [e for e in whole_log if e['kind'] == 'pay' and (q['subjects'] is None or e['subject'] in q['subjects'])
                 and e['date'] <= q['until'] and (q['since'] is None or e['date'] > q['since'])]
         return any(answer(q, [x for x in whole_log if x['id'] != e['id']]) != c['value'] for e in reversed(pays))
@@ -2963,13 +3085,43 @@ def pick_slots3(rng, events, projects, dates, truth, readers, cites, resolved, e
                 out.append(c)
         return out
 
+    def award_named(rung, figure):
+        """Edition 5: a named sum on the award side is over projects that each hold an award in force at the meeting named, at
+        least `AWARD_RICH` of them (as many as the world has) resting on a correction of their award or a variation, minuted at
+        or before that meeting, and is asked at a meeting in the last third of the book."""
+        size = SUM_KINDS[rung]['size']
+        shaped = {}
+        for e in events:
+            if e['kind'] == 'vary' or (e['kind'] == 'correct' and e['target_kind'] == 'award'):
+                shaped.setdefault(e['subject'], []).append(e['m'])
+
+        def holds(n, m):
+            return isinstance(truth.get(f'award|{n}|{meetings[m]}'), int)
+
+        late = [m for m in range((2 * count_m + 2) // 3, count_m) if sum(holds(n, m) for n in names) >= size]
+        out, keys = [], set()
+        for _ in range(CANDIDATES if late else 0):
+            m = rng.choice(late)
+            pool = [n for n in names if holds(n, m)]
+            rich = sorted((n for n in pool if any(x <= m for x in shaped.get(n, ()))), key=lambda n: (usage[n], rng.random()))
+            rich = rich[:AWARD_RICH]
+            rest = sorted((n for n in pool if n not in rich), key=lambda n: (usage[n], rng.random()))[:size - len(rich)]
+            subjects = sorted(rich + rest)
+            c = evaluate(rung, figure, subjects, None, meetings[m]) if (figure, tuple(subjects), meetings[m]) not in keys else None
+            keys.add((figure, tuple(subjects), meetings[m]))
+            if c is not None and c['seen'] not in seen:
+                out.append(c)
+        return out
+
     def whole(rung, figure, used_meetings):
-        if rung == 'book':
+        if rung in ('book', 'abook'):
             options = [count_m - 1]
         else:
             low = (3 * count_m) // 5                                 # the last two fifths of the book, not the last meeting
-            options = [m for m in range(low, count_m - 1) if m not in used_meetings] or list(range(low, count_m - 1))
-            options = rng.sample(options, min(len(options), CANDIDATES))
+            options = [m for m in range(low, count_m - 1) if m not in used_meetings]
+            if rung == 'upto':
+                options = options or list(range(low, count_m - 1))
+            options = rng.sample(options, min(len(options), CANDIDATES))     # `aupto`: never a meeting used already
         found = [evaluate(rung, figure, None, None, meetings[m]) for m in options]
         return [c for c in found if c is not None and c['seen'] not in seen]
 
@@ -2989,17 +3141,17 @@ def pick_slots3(rng, events, projects, dates, truth, readers, cites, resolved, e
                     break
         return out
     taken_spans, used_meetings = {'span3': [], 'span6': []}, set()
-    for rung in ('sum8', 'sum5', 'sum3', 'upto', 'span3', 'span6', 'book'):
-        for number in range(quota[rung]):
-            figure = SUM_FIGURES[number % 2]
+    for rung in ('sum8', 'sum5', 'sum3', 'upto', 'span3', 'span6', 'book') + AWARD_RUNGS:
+        for number in range(quota.get(rung, 0)):
+            figure = (AWARD_FIGURES if rung in AWARD_RUNGS else SUM_FIGURES)[number % 2]
             shape = SUM_KINDS[rung]['shape']
-            options = named(rung, figure) if shape == 'named' else whole(rung, figure, used_meetings) if shape == 'all' \
-                else spans(rung, figure, taken_spans[rung])
+            options = (award_named if rung in AWARD_RUNGS else named)(rung, figure) if shape == 'named' \
+                else whole(rung, figure, used_meetings) if shape == 'all' else spans(rung, figure, taken_spans[rung])
             c = settle(options)
             if c is None:
                 return fail(f'{rung} {figure}')
             take(c)
-            if rung == 'upto':
+            if rung in ('upto', 'aupto'):
                 used_meetings.add(meetings.index(c['query']['until']))
             if shape == 'span':
                 a = meetings.index(c['query']['since'])
@@ -3115,7 +3267,7 @@ def sum_money_text(rng, n):
 
 
 def sum_value_text(rng, figure, value):
-    if figure == 'total':
+    if figure != 'count':       # a total paid, an award in force or an unpaid balance: pounds
         return sum_money_text(rng, value)
     return str(value) if value >= 20 or rng.random() < 0.5 else NUMBER_WORDS[value]
 
