@@ -1,0 +1,115 @@
+# source-bound-parser-v1: type, locale, token, expected canonical value or REJECT (tab separated)
+nat	en	1234	1234
+nat	ro	1234	1234
+nat	en	1,234	1234
+nat	ro	1.234	1234
+nat	en	1 234	1234
+nat	ro	1 234	1234
+nat	en	1 234	1234
+nat	ro	1 234	1234
+nat	en	12,34	REJECT
+nat	ro	12.34	REJECT
+nat	en	1,234 567	REJECT
+nat	ro	1.234 567	REJECT
+nat	en	1 234 567	REJECT
+nat	ro	1 234 567	REJECT
+nat	en	1e3	REJECT
+nat	ro	1e3	REJECT
+nat	en	1-3	REJECT
+nat	ro	1-3	REJECT
+nat	en	1...	REJECT
+nat	ro	1…	REJECT
+nat	en	-1	REJECT
+nat	ro	+1	REJECT
+nat	en	1.0	REJECT
+nat	ro	1,0	REJECT
+nat	en	one	1
+nat	ro	două	2
+nat	en	thirteen	REJECT
+nat	ro	treisprezece	REJECT
+nat	en	one item	1
+nat	ro	un proiect	1
+nat	ro	o zi	1
+nat	ro	un	REJECT
+nat	ro	o	REJECT
+nat	en	one unknown	REJECT
+nat	ro	un necunoscut	REJECT
+money(EUR)	en	EUR 1,234.50	123450
+money(EUR)	ro	1.234,50 EUR	123450
+money(EUR)	en	1.25 euros	125
+money(EUR)	ro	1,25 euro	125
+money(RON)	en	1 leu	100
+money(RON)	ro	2 lei	200
+money(USD)	en	1 dollar	100
+money(USD)	ro	2 dollars	200
+money(EUR)	en	1 euro cents	1
+money(EUR)	ro	2 cenți	2
+money(EUR)	en	1.5 euro cents	REJECT
+money(EUR)	ro	1,5 cenți	REJECT
+money(USD)	en	$ 2	REJECT
+money(USD)	ro	2 $	REJECT
+money(EUR)	en	2 USD	REJECT
+money(RON)	ro	2 EUR	REJECT
+money(EUR)	en	EUR 1.001	REJECT
+money(EUR)	ro	EUR 1,001	REJECT
+money(EUR)	en	-EUR 2.50	-250
+money(EUR)	ro	(2,50 EUR)	-250
+money(EUR)	en	(EUR -2)	REJECT
+money(EUR)	ro	(-2 EUR)	REJECT
+money(EUR)	en	EUR 20 million	2000000000
+money(EUR)	ro	20 milioane EUR	2000000000
+money(EUR)	en	EUR 2 thousand	200000
+money(EUR)	ro	2 mii EUR	200000
+money(EUR)	en	EUR 2 billion	REJECT
+money(EUR)	ro	2 miliarde EUR	REJECT
+money(EUR)	en	EUR 2 million thousand	REJECT
+money(EUR)	ro	2 milioane mii EUR	REJECT
+ratio	en	12.5%	1/8
+ratio	ro	12,5%	1/8
+ratio	en	12.5 percent	1/8
+ratio	ro	12,5 procent	1/8
+ratio	ro	12,5 procente	1/8
+ratio	en	3.0	3/1
+ratio	ro	3,0	3/1
+ratio	en	-12.5%	-1/8
+ratio	ro	-12,5%	-1/8
+ratio	en	12.5%%	REJECT
+ratio	ro	12,5%%	REJECT
+ratio	en	1e-3	REJECT
+ratio	ro	1/8	REJECT
+ratio	en	.5	REJECT
+ratio	ro	,5	REJECT
+date	en	0001-01-01	0001-01-01
+date	ro	2024-02-29	2024-02-29
+date	en	2023-02-29	REJECT
+date	ro	29.02.2024	2024-02-29
+date	ro	29.02.2023	REJECT
+date	en	29 February 2024	2024-02-29
+date	ro	29 februarie 2024	2024-02-29
+date	en	February 29, 2024	2024-02-29
+date	ro	februarie 29, 2024	REJECT
+date	en	29 Feb 2024	REJECT
+date	ro	29 feb 2024	REJECT
+date	en	1/2/2024	REJECT
+date	ro	1/2/2024	REJECT
+date	en	29 February	REJECT
+date	ro	29 februarie	REJECT
+date	en	tomorrow	REJECT
+date	ro	mâine	REJECT
+date	en	2024-01-01T12:00	REJECT
+date	ro	2024-01-01 12:00	REJECT
+date	en	1 January 24	REJECT
+date	ro	1 ianuarie 24	REJECT
+bool	en	TRUE	true
+bool	en	false	false
+bool	en	YES	true
+bool	en	no	false
+bool	ro	da	true
+bool	ro	NU	false
+bool	en	Not recorded	REJECT
+bool	ro	absent	REJECT
+bool	en	true enough	REJECT
+bool	ro	da sigur	REJECT
+nat	en	2 million	2000000
+nat	ro	2 milioane	2000000
+nat	ro	o milion	REJECT
