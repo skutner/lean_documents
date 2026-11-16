@@ -2484,7 +2484,7 @@ def sentence(rng, e, ctx, anaphor=None):
     else:
         ctx['repeated'] = True       # every redraw repeated: a duplicate is returned, which --verify refuses, so `attempt` redraws the dossier
     ctx['said'].add(text)
-    if e['kind'] == 'return' and 'quiet_log' in ctx:
+    if 'quiet_log' in ctx and e['kind'] == 'return':
         ctx['quiet_log'][e['id']][1] = text            # edition 8: the sentence the paragraph holds, which `swap_quiet` finds in it
     return text
 
@@ -2496,7 +2496,7 @@ def sentence_once(rng, e, ctx, anaphor=None):
     projects, dates = ctx['projects'], ctx['dates']
     proj = anaphor or ctx['ref'](rng, e['p'], e['m'])
     own = None if anaphor else ctx['last_form']
-    if kind == 'return' and 'quiet_log' in ctx:
+    if 'quiet_log' in ctx and kind == 'return':
         ctx['quiet_log'][e['id']] = [proj, None]       # edition 8: the words for the project in the sentence drawn last
     frames_key = 'pay' if kind == 'pay' else 'correct_award' if kind == 'correct' and e['target_kind'] == 'award' \
         else 'correct_pay' if kind == 'correct' else kind

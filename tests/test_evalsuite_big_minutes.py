@@ -5323,6 +5323,11 @@ class BigMinutesTest(unittest.TestCase):
             if not there:
                 print(f'commit {commit} is not in this repository: its comparison is skipped')
                 continue
+            # the one file edition 8 touches is the commit's file plus lines that name `quiet_returns`, and nothing else
+            then = subprocess.run(['git', 'show', f'{commit}:{EDITION8_KEY_FILE}'], cwd=ROOT, capture_output=True, text=True).stdout.split('\n')
+            now = (ROOT / EDITION8_KEY_FILE).read_text(encoding='utf-8').split('\n')
+            self.assertEqual([line for line in now if 'quiet_returns' not in line], then, f'{EDITION8_KEY_FILE} differs from commit {commit}')
+            self.assertTrue(any('quiet_returns' in line for line in now))
             for name in files:        # the blob of each file as committed at the commit against the file in this tree
                 want = subprocess.run(['git', 'rev-parse', f'{commit}:{name}'], cwd=ROOT, capture_output=True, text=True)
                 have = subprocess.run(['git', 'hash-object', '--', name], cwd=ROOT, capture_output=True, text=True)
@@ -5333,11 +5338,6 @@ class BigMinutesTest(unittest.TestCase):
             done = subprocess.run(['git', 'diff', '--quiet', commit, '--'] + [n for n in files if n != EDITION8_KEY_FILE], cwd=ROOT,
                                   capture_output=True)
             self.assertEqual(done.returncode, 0, f'one of the six files differs from commit {commit}')
-            # the one file edition 8 touches is the commit's file plus lines that name `quiet_returns`, and nothing else
-            then = subprocess.run(['git', 'show', f'{commit}:{EDITION8_KEY_FILE}'], cwd=ROOT, capture_output=True, text=True).stdout.split('\n')
-            now = (ROOT / EDITION8_KEY_FILE).read_text(encoding='utf-8').split('\n')
-            self.assertEqual([line for line in now if 'quiet_returns' not in line], then, f'{EDITION8_KEY_FILE} differs from commit {commit}')
-            self.assertTrue(any('quiet_returns' in line for line in now))
 
     def test_the_sum_task_files(self):
         root = ROOT / 'evalsuite'
