@@ -5661,6 +5661,30 @@ class QuietReturnsTest(unittest.TestCase):
             returns, eligible, quiet = quiet_book_rules(eight, read_back=seed == ED_SEED)       # one reading of a book: it takes seconds
             print(f'edition 8, seed {seed}: {returns} returns, {eligible} eligible, {quiet} quiet')
 
+    def test_a_late_refusal_leaves_the_main_source_as_edition_6_leaves_it(self):
+        """Edition 8 turns a world down for its own text only after every draw edition 6 makes for it, so that the next world is the same in
+        both editions. Forced here: the size test fails on the edition 8 text of the first attempt (not on edition 6's); edition 6 hands the
+        world out, edition 8 refuses it, the main source is in the same state, and the second attempt of each is the same world."""
+        import unittest.mock as mock
+        real = big_minutes.text_fits
+        stream = lambda: random.Random(f'evalsuite:{generate.GENERATOR_VERSION}:{ED_SEED}:1:minutes')    # noqa: E731
+        calls = []
+
+        def fits(sources, files, ctx, passages, edition):
+            calls.append(edition)
+            if len(calls) == 2:                          # the edition 8 text of the first attempt (the first call is edition 6's text)
+                big_minutes.WHY['why'] = 'size'
+                return False
+            return real(sources, files, ctx, passages, edition)
+        rng6, rng8 = stream(), stream()
+        six = big_minutes.attempt(rng6, 6)
+        with mock.patch.object(big_minutes, 'text_fits', fits):
+            self.assertIsNone(big_minutes.attempt(rng8, 8))
+        self.assertEqual(big_minutes.WHY['why'], 'quiet size')
+        self.assertIsNotNone(six)
+        self.assertEqual(rng6.getstate(), rng8.getstate())
+        self.assertEqual(big_minutes.attempt(rng6, 6)['events'], big_minutes.attempt(rng8, 8)['events'])      # the next world
+
     def test_edition_8_is_the_same_bytes_in_another_process(self):
         """One process (another string-hash seed): the dossier with its facts, quiet returns included, is the one built here."""
         with edition_env(8):

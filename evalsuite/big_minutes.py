@@ -179,7 +179,8 @@ random stream of its own that is seeded from the state of the main one on entry 
 builds the edition 6 book exactly as edition 6 does (every draw, every count of length and every entry of the record of sentences
 said is made on the edition 6 sentence) and only after `render_book` swaps the sentence of each chosen return (`quiet_plan`,
 `swap_quiet`), so that the world, the events, both reports and the key's expectations are edition 6's; the size bound and the
-quotability test run on the edition 6 text and on the edition 8 text, and a world that fails on the second alone is redrawn. A return
+quotability test run on the edition 6 text and on the edition 8 text, and a world that fails on the second alone is redrawn last (the
+attempt goes on as edition 6's, so that both editions draw the same from the main source and the next world is the same in both). A return
 is eligible when its payment's meeting holds no other event of the key for the project (`names` and `restate` apart) and the paragraph
 it stands in states no other event (`eligible_returns`); a world with fewer than 12 returns or fewer than 6 eligible ones is redrawn
 (checked last, as `PAYMENTS6` is); the number of quiet returns is the eligible ones over three, rounded, at least 6 and at most half
@@ -3877,17 +3878,19 @@ def attempt(rng, edition=1):
     sources.update(files)
     if not text_fits(sources, files, ctx, passages, edition):
         return None
-    plan = None
+    plan, refusal = None, None
     if quiet and not ctx['repeated']:
         # edition 8: the edition 6 book is laid out; only now do the chosen returns become quiet. The tests on the finished text run
-        # again on the edition 8 text (a world that fails there alone is redrawn); a book too thin for it is redrawn last (below).
+        # again on the edition 8 text. A world that fails there alone, like a book too thin for it, is redrawn last (below): the attempt
+        # goes on as edition 6's, with edition 6's text, so that it draws from the main source exactly what edition 6 draws.
         plan = quiet_plan(entry_state, events, passages)
         if plan:
-            files = swap_quiet(files, passages, blocks_of, ctx, events, plan)
-            sources = {'procedure.md': sources['procedure.md'], **files}
-            if not text_fits(sources, files, ctx, passages, edition):
-                WHY['why'] = 'quiet ' + WHY['why']       # the world is edition 6's but its edition 8 text fails the same test
-                return None
+            quiet_files = swap_quiet(files, passages, blocks_of, ctx, events, plan)
+            quiet_sources = {'procedure.md': sources['procedure.md'], **quiet_files}
+            if text_fits(quiet_sources, quiet_files, ctx, passages, edition):
+                files, sources = quiet_files, quiet_sources
+            else:
+                refusal = 'quiet ' + WHY['why']          # the world is edition 6's but its edition 8 text fails the same test
     meetings = [d.isoformat() for d in dates]
     truth = state(events, None, meetings)
     readers = {r: state(events, r, meetings) for r in READERS}
@@ -3921,9 +3924,9 @@ def attempt(rng, edition=1):
     # keeps its bytes. Edition 6: the number of payments (the events of kind `pay`), and no sentence said twice.
     if edition == 6 and (ctx['repeated'] or not PAYMENTS6[0] <= sum(e['kind'] == 'pay' for e in events) <= PAYMENTS6[1]):
         return None
-    if quiet and not plan:
-        WHY['why'] = 'quiet thin'
-        return None         # edition 8: fewer than 12 returns, or fewer than 6 that may be quiet
+    if quiet and (refusal or not plan):
+        WHY['why'] = refusal or 'quiet thin'
+        return None         # edition 8: its text fails a test edition 6's passes, or fewer than 12 returns, or fewer than 6 that may be quiet
     return case
 
 
