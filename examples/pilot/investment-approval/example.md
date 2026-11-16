@@ -25,6 +25,7 @@ Yes
 | Report | File |
 | --- | --- |
 | Investment approval report | report.md |
+| test22 | report-generated-2026-11-12T12-57-50-567Z-de9e17.md |
 
 ## Format version
 
