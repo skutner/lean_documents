@@ -2632,7 +2632,7 @@ def world6(built, book, sources):
     need(max(per_project.values()) <= 20, f'a project with {max(per_project.values())} payments')
     dense = sum(n >= 14 for n in per_project.values())
     need(2 * dense >= len(per_project), f'only {dense} of {len(per_project)} paid projects have 14 or more payments')
-    return (f'{meetings} meetings, {projects} projects with an award, {len(books)} minute books, {size} characters, size {built['key']['facts']['size']}; {total} payments '
+    return (f'{meetings} meetings, {projects} projects with an award, {len(books)} minute books, {size} characters, size {built["key"]["facts"]["size"]}; {total} payments '
             f'in all, {dense} of {len(per_project)} paid projects with 14 or more')
 
 
