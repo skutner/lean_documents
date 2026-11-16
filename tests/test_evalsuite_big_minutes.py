@@ -35,10 +35,11 @@ regular first instalments, each way of stating an amount used once), every event
 Item 9 of the fifth-edition design (the unchanged files), a command and not a test of this tree, run from `lean_documents`:
     git diff --quiet 7e4beca9 -- evalsuite/check_shown.py evalsuite/generate_big.py evalsuite/generate.py evalsuite/run_blind.py \
         evalsuite/prompts/task-shown-sums.md evalsuite/arms-shown-sums.json
-(exit status 0; the same against 5d1ca73d, the commit edition 6 is built on);
-`test_the_six_files_are_those_of_commits_7e4beca9_and_5d1ca73d` runs both where those commits are in the repository's history. Edition 8
-changes one of the six: `generate_big.py` carries `quiet_returns` into the key's facts; the test holds it to those commits' file plus the
-lines that name `quiet_returns`.
+(exit status 0 when edition 6 was built, and the same against 5d1ca73d, the commit edition 6 is built on). It does not exit 0 now: on main
+`run_blind.py` already differs from both commits, and with edition 8 `generate_big.py` differs too, because it carries `quiet_returns` into the key's facts. What holds
+now is that `check_shown.py`, `generate.py` and the two data files are those of the commit, and `generate_big.py` is the commit's file plus exactly three lines (`EDITION8_KEY_LINES`), each once, and nothing else changed.
+`test_the_six_files_are_those_of_commits_7e4beca9_and_5d1ca73d` runs both where those commits are in the repository's history (on main it
+fails on `run_blind.py`, which differs from both commits, before and after edition 8).
 
 Edition 8 (BIG_MINUTES_EDITION=8) is edition 6 with a third of the eligible returns told in quiet words (`QUIET_STOCK`, `quiet_form_rules`,
 `quiet_book_rules`, `QuietReturnsTest`; 20 and 30 seed sweeps: `tests/sweep_minutes_edition_8.py`, which the gate does not discover). Every
@@ -3984,6 +3985,23 @@ def write_fixtures(built, parent):
 
 
 EDITION8_KEY_FILE = 'evalsuite/generate_big.py'      # the one of the six files that edition 8 changes: it adds `quiet_returns` to the key's facts
+# The three lines it adds, each after the line it follows in the commit's file (that line occurs once there)
+EDITION8_KEY_LINES = (
+    ("                   readers (the names of the flawed readers the dossier has), and `size` when the case carries one}",
+     ["                   A case that carries `quiet_returns` (minutes edition 8: the ids of its returns told in quiet words) has them there too."]),
+    ("                    result['key']['facts']['size'] = plain(case['size'])",
+     ["                if 'quiet_returns' in case:         # minutes edition 8: the returns told in quiet words (evaluator-only, like the rest)",
+      "                    result['key']['facts']['quiet_returns'] = plain(case['quiet_returns'])"]))
+
+
+def edition8_key_file(then):
+    """The text of `generate_big.py` as a commit had it, with the three lines of edition 8 put after their anchors and nothing else changed."""
+    lines = then.split('\n')
+    for anchor, added in EDITION8_KEY_LINES:
+        assert lines.count(anchor) == 1, anchor
+        at = lines.index(anchor) + 1
+        lines[at:at] = added
+    return '\n'.join(lines)
 
 
 class BigMinutesTest(unittest.TestCase):
@@ -5334,11 +5352,10 @@ class BigMinutesTest(unittest.TestCase):
             if not there:
                 print(f'commit {commit} is not in this repository: its comparison is skipped')
                 continue
-            # the one file edition 8 touches is the commit's file plus lines that name `quiet_returns`, and nothing else
-            then = subprocess.run(['git', 'show', f'{commit}:{EDITION8_KEY_FILE}'], cwd=ROOT, capture_output=True, text=True).stdout.split('\n')
-            now = (ROOT / EDITION8_KEY_FILE).read_text(encoding='utf-8').split('\n')
-            self.assertEqual([line for line in now if 'quiet_returns' not in line], then, f'{EDITION8_KEY_FILE} differs from commit {commit}')
-            self.assertTrue(any('quiet_returns' in line for line in now))
+            # the one file edition 8 touches is the commit's file plus the three lines below, each once, in their places, and nothing else
+            then = subprocess.run(['git', 'show', f'{commit}:{EDITION8_KEY_FILE}'], cwd=ROOT, capture_output=True, text=True).stdout
+            self.assertEqual((ROOT / EDITION8_KEY_FILE).read_text(encoding='utf-8'), edition8_key_file(then),
+                             f'{EDITION8_KEY_FILE} is not commit {commit}\'s file plus the three lines of edition 8')
             for name in files:        # the blob of each file as committed at the commit against the file in this tree
                 want = subprocess.run(['git', 'rev-parse', f'{commit}:{name}'], cwd=ROOT, capture_output=True, text=True)
                 have = subprocess.run(['git', 'hash-object', '--', name], cwd=ROOT, capture_output=True, text=True)
