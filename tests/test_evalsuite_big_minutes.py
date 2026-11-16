@@ -299,9 +299,14 @@ class Book:
                         pieces.append(re.escape(part))
                 compiled.append(re.compile(r'(?:^|(?<=\. ))' + ''.join(pieces) + r'(?=\s|$)'))
             self.frames[kind] = compiled
-        self.frames['quiet_return'] = quiet_frames(self.refs_src)
+        self.quiet = None        # the 48 sentences of a quiet return, compiled by `quiet_res` when a paragraph says "as minuted in" (edition 8)
         heading_res = [re.compile('## ' + src(h, {'date': DATE_SRC}, True).replace('(?P<date>', '(?P<date>')) for h in INV['headings']]
         self.parse(heading_res)
+
+    def quiet_res(self):
+        if self.quiet is None:
+            self.quiet = quiet_frames(self.refs_src)
+        return self.quiet
 
     # -- reading --
     def parse(self, heading_res):
@@ -424,7 +429,10 @@ class Book:
                              refs=[r for p, r in refs if p == who])
                 return
         hits = []
-        for kind, compiled in self.frames.items():
+        frames = list(self.frames.items())
+        if 'as minuted in' in text:         # only a quiet return says this
+            frames.append(('quiet_return', self.quiet_res()))
+        for kind, compiled in frames:
             for rx in compiled:
                 for mo in rx.finditer(text):
                     hits.append((mo.start(), mo.end(), kind, mo))
@@ -453,7 +461,7 @@ class Book:
                 self.add(key, m, text, 'rescind', who, start=start)
             elif kind in ('return', 'quiet_return'):
                 self.add(key, m, text, 'return', who, when=self.meeting_of(g['when']), start=start, quiet=kind == 'quiet_return',
-                         form=self.frames['quiet_return'].index(mo.re) if kind == 'quiet_return' else None)
+                         form=self.quiet_res().index(mo.re) if kind == 'quiet_return' else None)
             elif kind == 'pay':
                 self.add(key, m, text, 'pay', who, spec=self.amount(g['amt'], m, key, who), start=start,
                          recipient_first=mo.start('proj') < mo.start('amt'))      # the recipient is named before the amount
