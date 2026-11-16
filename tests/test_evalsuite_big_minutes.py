@@ -36,7 +36,13 @@ Item 9 of the fifth-edition design (the unchanged files), a command and not a te
     git diff --quiet 7e4beca9 -- evalsuite/check_shown.py evalsuite/generate_big.py evalsuite/generate.py evalsuite/run_blind.py \
         evalsuite/prompts/task-shown-sums.md evalsuite/arms-shown-sums.json
 (exit status 0; the same against 5d1ca73d, the commit edition 6 is built on);
-`test_the_six_files_are_those_of_commits_7e4beca9_and_5d1ca73d` runs both where those commits are in the repository's history.
+`test_the_six_files_are_those_of_commits_7e4beca9_and_5d1ca73d` runs both where those commits are in the repository's history. Edition 8
+changes one of the six: `generate_big.py` carries `quiet_returns` into the key's facts; the test holds it to those commits' file plus the
+lines that name `quiet_returns`.
+
+Edition 8 (BIG_MINUTES_EDITION=8) is edition 6 with a third of the eligible returns told in quiet words (`QUIET_STOCK`, `quiet_form_rules`,
+`quiet_book_rules`, `QuietReturnsTest`; 20 and 30 seed sweeps: `tests/sweep_minutes_edition_8.py`, which the gate does not discover). Every
+check of edition 6 runs on it (`checks_of` treats 8 as 6), and `Book` reads a quiet return as a return (`quiet_frames`, from the inventory).
 """
 import collections
 import contextlib
@@ -218,6 +224,21 @@ def date_parts(text):
     return int(mo['Y']), INV['months'].index(mo['Month']) + 1, None
 
 
+def quiet_frames(refs_src):
+    """The 48 sentences of a quiet return (edition 8), written from the inventory's opening, deed and "what" phrase: the words for the
+    project, and the month and year of the payment's meeting (captured as `when`, which `meeting_of` resolves to the one meeting of
+    that month)."""
+    atoms = {'proj': f'(?P<proj>{refs_src})', 'monthyear': f'(?P<when>{MONTH_YEAR_SRC})'}
+    out = []
+    for opening in INV['quiet_openings']:
+        for deed in INV['quiet_deeds']:
+            for what in INV['quiet_whats']:
+                template = opening + ' ' + deed.replace('{what}', what)
+                out.append(re.compile(r'(?:^|(?<=\. ))' + ''.join(
+                    atoms[part[1:-1]] if part.startswith('{') else re.escape(part) for part in re.split(r'(\{\w+\})', template)) + r'(?=\s|$)'))
+    return out
+
+
 def amount_phrases(refs_src):
     atoms = {'ord': ORD_SRC, 'frac': FRAC_SRC, 'when': WHEN_SRC, 'proj2': refs_src}
     return {kind: [src(p, atoms, True) for p in phrases] for kind, phrases in INV['amount_phrases'].items()}
@@ -278,6 +299,7 @@ class Book:
                         pieces.append(re.escape(part))
                 compiled.append(re.compile(r'(?:^|(?<=\. ))' + ''.join(pieces) + r'(?=\s|$)'))
             self.frames[kind] = compiled
+        self.frames['quiet_return'] = quiet_frames(self.refs_src)
         heading_res = [re.compile('## ' + src(h, {'date': DATE_SRC}, True).replace('(?P<date>', '(?P<date>')) for h in INV['headings']]
         self.parse(heading_res)
 
@@ -429,8 +451,9 @@ class Book:
                          when=self.meeting_of(g['when']), new=parse_money(g['money']), start=start)
             elif kind == 'rescind':
                 self.add(key, m, text, 'rescind', who, start=start)
-            elif kind == 'return':
-                self.add(key, m, text, 'return', who, when=self.meeting_of(g['when']), start=start)
+            elif kind in ('return', 'quiet_return'):
+                self.add(key, m, text, 'return', who, when=self.meeting_of(g['when']), start=start, quiet=kind == 'quiet_return',
+                         form=self.frames['quiet_return'].index(mo.re) if kind == 'quiet_return' else None)
             elif kind == 'pay':
                 self.add(key, m, text, 'pay', who, spec=self.amount(g['amt'], m, key, who), start=start,
                          recipient_first=mo.start('proj') < mo.start('amt'))      # the recipient is named before the amount
@@ -2035,7 +2058,7 @@ def check_quotas(seed, index=1):
     book, _ = read(seed, index)
     need(all(sum(t.values()) == STATEMENTS_PER_REPORT for t in EXPECTED_QUOTAS.values()), 'the expected tables are not of 24')
     both = statements_of(seed, index)
-    quota_rules(edition, len(book.meetings), both, {v: key_rows(built, v) for v in both})
+    quota_rules(big_minutes.shape_of(edition), len(book.meetings), both, {v: key_rows(built, v) for v in both})
     altered = sum(a != b for a, b in zip(report_statements(built, 'correct'), report_statements(built, 'mixed')))
     need(ALTERED[0] <= altered <= ALTERED[1], f'{altered} altered statements')
     kinds = collections.Counter(claim_kind_of(st, len(book.meetings)) for st in both['correct'])
@@ -2134,7 +2157,7 @@ def check_choice_rules(seed, index=1):
     edition, built = big_minutes.current_edition(), case(seed, index)
     book, runs = read(seed, index)
     both = statements_of(seed, index)
-    uses = choice_rules(edition, len(book.meetings), runs, book.projects, both, book)
+    uses = choice_rules(big_minutes.shape_of(edition), len(book.meetings), runs, book.projects, both, book)       # edition 8 is edition 6's
     # the readers' sums nearest the truth give the false value of a sum (the order of the picker's rule), by this evaluator
     for st, row in zip(both['mixed'], key_rows(built, 'mixed')):
         if st['shape'] != 'single' and row['error_type'] not in (None, 'plain_wrong_value'):
@@ -2479,7 +2502,7 @@ def scratch_folder(prefix, parent=None):
 @guarded
 def check_pipeline(seed, index=1):
     """Build the dossier with the facts in its key, then read its keys through the real `check_shown.read_keys` (which runs
-    `check_row` on every row) with the edition variable unset and set to 1, 2, 3, 4, 5 and 6: no refusal, and `answer`, `value_form`
+    `check_row` on every row) with the edition variable unset and set to 1, 2, 3, 4, 5, 6 and 8: no refusal, and `answer`, `value_form`
     and `relevant` give the same for every row and every reader under every setting."""
     import blindness
     import check_shown
@@ -2492,7 +2515,7 @@ def check_pipeline(seed, index=1):
         (folder / 'draft' / f'{key["dossier_id"]}.json').write_text(json.dumps(key), encoding='utf-8')
         blindness.seal_keys(folder / 'draft', folder / 'sealed', [folder / 'arena'])
         seen, rows_read = {}, 0
-        for setting in (None, 1, 2, 3, 4, 5, 6):
+        for setting in (None, 1, 2, 3, 4, 5, 6, 8):
             with edition_env(setting):
                 dossier = check_shown.read_keys(folder / 'sealed')['dossiers'][key['dossier_id']]
                 rows, found = dossier['rows'], {}
@@ -2508,7 +2531,7 @@ def check_pipeline(seed, index=1):
             need(found == seen[None], f'answer, value_form or relevant differ under {big_minutes.EDITION_VARIABLE}={setting}')
     finally:
         shutil.rmtree(folder, ignore_errors=True)
-    return f'read_keys accepts {rows_read} rows with the variable unset and set to 1, 2, 3, 4, 5, 6; answer, value_form and relevant are the same'
+    return f'read_keys accepts {rows_read} rows with the variable unset and set to 1, 2, 3, 4, 5, 6, 8; answer, value_form and relevant are the same'
 
 
 @per_edition
@@ -2589,7 +2612,7 @@ def world6(built, book, sources):
     projects with an award, four minute books (five from 47 meetings) and the preamble that names them (`volumes 1 to N`), 430,000 to
     510,000 characters, the key says `size` 6, no name or sponsor used twice (one introduction per project, each sponsor once), and the
     density: 450 to 700 payments in all (design: about 480 to 670), at most 20 to a project, and at least half of the projects that are
-    paid with 14 or more. `built` is the dossier built with its facts."""
+    paid with 14 or more. `built` is the dossier built with its facts. Edition 8 is edition 6's world (its key says `size` 8)."""
     size = sum(len(t) for t in sources.values())
     meetings, projects = len(book.meetings), len(book.projects)
     need(44 <= meetings <= 48, f'{meetings} meetings')
@@ -2597,7 +2620,7 @@ def world6(built, book, sources):
     books = volumes_in(sources)
     need(len(books) == (5 if meetings >= 47 else 4) and sorted(sources) == sorted(['procedure.md'] + books), f'sources {sorted(sources)}')
     need(430000 <= size <= 510000, f'{size} characters')
-    need(built['key']['facts']['size'] == 6, 'the key does not say which edition it is')
+    need(built['key']['facts']['size'] in (6, 8), 'the key does not say which edition it is')       # 8: edition 6's world with quiet returns
     for variant in ('correct', 'mixed'):
         need(f'volumes 1 to {len(books)}' in built['files'][f'report-{variant}.md'], f'the {variant} report names other volumes than there are')
     intros = [f for f in book.facts if f['t'] == 'intro']
@@ -2609,7 +2632,7 @@ def world6(built, book, sources):
     need(max(per_project.values()) <= 20, f'a project with {max(per_project.values())} payments')
     dense = sum(n >= 14 for n in per_project.values())
     need(2 * dense >= len(per_project), f'only {dense} of {len(per_project)} paid projects have 14 or more payments')
-    return (f'{meetings} meetings, {projects} projects with an award, {len(books)} minute books, {size} characters, size 6; {total} payments '
+    return (f'{meetings} meetings, {projects} projects with an award, {len(books)} minute books, {size} characters, size {built['key']['facts']['size']}; {total} payments '
             f'in all, {dense} of {len(per_project)} paid projects with 14 or more')
 
 
@@ -2626,7 +2649,8 @@ def check_world3(seed, index=1):
     book, _ = read(seed, index)
     sources = sources_of(built)
     size = sum(len(t) for t in sources.values())
-    if edition == 6:
+    if big_minutes.shape_of(edition) == 6:
+        need(facts_built(seed, index)['key']['facts']['size'] == edition, 'the key does not say which edition it is')
         return world6(facts_built(seed, index), book, sources)
     need(29 <= len(book.meetings) <= 32, f'{len(book.meetings)} meetings')
     need(18 <= len(book.projects) <= 24, f'{len(book.projects)} projects with an award')
@@ -3516,7 +3540,7 @@ def check_whole_base(seed, index=1):
 
 @guarded
 def check_procedure6(seed, index=1):
-    return procedure6_is_that_of_5(procedure_of(6, seed))
+    return procedure6_is_that_of_5(procedure_of(big_minutes.current_edition(), seed))
 
 
 @guarded
@@ -3524,7 +3548,7 @@ def check_second_process6(seed, index=1):
     """The same bytes in two other processes (string-hash seeds 0 and 4242): the dossier with its facts, as JSON, equals the one built here."""
     built = facts_built(seed, index)
     for hash_seed in ('0', '4242'):
-        same_in_second_process(built, build_in_another_process(6, seed, index, hash_seed), f'a process with PYTHONHASHSEED={hash_seed}')
+        same_in_second_process(built, build_in_another_process(big_minutes.current_edition(), seed, index, hash_seed), f'a process with PYTHONHASHSEED={hash_seed}')
     return 'a dossier built in two other processes (PYTHONHASHSEED 0 and 4242) is the dossier built here, with its facts'
 
 
@@ -3782,6 +3806,7 @@ CHECKS6 = CHECKS5 + (('dense world: payments, amounts, regular instalments, ever
 
 
 def checks_of(edition):
+    edition = big_minutes.shape_of(edition)         # edition 8 is edition 6 with quiet returns, and has edition 6's checks
     return CHECKS6 if edition == 6 else CHECKS5 if edition == 5 else CHECKS3 if edition >= 3 else CHECKS + (EDITION2_CHECKS if edition == 2 else ())
 
 
@@ -3794,10 +3819,11 @@ def fixtures_refusal(base, edition):
     """None, or the reason a fixtures folder cannot be of `edition`. Only its shape is looked at: a fourth minute book means
     edition 2 or 6 (editions 1, 3, 4 and 5 have three); among editions 1, 3, 4 and 5, and between 2 and 6, the comparison of bytes decides."""
     four = any((base / name).exists() for name in ('sources/minute-book-4.md', 'minute-book-4.md'))
-    if four and edition not in (2, 6):
+    shape = big_minutes.shape_of(edition)           # edition 8 is edition 6's dossier in shape
+    if four and shape not in (2, 6):
         return (f'{base} was made under edition 2 (it has minute-book-4.md; edition 6 has four or five minute books too) and '
                 f'{big_minutes.EDITION_VARIABLE} asks for edition {edition}: set {big_minutes.EDITION_VARIABLE}=2 or 6 and run again')
-    if not four and edition in (2, 6):
+    if not four and shape in (2, 6):
         return (f'{base} was made under edition 1, 3, 4 or 5 (it lacks minute-book-4.md) and {big_minutes.EDITION_VARIABLE} asks for '
                 f'edition {edition}: set {big_minutes.EDITION_VARIABLE}=1 (or leave it unset), 3, 4 or 5 and run again')
     return None
@@ -3817,7 +3843,7 @@ def compare_fixtures(built, base):
 def verify(seed, index, fixtures=None):
     """Run the checks on exactly one draw and, given a fixtures folder, compare the rebuilt files with it byte for
     byte. Prints one line per check; returns the number of failures. The draw is built under the edition that
-    BIG_MINUTES_EDITION names (1 when it is not set; editions 1 to 6 exist), and a fixtures folder whose shape is not that
+    BIG_MINUTES_EDITION names (1 when it is not set; editions 1 to 6 and 8 exist), and a fixtures folder whose shape is not that
     of the edition is refused before any check: editions 2 and 6 have a fourth minute book, the others never do."""
     try:
         edition = big_minutes.current_edition()
@@ -3843,6 +3869,95 @@ def verify(seed, index, fixtures=None):
 
 
 
+# ---------- Edition 8: quiet returns ----------
+#
+# Written from the brief of the edition (a quiet return is one sentence of an opening, a deed and a "what" phrase, 4 x 6 x 2 forms) and
+# compared with the generator's stock and the text it writes, never read from the generator.
+
+QUIET_STOCK = (
+    ('It was noted that', 'Members heard that', 'It was recorded that', 'The meeting was told that'),
+    ('{proj} had handed in to the committee {what}.', '{proj} had surrendered to the committee {what}.',
+     '{proj} had given up to the committee {what}.', '{proj} had made over to the committee {what}.',
+     '{proj} had relinquished to the committee {what}.', '{proj} had parted with {what}, and the committee has it again.'),
+    ('what the committee, as minuted in {monthyear}, let it have', 'what, as minuted in {monthyear}, came to it from the committee'))
+QUIET_BANNED = ('treasurer', 'payment', 'instalment', 'cheque', 'sum', 'paid', 'transfer', 'money', 'fund', 'pound', '£', 'return', 'recall',
+                'repay', 'repaid', 'bounc', 'restor', 'came back', 'sent back', 'refund', 'cancel', 'claw', 'revers')
+QUIET_OFFICERS = ('chair', 'secretary', 'treasurer', 'officer', 'clerk')
+QUIET_PROJECTS = ('the Hilltop Cricket Club scheme', 'Saltings Road Almshouse Floor Restoration',
+                  'the third undertaking to receive the committee’s backing', 'the concern mentioned just above')
+QUIET_DATE = big_minutes.datetime.date(2038, 4, 12)
+
+
+def quiet_form_rules(text, proj):
+    """The rules every quiet sentence holds (brief, 2.1), on the words of the form alone (the words for the project are taken out first:
+    they may hold a banned stem, as "Floor Restoration" does, or the word "committee")."""
+    need(text.count(proj) == 1, f'{proj!r} does not occur once in {text!r}')
+    own = text.replace(proj, '')
+    lower = own.lower()
+    need(re.findall(r'\d+', own) == ['2038'], f'figures other than the year in {text!r}')
+    need(not [w for w in QUIET_BANNED if w in lower], f'{[w for w in QUIET_BANNED if w in lower]} in {text!r}')
+    need(not [w for w in QUIET_OFFICERS if w in lower], f'an officer in {text!r}')
+    need(re.search(r'(?:what the committee,|from the committee)', own) and re.search(r'(?:to the committee|the committee has it again)', own),
+         f'the committee is not named as sender and as receiver in {text!r}')
+    need(own.count('as minuted in April 2038') == 1 and ('what the committee, as minuted in April 2038, let it have' in own
+                                                          or 'what, as minuted in April 2038, came to it from the committee' in own),
+         f'the meeting is not named inside the "what" phrase in {text!r}')
+    need(any(own.startswith(o + ' ') for o in QUIET_STOCK[0]) and own.endswith('.') and own.count('.') == 1, f'the shape of {text!r}')
+
+
+def quiet_forms():
+    return [(a, b, c) for a in range(len(QUIET_STOCK[0])) for b in range(len(QUIET_STOCK[1])) for c in range(len(QUIET_STOCK[2]))]
+
+
+def quiet_eligible(facts):
+    """The returns that may be quiet (brief, 2.2), from the key's facts alone: the returned payment is the only event of the key for its
+    project at its meeting (`names` and `restate` left aside) and the paragraph that states the return states nothing else."""
+    events, by_id = facts['events'], {e['id']: e for e in facts['events']}
+    states = collections.defaultdict(set)
+    spot_of = {}
+    for entry in facts['passages']:
+        states[(entry['file'], entry['paragraph'])].update(entry['event_ids'])
+        if entry['role'] == 'states':
+            spot_of.update({i: (entry['file'], entry['paragraph']) for i in entry['event_ids']})
+    found = []
+    for e in events:
+        if e['kind'] != 'return':
+            continue
+        same = [x['id'] for x in events if x['p'] == e['p'] and x['m'] == by_id[e['target']]['m'] and x['kind'] not in ('names', 'restate')]
+        if same == [e['target']] and states[spot_of[e['id']]] == {e['id']}:
+            found.append(e['id'])
+    return sorted(found)
+
+
+def quiet_book_rules(built):
+    """What an edition 8 dossier built with its facts must show of its quiet returns (brief, 2.2, R5, R7, R11), by this module's own reader and
+    own reading of the key's facts: how many there are; each one eligible; no form twice; and each one read back as a return of the
+    project and the meeting the log gives, in the paragraph the passages give. Returns (returns, eligible, quiet)."""
+    facts = built['key']['facts']
+    quiet, by_id = facts['quiet_returns'], {e['id']: e for e in facts['events']}
+    returns = [e['id'] for e in facts['events'] if e['kind'] == 'return']
+    eligible = quiet_eligible(facts)
+    need(len(returns) >= 12 and len(eligible) >= 6, f'{len(returns)} returns, {len(eligible)} eligible')
+    wanted = min(max(6, round(len(eligible) / 3)), len(returns) // 2)
+    need(quiet == sorted(set(quiet)) and len(quiet) == wanted, f'{len(quiet)} quiet returns, not {wanted} (of {len(eligible)} eligible, {len(returns)} returns)')
+    need(set(quiet) <= set(eligible), f'quiet returns that are not eligible: {sorted(set(quiet) - set(eligible))}')
+    book = Book(sources_of(built))
+    need(book.errors == [], f'the reader finds {book.errors[:2]}')
+    meetings = calendar_of(book, facts['events'])
+    heard = [f for f in book.facts if f['t'] == 'return' and f['quiet']]
+    need(len(heard) == len(quiet), f'{len(heard)} quiet returns read, {len(quiet)} listed')
+    need(len({f['form'] for f in heard}) == len(heard), 'a form is used twice in the book')
+    spot_of = {i: (VOLUMES.index(entry['file']), entry['paragraph']) for entry in facts['passages'] if entry['role'] == 'states' for i in entry['event_ids']}
+    for event_id in quiet:
+        e = by_id[event_id]
+        here = [f for f in heard if f['key'] == spot_of[event_id]]
+        need(len(here) == 1, f'{event_id}: {len(here)} quiet returns read in its paragraph')
+        need(here[0]['p'] == e['subject'] and here[0]['when'] == meetings.index(by_id[e['target']]['date']),
+             f'{event_id}: read as a return of {here[0]["p"]} at meeting {here[0]["when"]}, the log says {e["subject"]} at {by_id[e["target"]]["date"]}')
+    return len(returns), len(eligible), len(quiet)
+
+
+
 def case_dossier(seed, edition, index=1):
     with edition_env(edition):
         return case(seed, index)['dossier']
@@ -3855,6 +3970,9 @@ def write_fixtures(built, parent):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding='utf-8')
     return folder
+
+
+EDITION8_KEY_FILE = 'evalsuite/generate_big.py'      # the one of the six files that edition 8 changes: it adds `quiet_returns` to the key's facts
 
 
 class BigMinutesTest(unittest.TestCase):
@@ -4128,7 +4246,7 @@ class BigMinutesTest(unittest.TestCase):
 
     def test_edition_switch(self):
         self.assertEqual(big_minutes.current_edition(), 1)                    # not set: edition 1
-        for raw, want in (('1', 1), ('2', 2), ('3', 3), ('4', 4), ('5', 5), ('6', 6)):
+        for raw, want in (('1', 1), ('2', 2), ('3', 3), ('4', 4), ('5', 5), ('6', 6), ('8', 8)):
             with edition_env(raw):
                 self.assertEqual(big_minutes.current_edition(), want)
         for raw in ('', '0', '7', '12', '2 ', ' 1', 'one', '1.0', 'two', '34', '03', '-1', '5th', '05', '55'):
@@ -4137,7 +4255,7 @@ class BigMinutesTest(unittest.TestCase):
                     big_minutes.current_edition()
                 with self.assertRaises(generate.GenerationError, msg=repr(raw)):
                     generate.build_case('minutes', 1, 1)
-        self.assertEqual(big_minutes.EDITIONS, (1, 2, 3, 4, 5, 6))             # the editions that exist: the list is pinned
+        self.assertEqual(big_minutes.EDITIONS, (1, 2, 3, 4, 5, 6, 8))             # the editions that exist: the list is pinned
         default = build_with_facts(1, 1)
         with edition_env(1):
             one = build_with_facts(1, 1)
@@ -4189,7 +4307,8 @@ class BigMinutesTest(unittest.TestCase):
                 shutil.rmtree(folder)
 
     def test_verify_refuses_fixtures_of_the_other_edition(self):
-        for made_under, asks in ((2, None), (2, 1), (1, 2), (2, 3), (2, 4), (3, 2), (4, 2), (2, 5), (5, 2), (1, 6), (3, 6), (4, 6), (5, 6)):
+        for made_under, asks in ((2, None), (2, 1), (1, 2), (2, 3), (2, 4), (3, 2), (4, 2), (2, 5), (5, 2), (1, 6), (3, 6), (4, 6), (5, 6),
+                                  (1, 8), (3, 8), (4, 8), (5, 8)):
             with edition_env(made_under):
                 folder = write_fixtures(case(1), ROOT / 'tmp')
             try:
@@ -4202,12 +4321,12 @@ class BigMinutesTest(unittest.TestCase):
                 self.assertEqual(out.getvalue().count('\n'), 1, out.getvalue())          # refused before any check
             finally:
                 shutil.rmtree(folder)
-        for raw in ('7', 'x', '0', ''):                     # editions 1 to 6 exist; nothing else does
+        for raw in ('7', 'x', '0', ''):                     # editions 1 to 6 and 8 exist; nothing else does
             with edition_env(raw):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
                     self.assertEqual(verify(1, 1), 1, raw)
-                self.assertIn('must be 1, 2, 3, 4, 5 or 6', out.getvalue())
+                self.assertIn('must be 1, 2, 3, 4, 5, 6 or 8', out.getvalue())
                 self.assertEqual(out.getvalue().count('\n'), 1, out.getvalue())
 
     def test_a_three_book_folder_is_accepted_by_editions_1_3_4_and_5_and_the_bytes_decide(self):
@@ -5208,9 +5327,17 @@ class BigMinutesTest(unittest.TestCase):
                 want = subprocess.run(['git', 'rev-parse', f'{commit}:{name}'], cwd=ROOT, capture_output=True, text=True)
                 have = subprocess.run(['git', 'hash-object', '--', name], cwd=ROOT, capture_output=True, text=True)
                 self.assertEqual((want.returncode, have.returncode), (0, 0), name)
+                if name == EDITION8_KEY_FILE:
+                    continue      # `generate_big.py` carries `quiet_returns` into the key's facts (edition 8): checked line by line below
                 self.assertEqual(have.stdout.strip(), want.stdout.strip(), f'{name} differs from commit {commit}')
-            done = subprocess.run(['git', 'diff', '--quiet', commit, '--'] + list(files), cwd=ROOT, capture_output=True)
+            done = subprocess.run(['git', 'diff', '--quiet', commit, '--'] + [n for n in files if n != EDITION8_KEY_FILE], cwd=ROOT,
+                                  capture_output=True)
             self.assertEqual(done.returncode, 0, f'one of the six files differs from commit {commit}')
+            # the one file edition 8 touches is the commit's file plus lines that name `quiet_returns`, and nothing else
+            then = subprocess.run(['git', 'show', f'{commit}:{EDITION8_KEY_FILE}'], cwd=ROOT, capture_output=True, text=True).stdout.split('\n')
+            now = (ROOT / EDITION8_KEY_FILE).read_text(encoding='utf-8').split('\n')
+            self.assertEqual([line for line in now if 'quiet_returns' not in line], then, f'{EDITION8_KEY_FILE} differs from commit {commit}')
+            self.assertTrue(any('quiet_returns' in line for line in now))
 
     def test_the_sum_task_files(self):
         root = ROOT / 'evalsuite'
@@ -5384,6 +5511,134 @@ class BigMinutesTest(unittest.TestCase):
                         self.assertTrue(value is None or isinstance(value, (int, float, str)), (seed, key, reader, value))
                         if q['kind'] == 'projects':
                             self.assertIsInstance(value, int)
+
+
+class QuietReturnsTest(unittest.TestCase):
+    """Edition 8: the 48 forms of a quiet return, the choice of returns, the swap, and the edition against edition 6 on two seeds. The sweeps
+    over 20 and 30 seeds are `tests/sweep_minutes_edition_8.py`, which the gate does not discover."""
+
+    def test_the_stock_is_the_48_forms_of_the_brief(self):
+        self.assertEqual((big_minutes.QUIET_OPENINGS, big_minutes.QUIET_DEEDS, big_minutes.QUIET_WHATS), QUIET_STOCK)
+        self.assertEqual(len(quiet_forms()), 48)
+        self.assertEqual((INV['quiet_openings'], INV['quiet_deeds'], INV['quiet_whats']), QUIET_STOCK)
+        self.assertEqual(big_minutes.QUIET_FORMS, 48)
+        for table in (big_minutes.FRAMES, big_minutes.PLAIN_FRAMES):
+            for frames in table.values():
+                self.assertFalse([f for f in frames if 'minuted in' in f], 'a quiet part is in a shared table')
+        self.assertEqual(len(INV['when_forms']), 7)        # `WHEN_FORMS` is as it was: every draw from it is unchanged
+
+    def test_every_form_holds_every_rule_for_other_words_for_the_project(self):
+        """Each of the 48 forms, with four different words for the project (one holds "Restoration" and one the word "committee"), holds
+        the rules of the brief, and this module's reader reads it back as one return of that project at the meeting of April 2038."""
+        refs = '(?:' + '|'.join(re.escape(w) for w in sorted(QUIET_PROJECTS, key=len, reverse=True)) + ')'
+        readers = quiet_frames(refs)
+        self.assertEqual(len(readers), 48)
+        for proj in QUIET_PROJECTS:
+            texts = [big_minutes.quiet_sentence(form, proj, QUIET_DATE) for form in quiet_forms()]
+            self.assertEqual(len(set(texts)), 48, proj)
+            for text in texts:
+                quiet_form_rules(text, proj)
+                found = [mo for rx in readers for mo in [rx.fullmatch(text)] if mo]
+                self.assertEqual(len(found), 1, text)
+                self.assertEqual((found[0]['proj'], date_parts(found[0]['when'])), (proj, (2038, 4, None)), text)
+
+    def test_the_rules_see_a_broken_form(self):
+        """Negative controls: each rule refuses a sentence that breaks it (the unbroken sentence passes)."""
+        proj = QUIET_PROJECTS[0]
+        good = big_minutes.quiet_sentence((0, 0, 0), proj, QUIET_DATE)
+        quiet_form_rules(good, proj)
+        for broken in (good.replace('handed in', 'repaid'), good.replace('handed in', 'handed in £500 to'), good.replace('let it have', 'paid'),
+                       good.replace('It was noted that', 'The treasurer noted that'), good.replace('It was noted that', 'The chair noted that'),
+                       good.replace('as minuted in April 2038', 'as minuted in April'), good.replace('to the committee', 'to the sponsor'),
+                       good.replace('what the committee,', 'what the sponsor,'), good + ' It was returned.', good.replace('April 2038', '12 April 2038')):
+            self.assertNotEqual(broken, good)
+            with self.assertRaises(Failed, msg=broken):
+                quiet_form_rules(broken, proj)
+
+    def test_which_returns_are_eligible_and_how_many_are_quiet(self):
+        """Hand-written logs: a return is eligible only when its payment is the one event of the project at its meeting (`names` and
+        `restate` apart) and its paragraph states nothing else; a book needs 12 returns and 6 eligible ones; a third, rounded, at least 6."""
+        def book(count, spoil):
+            events, passages = [], []
+            for n in range(count):
+                events += [{'id': f'P{n}', 'kind': 'pay', 'p': n, 'm': 3}, {'id': f'R{n}', 'kind': 'return', 'p': n, 'm': 9, 'target': f'P{n}', 'target_m': 3},
+                           {'id': f'N{n}', 'kind': 'names', 'p': n, 'm': 3}, {'id': f'S{n}', 'kind': 'restate', 'p': n, 'm': 3}]
+                passages += [{'file': 'minute-book-1.md', 'paragraph': 2 * n + 1, 'event_ids': [f'R{n}'], 'role': 'states'},
+                             {'file': 'minute-book-1.md', 'paragraph': 2 * n + 2, 'event_ids': [f'N{n}'], 'role': 'names'}]
+            for n in spoil.get('award', ()):
+                events.append({'id': f'A{n}', 'kind': 'award', 'p': n, 'm': 3})
+            for n in spoil.get('shared', ()):
+                passages[2 * n]['event_ids'].append(f'P{n}')
+            return events, passages
+        events, passages = book(12, {})
+        self.assertEqual(big_minutes.eligible_returns(events, passages), sorted(f'R{n}' for n in range(12)))
+        events, passages = book(12, {'award': (0, 1), 'shared': (2,)})
+        self.assertEqual(big_minutes.eligible_returns(events, passages), sorted(f'R{n}' for n in range(3, 12)))
+        state = random.Random(5).getstate()
+        self.assertIsNone(big_minutes.quiet_plan(state, *book(11, {})))                                  # 11 returns: too few
+        self.assertIsNone(big_minutes.quiet_plan(state, *book(12, {'award': tuple(range(7))})))          # 5 eligible: too few
+        self.assertEqual(len(big_minutes.quiet_plan(state, *book(12, {}))), 6)                           # 12 eligible: a third is 4, the least is 6
+        self.assertEqual(len(big_minutes.quiet_plan(state, *book(12, {'award': (0, 1, 2, 3, 4, 5)}))), 6)  # exactly 6 eligible: all of them
+        self.assertEqual(len(big_minutes.quiet_plan(state, *book(30, {}))), 10)
+        self.assertEqual(len(big_minutes.quiet_plan(state, *book(31, {}))), 10)
+        self.assertEqual(len(big_minutes.quiet_plan(state, *book(32, {}))), 11)
+        plan = big_minutes.quiet_plan(state, *book(40, {}))
+        self.assertEqual(len(set(plan.values())), len(plan))                                              # no form twice
+        self.assertEqual(plan, big_minutes.quiet_plan(state, *book(40, {})))                             # the same state gives the same plan
+        self.assertNotEqual(plan, big_minutes.quiet_plan(random.Random(6).getstate(), *book(40, {})))
+
+    def test_the_swap_needs_the_sentence_once_in_its_paragraph(self):
+        """The sentence edition 6 drew must be found exactly once in the paragraph that states the return; otherwise the generator refuses."""
+        passages = [{'file': 'minute-book-1.md', 'paragraph': 1, 'event_ids': ['R1'], 'role': 'states'}]
+        events = [{'id': 'R1', 'target_m': 0}]
+        def swap(paragraph, old):
+            files = {'minute-book-1.md': 'head\n\n' + paragraph + '\n\ntail\n'}
+            blocks_of = {}
+            out = big_minutes.swap_quiet(files, passages, blocks_of, {'quiet_log': {'R1': ['the scheme', old]}, 'dates': [QUIET_DATE]},
+                                         events, {'R1': (0, 0, 0)})
+            return out, blocks_of
+        out, blocks_of = swap('Before. It was repaid. After.', 'It was repaid.')
+        self.assertEqual(out['minute-book-1.md'], 'head\n\nBefore. It was noted that the scheme had handed in to the committee what the committee, '
+                                                  'as minuted in April 2038, let it have. After.\n\ntail\n')
+        self.assertEqual(blocks_of['R1'], out['minute-book-1.md'].split('\n\n')[1])
+        for paragraph in ('Before. After.', 'It was repaid. It was repaid.'):
+            with self.assertRaises(generate.GenerationError, msg=paragraph):
+                swap(paragraph, 'It was repaid.')
+
+    def test_edition_8_is_edition_6_but_for_its_quiet_returns(self):
+        """Two seeds (the second is built twice, once under each edition; the first is the cached dossier of the other tests): the same event
+        log, passages, names, readers, procedure, both reports and the key's rows; the sources differ only in the paragraphs of the quiet
+        returns the key lists; the key says `size` 8; the quiet returns are those the rules allow, each read back by this module's reader."""
+        for seed in (ED_SEED, 2):
+            with edition_env(6):
+                six = facts_built(seed)
+            with edition_env(8):
+                eight = facts_built(seed)
+            f6, f8 = six['key']['facts'], eight['key']['facts']
+            self.assertEqual((f6.get('size'), f8['size']), (6, 8))
+            for part in ('events', 'passages', 'names', 'readers', 'family', 'interpreter', 'interpreter_sha256'):
+                self.assertEqual(f6[part], f8[part], (seed, part))
+            self.assertEqual(six['key']['expectations'], eight['key']['expectations'], seed)
+            for name in ('report-correct.md', 'report-mixed.md', 'sources/procedure.md'):
+                self.assertEqual(six['files'][name], eight['files'][name], (seed, name))
+            self.assertEqual(sorted(six['files']), sorted(eight['files']))
+            self.assertNotIn('quiet_returns', f6)
+            spots = {(entry['file'], entry['paragraph']) for entry in f8['passages'] if entry['role'] == 'states' and set(entry['event_ids']) & set(f8['quiet_returns'])}
+            differing = set()
+            for name in sources_of(six):
+                a, b = sources_of(six)[name].split('\n\n'), sources_of(eight)[name].split('\n\n')
+                self.assertEqual(len(a), len(b), (seed, name))
+                differing |= {(name, n) for n, (x, y) in enumerate(zip(a, b)) if x != y}
+            self.assertEqual(differing, spots, seed)
+            returns, eligible, quiet = quiet_book_rules(eight)
+            print(f'edition 8, seed {seed}: {returns} returns, {eligible} eligible, {quiet} quiet')
+
+    def test_edition_8_is_the_same_bytes_in_another_process(self):
+        """One process (another string-hash seed): the dossier with its facts, quiet returns included, is the one built here."""
+        with edition_env(8):
+            built = facts_built(ED_SEED)
+        same_in_second_process(built, build_in_another_process(8, ED_SEED, 1, '4242'), 'a process with PYTHONHASHSEED=4242')
+
 
 if __name__ == '__main__':
     if len(sys.argv) >= 4 and sys.argv[1] == '--verify':

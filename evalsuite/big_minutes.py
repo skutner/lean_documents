@@ -71,7 +71,7 @@ Flawed readers (each a specific shortcut; the interpreter switches):
                                  correction that points at something it does not see changes nothing, and a
                                  payment whose amount it cannot work out at all is skipped.
 
-Edition. The environment variable BIG_MINUTES_EDITION (1, 2, 3, 4, 5 or 6; unset means 1; anything else is an error) says which
+Edition. The environment variable BIG_MINUTES_EDITION (1, 2, 3, 4, 5, 6 or 8; unset means 1; anything else is an error) says which
 edition of the generator draws the dossier. Edition 1 is the dossier described above, byte for byte as it was before
 editions existed. Edition 2 is about one and a half times as large (30 to 36 projects over 44 to 48 meetings, four or
 five minute books, 570,000 to 630,000 characters), its 24 statements per report are 7 about the number of projects holding
@@ -171,9 +171,24 @@ sentence carries a count of its own. `QUOTAS[6]` gives per report 2 awards in fo
 and 4 `sum8`, 8 `upto`, 2 `span6`, 2 `book` (half totals, half numbers of payments), 2 `asum8` and 2 `abook` (one sum of awards in
 force and one of unpaid balances each); no statement about the number of projects holding an award, no `span3`, no `aupto`. The
 picker serves a rung whose quota is 0 by skipping it (`projects` too).
+
+Edition 8 (the dense world with quiet returns). Edition 6, unchanged, except that in each book a third of the eligible returns are
+written as quiet returns: one sentence with no sum, no money word, no usual word for coming back and no officer, made of an opening,
+a deed and a "what" phrase (`QUIET_OPENINGS`, `QUIET_DEEDS`, `QUIET_WHATS`: 48 forms, each used once at most in a book, drawn from a
+random stream of its own that is seeded from the state of the main one on entry to `attempt` and never draws from it). `attempt`
+builds the edition 6 book exactly as edition 6 does (every draw, every count of length and every entry of the record of sentences
+said is made on the edition 6 sentence) and only after `render_book` swaps the sentence of each chosen return (`quiet_plan`,
+`swap_quiet`), so that the world, the events, both reports and the key's expectations are edition 6's; the size bound and the
+quotability test run on the edition 6 text and on the edition 8 text, and a world that fails on the second alone is redrawn. A return
+is eligible when its payment's meeting holds no other event of the key for the project (`names` and `restate` apart) and the paragraph
+it stands in states no other event (`eligible_returns`); a world with fewer than 12 returns or fewer than 6 eligible ones is redrawn
+(checked last, as `PAYMENTS6` is); the number of quiet returns is the eligible ones over three, rounded, at least 6 and at most half
+of the returns. `case['size']` is 8 and `case['quiet_returns']` lists the event ids that are quiet (the key's facts carry it). The text
+frames, the procedure, the interpreter and the quotas are edition 6's; `answer`, `value_form` and `relevant` do not read the edition.
 """
 import bisect
 import datetime
+import hashlib
 import os
 import random
 import re
@@ -223,7 +238,7 @@ SPONSORS2 = SPONSORS + ('Beacon Allotment Holders', 'Riverside Reading Room Trus
                         'Ivy Lane Chapel Trust', 'Barley Mow Friends')
 # What an edition changes: meetings, projects, minute books and size of the text, and the mix of statements per report.
 EDITION_VARIABLE = 'BIG_MINUTES_EDITION'
-EDITIONS = (1, 2, 3, 4, 5, 6)
+EDITIONS = (1, 2, 3, 4, 5, 6, 8)
 SETTINGS = {1: {'meetings': (29, 32), 'projects': (18, 24), 'books': 3, 'size': (350000, 420000), 'bounds': (300000, 450000),
                 'places': PLACES, 'buildings': BUILDINGS, 'works': WORKS, 'sponsors': SPONSORS},
             2: {'meetings': (44, 48), 'projects': (30, 36), 'books': None, 'size': (570000, 630000), 'bounds': (550000, 650000),
@@ -233,6 +248,7 @@ SETTINGS[3] = SETTINGS[4] = SETTINGS[5] = SETTINGS[1]          # editions 3, 4 a
 # edition 2's; `payments` is the number of payments a project is drawn with (see `plan_project6`).
 SETTINGS[6] = {'meetings': (44, 48), 'projects': (36, 40), 'books': None, 'size': (440000, 480000), 'bounds': (430000, 510000),
                'places': PLACES2, 'buildings': BUILDINGS2, 'works': WORKS2, 'sponsors': SPONSORS2, 'payments': (16, 20)}
+SETTINGS[8] = SETTINGS[6]       # edition 8 is edition 6's world and size, with quiet returns
 # Edition 2: statements per report by kind (the unpaid award in force is not asked), and of them the controls (every
 # flawed reader right); the other 18 are statements on which a flawed reader is wrong.
 MIX2 = {'projects': 7, 'total': 6, 'count': 6, 'balance': 2, 'largest': 2, 'first': 1, 'award': 0}
@@ -240,13 +256,18 @@ CONTROLS2 = {'projects': 2, 'total': 2, 'count': 1, 'balance': 1}
 
 
 def current_edition():
-    """The edition asked for by BIG_MINUTES_EDITION: 1 when it is not set; an error when it is set to anything but 1, 2, 3, 4, 5 or 6."""
+    """The edition asked for by BIG_MINUTES_EDITION: 1 when it is not set; an error when it is set to anything but 1, 2, 3, 4, 5, 6 or 8."""
     raw = os.environ.get(EDITION_VARIABLE)
     if raw is None:
         return 1
-    if raw not in ('1', '2', '3', '4', '5', '6'):
-        raise generate.GenerationError('%s must be 1, 2, 3, 4, 5 or 6, not %r' % (EDITION_VARIABLE, raw))
+    if raw not in ('1', '2', '3', '4', '5', '6', '8'):
+        raise generate.GenerationError('%s must be 1, 2, 3, 4, 5, 6 or 8, not %r' % (EDITION_VARIABLE, raw))
     return int(raw)
+
+
+def shape_of(edition):
+    """The edition whose world, frames, procedure and quotas a dossier of `edition` has: edition 8 is edition 6's, the others their own."""
+    return 6 if edition == 8 else edition
 
 
 # Aliases derived from the parts of the full name; `{work}` is the lower-case noun of the work.
@@ -494,6 +515,15 @@ RANK_WORDS = ('first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh',
               'twenty-fifth', 'twenty-sixth', 'twenty-seventh', 'twenty-eighth', 'twenty-ninth', 'thirtieth', 'thirty-first',
               'thirty-second', 'thirty-third', 'thirty-fourth', 'thirty-fifth', 'thirty-sixth', 'thirty-seventh',
               'thirty-eighth', 'thirty-ninth', 'fortieth')
+# Edition 8 only: the parts of a quiet return, a sentence with no sum, no money word, no usual word for coming back and no officer. Their
+# own tuples, so that `FRAMES`, `PLAIN_FRAMES` and `WHEN_FORMS` (and every draw from them) stay as they were. A form is one opening,
+# one deed and one "what" phrase (4 x 6 x 2 = 48); `{monthyear}` is the month and year of the meeting that reported the payment.
+QUIET_OPENINGS = ('It was noted that', 'Members heard that', 'It was recorded that', 'The meeting was told that')
+QUIET_DEEDS = ('{proj} had handed in to the committee {what}.', '{proj} had surrendered to the committee {what}.',
+               '{proj} had given up to the committee {what}.', '{proj} had made over to the committee {what}.',
+               '{proj} had relinquished to the committee {what}.', '{proj} had parted with {what}, and the committee has it again.')
+QUIET_WHATS = ('what the committee, as minuted in {monthyear}, let it have', 'what, as minuted in {monthyear}, came to it from the committee')
+QUIET_MIN, QUIET_SHARE = 6, 3      # a book has at least this many quiet returns, and one in this many of its eligible returns
 LEADS = (
     '{member} had visited {ref} that week and brought back photographs for the file.',
     'A letter had come from the sponsor of {ref} asking when the committee would next meet.',
@@ -733,7 +763,9 @@ INVENTORY = {      # the tables of the larger edition 2 (the first entries of ea
     'procedure_sums': SUMS_BLOCK3, 'procedure_rescissions': RESCISSIONS_BLOCK3, 'ordinal_cap': ORDINAL_CAP,
     # new keys of edition 5 (nothing above is changed by them)
     'award_figures': AWARD_FIGURES, 'award_rungs': AWARD_RUNGS, 'balance_wordings': BALANCE_WORDINGS,
-    'procedure_sums5': SUMS_BLOCK5, 'procedure_instalment': INSTALMENT_OWN}
+    'procedure_sums5': SUMS_BLOCK5, 'procedure_instalment': INSTALMENT_OWN,
+    # new keys of edition 8 (nothing above is changed by them; `frames` does not hold them)
+    'quiet_openings': QUIET_OPENINGS, 'quiet_deeds': QUIET_DEEDS, 'quiet_whats': QUIET_WHATS}
 
 
 # ---------- The facts: projects, calendar, event log ----------
@@ -2452,6 +2484,8 @@ def sentence(rng, e, ctx, anaphor=None):
     else:
         ctx['repeated'] = True       # every redraw repeated: a duplicate is returned, which --verify refuses, so `attempt` redraws the dossier
     ctx['said'].add(text)
+    if e['kind'] == 'return' and 'quiet_log' in ctx:
+        ctx['quiet_log'][e['id']][1] = text            # edition 8: the sentence the paragraph holds, which `swap_quiet` finds in it
     return text
 
 
@@ -2462,6 +2496,8 @@ def sentence_once(rng, e, ctx, anaphor=None):
     projects, dates = ctx['projects'], ctx['dates']
     proj = anaphor or ctx['ref'](rng, e['p'], e['m'])
     own = None if anaphor else ctx['last_form']
+    if kind == 'return' and 'quiet_log' in ctx:
+        ctx['quiet_log'][e['id']] = [proj, None]       # edition 8: the words for the project in the sentence drawn last
     frames_key = 'pay' if kind == 'pay' else 'correct_award' if kind == 'correct' and e['target_kind'] == 'award' \
         else 'correct_pay' if kind == 'correct' else kind
     plain = frames_key in PLAIN_KINDS and rng.random() < 0.45
@@ -3689,6 +3725,101 @@ def books_of(edition, count):
     return SETTINGS[edition]['books'] or 4 + (count >= 47)
 
 
+QUIET_FORMS = len(QUIET_OPENINGS) * len(QUIET_DEEDS) * len(QUIET_WHATS)
+
+
+def eligible_returns(events, passages):
+    """The ids (in order) of the returns that edition 8 may tell quietly: at the meeting that reported the returned payment the key holds
+    no other event for the project (`names` and `restate` record nothing the committee did, and are left aside), and the paragraph
+    that states the return states nothing else."""
+    at, spot_of, held = {}, {}, {}
+    for e in events:
+        if e['kind'] not in ('names', 'restate'):
+            at.setdefault((e['p'], e['m']), []).append(e['id'])
+    for entry in passages:
+        spot = (entry['file'], entry['paragraph'])
+        held.setdefault(spot, set()).update(entry['event_ids'])
+        if entry['role'] == 'states':
+            for event_id in entry['event_ids']:
+                spot_of[event_id] = spot
+    return sorted(e['id'] for e in events if e['kind'] == 'return' and at.get((e['p'], e['target_m'])) == [e['target']]
+                  and held.get(spot_of.get(e['id'])) == {e['id']})
+
+
+def quiet_plan(entry_state, events, passages):
+    """{event id: (opening, deed, what) as indexes} of the returns edition 8 tells quietly, or None when the book is too thin for it (fewer
+    than 2 x `QUIET_MIN` returns or fewer than `QUIET_MIN` eligible ones). A share of 1 in `QUIET_SHARE` of the eligible returns, rounded,
+    at least `QUIET_MIN` and at most half of the returns, drawn from a random stream of its own: seeded from `entry_state` (the state
+    of the main source when `attempt` began, read and never drawn from), so the main source is used exactly as in edition 6. The three
+    parts of a form are drawn one by one; a form already used in the book is drawn again (the repeated-sentence check compares whole
+    sentences, and a form used for another project would pass it)."""
+    returns = sum(e['kind'] == 'return' for e in events)
+    eligible = eligible_returns(events, passages)
+    if returns < 2 * QUIET_MIN or len(eligible) < QUIET_MIN:
+        return None
+    own = random.Random(int.from_bytes(hashlib.sha256(repr(entry_state).encode()).digest(), 'big'))
+    count = min(max(QUIET_MIN, int(len(eligible) / QUIET_SHARE + 0.5)), returns // 2, QUIET_FORMS)
+    used, plan = set(), {}
+    for event_id in sorted(own.sample(eligible, count)):
+        while True:
+            form = (own.randrange(len(QUIET_OPENINGS)), own.randrange(len(QUIET_DEEDS)), own.randrange(len(QUIET_WHATS)))
+            if form not in used:
+                break
+        used.add(form)
+        plan[event_id] = form
+    return plan
+
+
+def quiet_sentence(form, proj, date):
+    """The quiet return of `form` about the project `proj` (the words edition 6 used), whose payment was reported at the meeting of `date`."""
+    what = QUIET_WHATS[form[2]].format(monthyear=MONTH_YEAR.format(Month=MONTHS[date.month - 1], Y=date.year))
+    return QUIET_OPENINGS[form[0]] + ' ' + QUIET_DEEDS[form[1]].format(proj=proj, what=what)
+
+
+def swap_quiet(files, passages, blocks_of, ctx, events, plan):
+    """The minute books with the sentence of each return of `plan` replaced by its quiet one, in the paragraph that states it (the sentence
+    edition 6 drew, which `sentence` recorded, must occur there exactly once: otherwise the generator refuses). Nothing is drawn.
+    `blocks_of` is updated for the paragraphs that change; returns the new {file name: text}."""
+    by_id = {e['id']: e for e in events}
+    spot_of = {i: (entry['file'], entry['paragraph']) for entry in passages if entry['role'] == 'states' for i in entry['event_ids']}
+    parts = {}
+    for event_id, form in sorted(plan.items()):
+        name, number = spot_of[event_id]
+        if name not in parts:
+            parts[name] = files[name].rstrip('\n').split('\n\n')
+            if '\n\n'.join(parts[name]) + '\n' != files[name]:
+                raise generate.GenerationError(f'{name} does not split into the paragraphs the passages number')
+        proj, old = ctx['quiet_log'][event_id]
+        if parts[name][number].count(old) != 1:
+            raise generate.GenerationError(f'The sentence of return {event_id} occurs {parts[name][number].count(old)} times in its paragraph, not once')
+        parts[name][number] = parts[name][number].replace(old, quiet_sentence(form, proj, ctx['dates'][by_id[event_id]['target_m']]))
+        blocks_of[event_id] = parts[name][number]
+    return {name: '\n\n'.join(parts[name]) + '\n' if name in parts else text for name, text in files.items()}
+
+
+def text_fits(sources, files, ctx, passages, edition):
+    """The tests of `attempt` that run on the finished text: the size bound, for edition 2 that every lead paragraph occurs once, and for
+    editions 3 and later that every paragraph that states an event or leads one can be quoted."""
+    low, high = SETTINGS[edition]['bounds']
+    if not low <= sum(len(t) for t in sources.values()) <= high:
+        WHY['why'] = 'size'
+        return False
+    if edition == 2:
+        # every lead paragraph can be quoted: its text occurs once in the whole dossier
+        if any(sum(body.count(text) for body in files.values()) != 1 or len(text) < 40 for text in ctx['leads']):
+            WHY['why'] = 'leads'
+            return False
+    if edition >= 3:
+        # editions 3 and 4: every paragraph that states an event, or serves as a lead paragraph, can be quoted (the test of
+        # the checker's `Sources.quotable`); a draw in which one cannot is redrawn
+        shelf = Quotable(sources)
+        if not all(shelf.ok(spot) for spot in sorted({(p['file'], p['paragraph']) for p in passages
+                                                      if p['role'] in ('states', 'names')})):
+            WHY['why'] = 'quotable'
+            return False
+    return True
+
+
 def render_book(rng, projects, dates, events, ctx):
     """The volumes (three in edition 1; four or five in edition 2) as lists of blocks (blank-line separated), and the map of
     which block tells which event."""
@@ -3720,6 +3851,9 @@ def render_book(rng, projects, dates, events, ctx):
 
 
 def attempt(rng, edition=1):
+    quiet = edition == 8
+    entry_state = rng.getstate() if quiet else None      # edition 8 only: where the stream of the quiet returns starts; read, never drawn from
+    edition = shape_of(edition)                          # edition 8 draws edition 6's book, every draw as edition 6 makes it
     dates = draw_calendar(rng, edition)
     projects = draw_projects(rng, edition)
     events = draw_log(rng, projects, dates, edition)
@@ -3733,27 +3867,27 @@ def attempt(rng, edition=1):
     events = remap(events)
     resolved = _run(events)[2]
     ctx = build_context(rng, projects, dates, events, edition)
+    if quiet:
+        ctx['quiet_log'] = {}
     files, passages, blocks_of = render_book(rng, projects, dates, events, ctx)
     for e in events:
         e['full'] = e['kind'] == 'intro' or e['subject'] in blocks_of[e['id']]
     events = events + ctx['names_events']
     sources = {'procedure.md': '\n\n'.join(procedure_blocks(edition)) + '\n'}
     sources.update(files)
-    low, high = SETTINGS[edition]['bounds']
-    if not low <= sum(len(t) for t in sources.values()) <= high:
+    if not text_fits(sources, files, ctx, passages, edition):
         return None
-    if edition == 2:
-        # every lead paragraph can be quoted: its text occurs once in the whole dossier
-        if any(sum(body.count(text) for body in files.values()) != 1 or len(text) < 40 for text in ctx['leads']):
-            return None
-    if edition >= 3:
-        # editions 3 and 4: every paragraph that states an event, or serves as a lead paragraph, can be quoted (the test of
-        # the checker's `Sources.quotable`); a draw in which one cannot is redrawn
-        shelf = Quotable(sources)
-        if not all(shelf.ok(spot) for spot in sorted({(p['file'], p['paragraph']) for p in passages
-                                                      if p['role'] in ('states', 'names')})):
-            WHY['why'] = 'quotable'
-            return None
+    plan = None
+    if quiet and not ctx['repeated']:
+        # edition 8: the edition 6 book is laid out; only now do the chosen returns become quiet. The tests on the finished text run
+        # again on the edition 8 text (a world that fails there alone is redrawn); a book too thin for it is redrawn last (below).
+        plan = quiet_plan(entry_state, events, passages)
+        if plan:
+            files = swap_quiet(files, passages, blocks_of, ctx, events, plan)
+            sources = {'procedure.md': sources['procedure.md'], **files}
+            if not text_fits(sources, files, ctx, passages, edition):
+                WHY['why'] = 'quiet ' + WHY['why']       # the world is edition 6's but its edition 8 text fails the same test
+                return None
     meetings = [d.isoformat() for d in dates]
     truth = state(events, None, meetings)
     readers = {r: state(events, r, meetings) for r in READERS}
@@ -3778,13 +3912,18 @@ def attempt(rng, edition=1):
             'projects': [{'name': p['full'], 'short_forms': p['refs'], 'sponsor': p['sponsor'],
                           'sponsor_form': p['sponsor_ref']} for p in projects]}
     if edition >= 2:
-        case['size'] = edition
+        case['size'] = 8 if quiet else edition
+    if plan:
+        case['quiet_returns'] = sorted(plan)
     if not preflight(case, rng):
         return None
     # The last test, after every use of the random source: a dossier outside what its own --verify allows is redrawn, and one inside
     # keeps its bytes. Edition 6: the number of payments (the events of kind `pay`), and no sentence said twice.
     if edition == 6 and (ctx['repeated'] or not PAYMENTS6[0] <= sum(e['kind'] == 'pay' for e in events) <= PAYMENTS6[1]):
         return None
+    if quiet and not plan:
+        WHY['why'] = 'quiet thin'
+        return None         # edition 8: fewer than 12 returns, or fewer than 6 that may be quiet
     return case
 
 
