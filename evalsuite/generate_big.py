@@ -18,6 +18,7 @@ gains, and nothing else changes (the fixtures are the same bytes):
     top level      `facts`: {family, interpreter (module name), interpreter_sha256 (hash of the module file that made
                    the dossier), events, passages, names, sources ({file: sha256} of every source file written),
                    readers (the names of the flawed readers the dossier has), and `size` when the case carries one}
+                   A case that carries `quiet_returns` (minutes edition 8: the ids of its returns told in quiet words) has them there too.
 
 The family module must export `answer(query, events, reader=None)`, `value_form(query)`, `relevant(query, events)`,
 `depends(events)` (for every event, what it cannot be read without, by kind: name, amount, target) and `NONE_VALUE`, and its case must carry `events`, `passages` and `names` and every claim a `query`; a family that
@@ -121,6 +122,8 @@ def with_facts(original):
                     'readers': sorted(case.get('readers') or {})}
                 if 'size' in case:          # a family that can build a larger dossier says which size it built
                     result['key']['facts']['size'] = plain(case['size'])
+                if 'quiet_returns' in case:         # minutes edition 8: the returns told in quiet words (evaluator-only, like the rest)
+                    result['key']['facts']['quiet_returns'] = plain(case['quiet_returns'])
             return result
         finally:
             Facts.family, Facts.case = None, None
