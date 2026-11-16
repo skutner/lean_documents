@@ -3929,10 +3929,11 @@ def quiet_eligible(facts):
     return sorted(found)
 
 
-def quiet_book_rules(built):
+def quiet_book_rules(built, read_back=True):
     """What an edition 8 dossier built with its facts must show of its quiet returns (brief, 2.2, R5, R7, R11), by this module's own reader and
     own reading of the key's facts: how many there are; each one eligible; no form twice; and each one read back as a return of the
-    project and the meeting the log gives, in the paragraph the passages give. Returns (returns, eligible, quiet)."""
+    project and the meeting the log gives, in the paragraph the passages give. Returns (returns, eligible, quiet). Reading a book back takes
+    seconds: `read_back=False` leaves it, and the form check that goes with it, to the caller."""
     facts = built['key']['facts']
     quiet, by_id = facts['quiet_returns'], {e['id']: e for e in facts['events']}
     returns = [e['id'] for e in facts['events'] if e['kind'] == 'return']
@@ -3941,6 +3942,8 @@ def quiet_book_rules(built):
     wanted = min(max(6, round(len(eligible) / 3)), len(returns) // 2)
     need(quiet == sorted(set(quiet)) and len(quiet) == wanted, f'{len(quiet)} quiet returns, not {wanted} (of {len(eligible)} eligible, {len(returns)} returns)')
     need(set(quiet) <= set(eligible), f'quiet returns that are not eligible: {sorted(set(quiet) - set(eligible))}')
+    if not read_back:
+        return len(returns), len(eligible), len(quiet)
     book = Book(sources_of(built))
     need(book.errors == [], f'the reader finds {book.errors[:2]}')
     meetings = calendar_of(book, facts['events'])
@@ -5630,7 +5633,7 @@ class QuietReturnsTest(unittest.TestCase):
                 self.assertEqual(len(a), len(b), (seed, name))
                 differing |= {(name, n) for n, (x, y) in enumerate(zip(a, b)) if x != y}
             self.assertEqual(differing, spots, seed)
-            returns, eligible, quiet = quiet_book_rules(eight)
+            returns, eligible, quiet = quiet_book_rules(eight, read_back=seed == ED_SEED)       # one reading of a book: it takes seconds
             print(f'edition 8, seed {seed}: {returns} returns, {eligible} eligible, {quiet} quiet')
 
     def test_edition_8_is_the_same_bytes_in_another_process(self):
