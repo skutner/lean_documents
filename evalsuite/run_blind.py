@@ -20,6 +20,7 @@ This runner never opens an answer key. It reads the manifest that sealing wrote,
 and the hashes of the sealed files, and needs the keys folder only to keep it out of reach.
 """
 import argparse
+import contextlib
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
@@ -32,6 +33,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -61,6 +63,20 @@ ENDPOINT_VARIABLES = ('OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL', 'OPENAI_ORGANIZAT
 SEATBELT = '/usr/bin/sandbox-exec'
 PYTHON_SENTENCE = 'Use {python} wherever these instructions or the skill say python3.'
 PYTHON_MINIMUM = (3, 12)
+FIDELITY_ROOT = HERE / 'fidelity_lean'
+# Files the opt-in source-bound profile adds to the skill folder (paths relative to it). An arm that does not opt in
+# is staged the skill as it was at commit 569a4d89: without these files and with the original `markdown_audit.py`,
+# read from this evaluator-side baseline folder (its hash is pinned to the git blob by a test).
+SKILL_BASELINE = HERE / 'skill_baseline'
+SKILL_BASELINE_AUDIT = SKILL_BASELINE / 'markdown_audit.py'
+SKILL_AUDIT = 'scripts/markdown_audit.py'
+SKILL_IGNORE = ('__pycache__', '*.pyc', '.lake')
+SOURCE_BOUND_REQUIRED = ('scripts/source_bound_audit.py', 'references/source-bound.md', 'assets/source_bound')
+FIDELITY_FAMILIES = ('approvals', 'deadlines', 'ledger', 'packet', 'casework', 'procurement')
+FIDELITY_MARKERS = re.compile(
+    rb'\b(?:Approvals|Deadlines|Ledger|Packet|Casework|Procurement)\s*\.\s*(?:Reference|Material)\b|'
+    rb'"classification"\s*:\s*"evaluator_only"|'
+    rb'"(?:sealed_worlds|unseen_rule_inputs|sealed_bits)"\s*:')
 
 
 class RunError(Exception):
@@ -99,6 +115,54 @@ def tree_hash(root, skip=()):
     return digest.hexdigest()
 
 
+def is_source_bound_path(relative):
+    """Whether a skill-relative POSIX path belongs to the opt-in source-bound profile."""
+    name = relative.rsplit('/', 1)[-1]
+    return ((relative.startswith('scripts/') and relative.count('/') == 1 and name.startswith('source_bound_')
+             and name.endswith('.py')) or relative == 'assets/source_bound' or relative.startswith('assets/source_bound/')
+            or relative == 'references/source-bound.md')
+
+
+def has_source_bound(skill):
+    return any((Path(skill) / name).exists() for name in SOURCE_BOUND_REQUIRED)
+
+
+@contextlib.contextmanager
+def skill_folder(arm, skill):
+    """The skill folder to stage for one arm. An arm that opts in with "source_bound" gets the folder as it is. Every
+    other arm gets the skill as it was before the profile: a folder that holds the profile is copied without the
+    profile files and with the original `markdown_audit.py`, and one that does not is used as it is. The copy lives
+    outside every agent root and is removed when the staging or hashing that needed it is done."""
+    skill = Path(skill)
+    if arm.get('source_bound') or not has_source_bound(skill):
+        yield skill
+        return
+    if SKILL_BASELINE_AUDIT.is_symlink() or not SKILL_BASELINE_AUDIT.is_file():
+        raise RunError(f'Missing baseline of the original helper: {SKILL_BASELINE_AUDIT}')
+    plain = shutil.ignore_patterns(*SKILL_IGNORE)
+
+    def ignore(directory, names):
+        base = Path(directory).relative_to(skill).as_posix()
+        prefix = '' if base == '.' else base + '/'
+        return set(plain(directory, names)) | {name for name in names if is_source_bound_path(prefix + name)}
+    with tempfile.TemporaryDirectory(prefix='skill-view-') as scratch:
+        view = Path(scratch) / 'skill'
+        shutil.copytree(skill, view, symlinks=True, ignore=ignore)
+        target = view / SKILL_AUDIT
+        if target.is_symlink() or target.is_file():
+            mode = target.lstat().st_mode if not target.is_symlink() else None
+            target.unlink()          # never write through a link into the real skill folder
+            target.write_bytes(SKILL_BASELINE_AUDIT.read_bytes())
+            if mode is not None:
+                target.chmod(stat.S_IMODE(mode))
+        yield view
+
+
+def skill_tree_hash(arm, skill):
+    with skill_folder(arm, skill) as folder:
+        return tree_hash(folder, skip=('__pycache__', '.lake'))
+
+
 # ---------- Arms and their instructions ----------
 
 def load_arms(path=HERE / 'arms.json', python=None):
@@ -117,10 +181,32 @@ def load_arms(path=HERE / 'arms.json', python=None):
             raise RunError(f'Unusable or repeated arm id: {ident!r}')
         if type(spec.get('skill')) is not bool or type(spec.get('lean')) is not bool:
             raise RunError(f'Arm {ident} needs true or false for "skill" and "lean"')
+        interface = spec.get('fidelity_interface', False)
+        if type(interface) is not bool or (interface and not (spec['skill'] and spec['lean'])):
+            raise RunError(f'Arm {ident} needs boolean "fidelity_interface" and both skill and Lean when enabled')
+        source_bound = spec.get('source_bound', False)
+        if type(source_bound) is not bool or (source_bound and not (spec['skill'] and spec['lean'])):
+            raise RunError(f'Arm {ident} needs boolean "source_bound" and both skill and Lean when enabled')
         method = (path.parent / spec['prompt']).read_text(encoding='utf-8')
-        fingerprint = sha_bytes(json.dumps([RUNNER_VERSION, ident, spec['skill'], spec['lean'], method, task]).encode())
+        fingerprint_parts = [RUNNER_VERSION, ident, spec['skill'], spec['lean'], method, task]
+        interfaces = {}
+        if interface:
+            for family in FIDELITY_FAMILIES:
+                origin = FIDELITY_ROOT / family / 'Interface.lean'
+                if origin.is_symlink() or not origin.is_file():
+                    raise RunError(f'Missing regular public interface: {origin}')
+                interfaces[family] = origin.read_bytes()
+            fingerprint_parts.append({'fidelity_interface': True,
+                                      'interfaces': {f: sha_bytes(b) for f, b in interfaces.items()}})
+        if source_bound:
+            fingerprint_parts.append({'source_bound': True})
+        fingerprint = sha_bytes(json.dumps(fingerprint_parts).encode())
         arms[ident] = {'id': ident, 'label': spec.get('label', ident), 'skill': spec['skill'], 'lean': spec['lean'],
                        'method': method, 'task': task, 'fingerprint': fingerprint}
+        if interface:
+            arms[ident].update(fidelity_interface=True, interfaces=interfaces)
+        if source_bound:
+            arms[ident]['source_bound'] = True
     return arms
 
 
@@ -682,7 +768,7 @@ def check_layout(context):
         [context['python']['root']] if context.get('python') else [])
     # The repository's own answer material is protected too, wherever the campaign folders are.
     protected = [context['keys'], context['fixtures'], context['out']] + [
-        path for path in (REPO / 'examples', REPO / 'validation') if path.is_dir()]
+        path for path in (REPO / 'examples', REPO / 'validation', FIDELITY_ROOT) if path.is_dir()]
     Path(context['arena']).mkdir(parents=True, exist_ok=True)
     try:
         blindness.assert_isolated(roots, protected)
@@ -702,6 +788,76 @@ def check_layout(context):
             if blindness.within(place, context['python']['root']):
                 raise RunError(f'The Python toolchain must sit in a folder of its own; {context["python"]["root"]} also holds {place}')
     return [str(blindness.real(root)) for root in roots]
+
+
+def fidelity_guard(context, roots=(), texts=()):
+    """Reject known evaluator bytes, generated truth and aliases before an agent can read them.
+
+    This is a preflight guard, not a claim that arbitrary transformed leaks can be detected.
+    Public interfaces are the only allowlisted files from the evaluator source tree.
+    Read streaming chunks so large toolchain binaries do not need to fit in memory.
+    """
+    protected = [FIDELITY_ROOT, context['keys'], context['out']]
+    forbidden = dict(context['sealed']['hashes'])
+    fragments = []
+    for origin in FIDELITY_ROOT.rglob('*'):
+        if origin.is_file() and origin.name != 'Interface.lean':
+            data = origin.read_bytes()
+            forbidden[sha_bytes(data)] = str(origin)
+            if origin.suffix == '.lean' and len(data) >= 64:
+                fragments.append(data.strip())
+    overlap = max([256, *(len(data) for data in fragments)])
+    def check(data, name):
+        if (FIDELITY_MARKERS.search(data) or blindness.CANARY_PREFIX.encode() in data or
+                any(fragment in data for fragment in fragments)):
+            raise RunError(f'Blindness check failed: evaluator material in {name}')
+    for text in texts:
+        check(text.encode() if isinstance(text, str) else text, 'agent instructions or interface')
+        if sha_bytes(text.encode() if isinstance(text, str) else text) in forbidden:
+            raise RunError('Blindness check failed: withheld bytes in agent instructions or interface')
+    seen = set()
+    for root in roots:
+        pending = [Path(root)]
+        while pending:
+            path = pending.pop()
+            if any(blindness.within(path, hidden) for hidden in protected):
+                raise RunError(f'Blindness check failed: evaluator path or alias at {path}')
+            if path.name.lower() in ('reference.lean', 'facts.lean', 'inputs.lean', 'truth.json'):
+                raise RunError(f'Blindness check failed: evaluator artifact at {path}')
+            if path.is_dir():
+                identity = (path.stat().st_dev, path.stat().st_ino)
+                if identity not in seen:
+                    seen.add(identity)
+                    pending.extend(path.iterdir())
+                continue
+            if not path.is_file():
+                continue
+            digest, tail = hashlib.sha256(), b''
+            with path.open('rb') as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+                    check(tail + chunk, path)
+                    tail = (tail + chunk)[-overlap:]
+            if digest.hexdigest() in forbidden:
+                raise RunError(f'Blindness check failed: withheld evaluator bytes at {path}')
+
+
+def fidelity_family(dossier):
+    match = re.fullmatch(r'g-?\d+-\d+-(approvals|deadlines|ledger|packet|casework|procurement)', dossier)
+    if not match:
+        raise RunError(f'No public fidelity interface for dossier: {dossier}')
+    return match[1]
+
+
+def stage_interface(arm, family, record, records):
+    """Stage only public type definitions and record their exact supplied bytes."""
+    if not arm.get('fidelity_interface'):
+        return
+    data = arm['interfaces'][family]
+    (Path(record['arena_run']) / 'Interface.lean').write_bytes(data)
+    record['case_files']['Interface.lean'] = sha_bytes(data)
+    record['fidelity_interface'] = {'family': family, 'sha256': sha_bytes(data)}
+    write_json(Path(records) / (record['opaque_id'] + '.json'), record)
 
 
 def acquire_lock(out):
@@ -738,9 +894,23 @@ def acquire_lock(out):
         draft.unlink()
 
 
+def skill_hashes(context):
+    """The hash of the skill as the arms that do not opt in are staged it, and, only when an arm opts in to the
+    source-bound profile, the hash of the whole folder (None otherwise, so an older campaign still matches)."""
+    skill = context.get('skill')
+    if not skill:
+        return None, None
+    arms = [context['arms'][ident] for ident in context['arm_ids'] if context['arms'][ident]['skill']]
+    opted = any(arm.get('source_bound') for arm in arms)
+    whole = skill_tree_hash({'source_bound': True}, skill) if opted else None
+    plain = [arm for arm in arms if not arm.get('source_bound')]
+    return (skill_tree_hash(plain[0], skill) if plain else whole), whole
+
+
 def freeze(context):
     """Everything that must not change between the first review of a campaign and the last. The Python toolchain
     is recorded only when it is the interpreter in use; with a system interpreter the record is as it always was."""
+    skill_sha256, whole_skill_sha256 = skill_hashes(context)
     frozen = {'schema_version': 1, 'runner_version': RUNNER_VERSION,
             'agent': context['selection']['agent'], 'model': context['selection'].get('model') or '',
             'effort': context['selection'].get('effort') or '', 'minutes': context['minutes'],
@@ -748,7 +918,7 @@ def freeze(context):
             'arms': {ident: context['arms'][ident]['fingerprint'] for ident in context['arm_ids']},
             'dossiers': {d['dossier']: dossier_hashes(d) for d in context['dossiers']},
             'keys_manifest_sha256': context['sealed']['sha256'],
-            'skill_sha256': tree_hash(context['skill'], skip=('__pycache__', '.lake')) if context.get('skill') else None,
+            'skill_sha256': skill_sha256,
             'lean': {k: context['lean'][k] for k in ('path', 'version')} if context.get('lean') else None,
             'ala': context.get('ala'), 'code_sha256': code_hash(),
             'agent_state': 'private_home_per_review' if context.get('home_template') else 'shared_with_other_sessions',
@@ -758,6 +928,8 @@ def freeze(context):
             'arena': str(blindness.real(context['arena']))}
     if context.get('python'):
         frozen['python'] = {key: context['python'][key] for key in ('path', 'root', 'version')}
+    if whole_skill_sha256:
+        frozen['skill_source_bound_sha256'] = whole_skill_sha256
     return frozen
 
 
@@ -832,21 +1004,33 @@ def run_unit(context, unit):
     others = [path for variant, path in dossier['variants'].items() if variant != unit['variant']]
     lean = context.get('lean') if arm['lean'] else None
     text = instructions(arm, context['minutes'], lean['path'] if lean else None, bool(dossier['brief']))
+    family = fidelity_family(unit['dossier']) if arm.get('fidelity_interface') else None
+    fidelity_guard(context, [report, dossier['sources']] + ([dossier['brief']] if dossier['brief'] else []) +
+                   ([context['skill']] if arm['skill'] else []) +
+                   ([context['home_template']] if context.get('home_template') else []),
+                   [text] + ([arm['interfaces'][family]] if family else []))
     # Everything that can fail before the agent exists happens before staging: once a review is staged it is final.
     home, listed = open_home(context['home_template'], context['arena']) if context.get('home_template') else (None, None)
     try:
-        record = blindness.stage_case(
-            report, dossier['sources'], context['arena'], Path(context['out']) / arm['id'] / 'records',
-            {'dossier': unit['dossier'], 'variant': unit['variant'], 'repeat': unit['repeat']},
-            withheld=others, forbidden_hashes=context['sealed']['hashes'],
-            protected=[context['keys'], context['fixtures'], context['out']],
-            brief=dossier['brief'], skill=context['skill'] if arm['skill'] else None)
+        with skill_folder(arm, context['skill']) if arm['skill'] else contextlib.nullcontext() as skill:
+            record = blindness.stage_case(
+                report, dossier['sources'], context['arena'], Path(context['out']) / arm['id'] / 'records',
+                {'dossier': unit['dossier'], 'variant': unit['variant'], 'repeat': unit['repeat']},
+                withheld=others, forbidden_hashes=context['sealed']['hashes'],
+                protected=[context['keys'], context['fixtures'], context['out']],
+                brief=dossier['brief'], skill=skill)
     except blindness.BlindnessError as error:
         if home:
             shutil.rmtree(home)
         raise RunError(f'{unit["id"]}: {error}')
     run = Path(record['arena_run'])
+    stage_interface(arm, family, record, Path(context['out']) / arm['id'] / 'records')
     (run / 'instructions.md').write_text(text, encoding='utf-8')
+    try:
+        fidelity_guard(context, [run] + ([home] if home else []))
+    except RunError as error:
+        archive_review(context, unit, record, {'ended': 'launch_error', 'detail': str(error)}, home, listed)
+        raise
     # `ala_arguments` refuses only values that `build_context` has already refused, so it cannot fail here.
     command = [context['node']] + ala_arguments(context['ala']['entry'], context['selection'], run,
                                                 lean['root'] if lean else None, home, str(uuid.uuid4()),
@@ -961,6 +1145,9 @@ def probe_script(run, arm, hidden, lean, canary_prefix, python=None, seatbelt=No
         lines += [f"LEAN='{lean['path']}'",
                   'if [ -x "$LEAN" ] && V=$("$LEAN" --version 2>&1); then record lean_available pass "$V"; '
                   'else record lean_available fail "Lean does not run inside the sandbox: $LEAN"; fi']
+        if arm.get('fidelity_interface'):
+            lines.append('if [ -r "$RUN/Interface.lean" ]; then record fidelity_interface_available pass "Interface.lean"; '
+                         'else record fidelity_interface_available fail "Public interface is unreadable"; fi')
     else:
         if lean:
             lines.append(f"hidden lean_hidden '{lean['root']}'")
@@ -1025,6 +1212,8 @@ def probe_checks(arm, hidden, lean, python=None, platform='linux'):
     names += [name for name, _ in hidden]
     names += ['lean_available'] if arm['lean'] else (['lean_hidden'] if lean else []) + ['no_lean_on_path']
     names.append('skill_usable' if arm['skill'] else 'skill_absent')
+    if arm.get('fidelity_interface'):
+        names.append('fidelity_interface_available')
     if python:
         names.append('python_available')
     if platform == 'darwin':
@@ -1340,17 +1529,19 @@ def probe_arm(context, arm):
     (fixture / 'sources').mkdir(parents=True)
     (fixture / 'report.md').write_text('<a id="C01"></a>\n**C01.** The probe note holds one line.\n', encoding='utf-8')
     (fixture / 'sources/note.md').write_text('<a id="N-01"></a>\n## N-01 — Note\nOne line.\n', encoding='utf-8')
-    record = blindness.stage_case(fixture / 'report.md', fixture / 'sources', arena, work / 'records',
-                                  {'dossier': 'probe', 'variant': arm['id']}, withheld=[],
-                                  forbidden_hashes=context['sealed']['hashes'],
-                                  protected=[context['keys'], context['fixtures'], out],
-                                  skill=context['skill'] if arm['skill'] else None)
+    with skill_folder(arm, context['skill']) if arm['skill'] else contextlib.nullcontext() as skill:
+        record = blindness.stage_case(fixture / 'report.md', fixture / 'sources', arena, work / 'records',
+                                      {'dossier': 'probe', 'variant': arm['id']}, withheld=[],
+                                      forbidden_hashes=context['sealed']['hashes'],
+                                      protected=[context['keys'], context['fixtures'], out], skill=skill)
     run, tag = Path(record['arena_run']), record['opaque_id'].split('-', 1)[1]
     decoy, tools = arena / f'decoy-{tag}', arena / f'probe-bin-{tag}'
     home = listed = seatbelt = None
     # Everything up to the launch, the guard included: whatever fails here, nothing was started, and the copied login
     # and the staged folders leave the arena before the probe is refused.
     try:
+        stage_interface(arm, FIDELITY_FAMILIES[0], record, work / 'records')
+        fidelity_guard(context, [run])
         decoy.mkdir()
         (decoy / 'other-review.txt').write_text('Another review would be here.\n', encoding='utf-8')
         lean = context.get('lean')
@@ -1358,6 +1549,8 @@ def probe_arm(context, arm):
                   ('fixtures_hidden', blindness.real(context['fixtures'])), ('other_reviews_hidden', blindness.real(decoy))]
         if (REPO / 'examples/evaluator').is_dir():
             hidden.append(('repository_keys_hidden', blindness.real(REPO / 'examples/evaluator')))
+        if arm.get('fidelity_interface') and FIDELITY_ROOT.is_dir():
+            hidden.append(('fidelity_evaluator_hidden', blindness.real(FIDELITY_ROOT)))
         tools.mkdir()
         shim = tools / 'codex'
         python = context.get('python')
@@ -1462,6 +1655,11 @@ def build_context(args, need_ala):
                'launch': launch, 'probe': run_probe, 'node': shutil.which('node'), 'ala': None, 'python': python}
     if context['skill'] and not (context['skill'] / 'SKILL.md').is_file():
         raise RunError(f'--skill is not a skill folder: {context["skill"]}')
+    if any(arms[i].get('source_bound') for i in arm_ids):
+        missing = [name for name in SOURCE_BOUND_REQUIRED if not (context['skill'] / name).exists()]
+        if missing:
+            raise RunError('An arm that opts in to "source_bound" needs a skill folder with the profile; missing: ' +
+                           ', '.join(missing))
     if any(arms[i]['lean'] for i in arm_ids):
         if not args.lean:
             raise RunError('An arm that uses Lean needs --lean with the absolute path of the toolchain executable')
@@ -1469,6 +1667,14 @@ def build_context(args, need_ala):
     if context['home_template']:
         check_home_template(context['home_template'])
     context['agent_roots'] = check_layout(context)
+    # The arena can hold interrupted agent output and stale copied logins. Reconcile
+    # those under the campaign lock before rejecting unexplained entries. Each new
+    # review and its copied home are scanned after staging, before launching.
+    mount_roots = [root for root in context['agent_roots'] if Path(root) != context['arena']]
+    fidelity_guard(context, mount_roots + ([context['skill']] if context['skill'] else []))
+    if any(arms[i].get('fidelity_interface') for i in arm_ids):
+        for dossier in dossiers:
+            fidelity_family(dossier['dossier'])
     context['units'] = plan_units(dossiers, arm_ids, args.repeats, args.seed)
     if need_ala:
         if not context['node']:

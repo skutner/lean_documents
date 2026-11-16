@@ -439,12 +439,92 @@ The scorer and blindness tests check claim-for-claim agreement with `validation/
 
 The generator tests derive every computed key a second time from the rendered documents and check that no wording is one-sided. For the packet family they also derive every echo verdict a second time, from the sheet and the files, and check that both kinds of conflict occur and that the sheet is often right. A further test reads only the reports of 400 packet cases: no claim may be always right or always wrong given what else its report says about the same unit, no report may call an annex missing while stating what its certificate records, and the number of claims must not give away how many certificates were supplied. Another checks, again from the reports alone, whether all claims of a report could be established together: every correct report must pass, and the share of altered reports that fail, with the counting claim as the only one ever singled out, must stay within the limit stated above. The scorer and comparison tests count echoes, both controls and named-reader rates on constructed sheets and stand-in campaigns, including repeats and silence. `tests.test_evalsuite_readers` also checks optional reader fields, preambles, key validation and unchanged packet keys. The runner tests run whole campaigns with a stand-in agent in place of ALA and a model: what each arm is given, a missing or hostile answer sheet, links and locked folders left behind, an agent that edits its copies, an interrupted review, a stopped campaign, changed settings, layouts that put answers within reach, unreadable keys, and the private home. The probe script is also executed outside a sandbox, where it must report what it sees. None of the tests needs Lean, ALA or a model. The probe itself needs the real sandbox and is run with `run_blind.py probe`.
 
+## Formalization fidelity
+
+Lean checks that a conclusion follows from the facts and rules an agent typed. Nothing in the three-arm campaign checks that those facts and rules say what the documents say: a wrong fact with a correct calculation is still reported as proved. This section describes the tools that measure that gap on generated cases, where the generator knows the right answer. They are built and tested without a model. No campaign has been run with them.
+
+### What is measured
+
+| Term | Meaning |
+| --- | --- |
+| Reference formalization | For each family, the rule engine written once in Lean by the evaluator (`fidelity_lean/FAMILY/Reference.lean`), plus the facts, unseen inputs, one-rule-off variants and per-claim truth the generator emits for each dossier. It must reproduce every verdict the generator computed. Evaluator-only. |
+| Fact accuracy | The share of cells in the agent's fact table (`Candidate.dossier`) that equal the generator's recorded facts. |
+| Rule fidelity | The share of unseen inputs on which the agent's rule gives the same result as the reference rule. With `--prove`, Lean also proves agreement over the whole bounded input set where it is small enough; that is not a proof for all inputs. |
+| Claim fidelity | The share of claims whose formal statement is true in exactly the cases where the generator's own test of that claim is true, over every sealed world and the unseen inputs. |
+| Test strength | The share of one-rule-off variants that the unseen inputs tell apart from the reference. It must be 100% before any fidelity number from that family is trusted. |
+
+The unseen inputs are what an agent cannot have matched in advance. Lean code that merely agrees with an answer the agent already believed does not pass them.
+
+### Six families, and how many claims can be graded
+
+A claim can be graded only when the family's Lean interface has a rule whose result decides it. The counts are from each family's README under `fidelity_lean/`, for seeds 511 and 512, indices 1 to 5, both reports counted separately.
+
+| Family | Claims graded | Not graded |
+| --- | --- | --- |
+| `approvals` | All six claim kinds that occur. This family has no README of its own and states no count; the top-level `fidelity_lean/README.md` says a claim kind without an adapter stops the emitter. | None named. |
+| `deadlines` | 186 of 186 (100%) | None. |
+| `ledger` | 140 of 180 (77.8%) | `payment_lookup`, `annex_scope`, `annex_content`: the first closes over a constant in the generator, the others assert what documents contain. |
+| `packet` | 47 of 140 (33.6%) | `packet_contents` and `unit_location`: the first is about which files were supplied, the second ignores the world in the generator. |
+| `casework` | 280 of 280 (100%) | None. |
+| `procurement` | 280 of 280 (100%) | None. |
+
+An ungraded claim gets no credit and is never counted as faithful. A faithful candidate on `packet` can reach 100% on the graded claims while the coverage figure stays at 33.6%, so always read the two together.
+
+### Arms file
+
+`arms-fidelity.json` holds the three original arms exactly as `arms.json` has them, and two more. Select it with `--arms-file evalsuite/arms-fidelity.json` and name the arms in `--arms`; the default arms and `arms.json` are unchanged.
+
+| Arm | What it adds to `skill-lean` |
+| --- | --- |
+| `skill-lean-interface` | A public `Interface.lean` with the family's record types, and the task of submitting `work/fidelity/Candidate.lean` with its own fact table, rule and claim predicates. Its dossiers must be of the six families. Use it to measure fidelity, not to compare verdict scores with the other arms: only this arm is told how the facts are laid out. |
+| `skill-lean-source-bound` | The opt-in source-bound profile of the product checker. The arm sets `"source_bound": true`, and its prompt asks the agent to prepare the audit with `--formalization-profile source-bound-v1` and to follow `skill/references/source-bound.md`. |
+
+The runner stages the whole skill folder into every arm that uses the skill. The profile adds files to that folder and changes `scripts/markdown_audit.py`, so only an arm that opts in is given them. Every other arm is staged the skill as it was at commit `569a4d89`, file for file: the profile files are left out and the original `markdown_audit.py` is read from `skill_baseline/`. `skill_baseline/manifest.json` holds the SHA-256 of every file of that folder, and `tests/test_evalsuite_run_blind_source_bound.py` checks the staged folder against it, so the earlier measurements still describe the skill the original arms see.
+
+### Scoring
+
+`fidelity_score.py` scores finished interface-arm reviews and launches no agent. It takes a runner by name (`--runner module:callable`) and refuses to run handed-in Lean unless that runner declares `sandboxed = True`; there is no option to run Lean directly. The sandboxed runner is not wired in yet (see [Not built yet](#not-built-yet)). The family modules run the generated reference programs and the authored fixtures with a direct Lean runner that is trusted for those files only.
+
+Reviews that cannot be measured are counted separately and never enter a denominator. Missing registered claims score zero among the graded claims. The Wilson bounds it prints describe the bounded checks, not arbitrary documents.
+
+### Planted errors and model-based checks
+
+`fidelity_mutants.py generate` writes blind Lean submissions that each carry one planted error: a rule slip, a changed fact cell or a claim stated about the wrong item. It covers all six families. For `casework` and `procurement`, `fidelity_plants.py` holds one named edit per generator slip (18 and 12). A plant counts as effective only when the scorer's executed grade shows it, and every attempt that does not is kept under `excluded/` and never advertised as detectable. Fact plants are measured by fact accuracy, because the rule and claim graders ignore the submitted facts.
+
+`fidelity_detectors.py` stages these cases for checks that rely on a model and scores the answers: a second independent formalization, a back-translation of the Lean into English, and a semantic review, each over the rule, fact and claim classes. Its prompts are in `prompts/detectors/`. It invokes no model and no Lean. Whether those checks catch the planted errors, and how often they raise a false alarm, has not been measured.
+
+### Source-bound coverage
+
+`source_bound_coverage.py` measures, without proving anything, how many generated claims the profile's twelve claim shapes can express and how many have every source value extractable from the cited text:
+
+```sh
+python3 evalsuite/source_bound_coverage.py --seed 511 --dossiers 40 --variants both --out-root tmp/my-coverage
+```
+
+On the four original families, that command gave 676 claims, of which 605 (89.5%) fit a shape and 512 (75.7%) are fully readable from the cited text. Rule eligibility, execution and guard acceptance are not measured by it.
+
+### What has been run
+
+Only model-free tests. The family tests that need Lean ran on the Linux host with Lean 4.24.0; on the Mac they skip. The source-bound and runner tests, including the staging tests above, run on both. No review has been run with a model, and no campaign has been run with `skill-lean-interface` or `skill-lean-source-bound`.
+
+### What none of this establishes
+
+- Generated cases only. A fidelity rate says nothing about real documents, whose phrasing and rules no generator controls.
+- Agreement on unseen inputs is bounded testing, not a proof that two rules are equal. The optional proof covers only the bounded input set.
+- A representation test such as a recorded marker shows what the table says, not that Lean read or authenticated a document.
+- Silence from a planted-error check means agreement on the tested worlds, not that the source text hides the error.
+- The profile's own `check` needs a reviewed no-network Bubblewrap prefix for formal execution, and the runner supplies none. A campaign with `skill-lean-source-bound` therefore cannot yet show executed profile checks, only the profile's generated documents.
+- Coverage by shape or by extraction is eligibility. It is not a count of claims audited, proved or faithful.
+
 ## Not built yet
 
 - **A campaign.** The generator, the runner and the comparison exist, but no review has been run with a model. Start with a few dossiers to learn how long each arm needs, then fix the time limit and the thresholds before the real campaign.
-- **A second check of reported proofs.** The runner should rerun Lean on what the `skill-lean` arm hands in, inside a sandbox, before a reported proof counts as one.
+- **A second check of reported proofs.** The runner should rerun Lean on what the `skill-lean` arm hands in, inside a sandbox, before a reported proof counts as one. In progress in a separate worktree (`lean-recheck`), not integrated here.
 - **Harder and more varied cases.** More families, `both` and `not_applicable` claims, and a set built from real public documents with human labels.
 - **More ways for a packet to be wrong about itself.** The same case staged several times with only the misleading wording growing stronger, where any change in the verdicts is the effect; a source that describes its own contents wrongly, such as a stated total that its rows do not give (`attested` covers a neighbouring case, a register note that describes another document wrongly); scans described as unreadable that are clean; any PDF, DOCX or scan variant of the ten families; a probe that measures the read and display limits of each coding-agent program, for `truncated`; and a campaign on any of the ten families.
-- **Fidelity mutants.** Lean models changed so that the theorem still checks but no longer matches the source. The mechanical gates cannot catch these; the measure is how often semantic review does.
+- **Fidelity mutants.** Lean models changed so that the theorem still checks but no longer matches the source. The mechanical gates cannot catch these; the measure is how often semantic review does. The planted cases are built (see [Formalization fidelity](#formalization-fidelity)); the model-based measurement of how often each check catches them is still to run.
 - **Readable-document bundles.** The scorer reads the legacy export layout. The current pilot profile has no answer keys and needs its own reader.
 - **Expected argument status** in the keys, so the argument audit can be scored.
+- **Legacy replay of the source-bound guards.** Running the profile's guards over the 21 retained legacy models, with per-model and per-guard counts and a review of false alarms. Only their inventory exists.
+- **The recheck sandbox in the scorer.** `fidelity_score.py` refuses handed-in Lean without a runner that declares `sandboxed = True`; the sandboxed runner from the recheck work is not yet plugged in.
+- **A real human-labelled set.** A few dozen claims from real public documents, labelled by a person, and a gate for Lean fixed before the run.

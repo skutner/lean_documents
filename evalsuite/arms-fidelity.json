@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "task": "prompts/task.md",
+  "arms": [
+    {"id": "plain", "label": "The same agent with no skill and no Lean", "skill": false, "lean": false, "prompt": "prompts/plain.md"},
+    {"id": "skill-no-lean", "label": "Evidence-to-Proof Review without Lean", "skill": true, "lean": false, "prompt": "prompts/skill-no-lean.md"},
+    {"id": "skill-lean", "label": "Evidence-to-Proof Review with Lean", "skill": true, "lean": true, "prompt": "prompts/skill-lean.md"},
+    {"id": "skill-lean-interface", "label": "Evidence-to-Proof Review with Lean and a public fidelity interface", "skill": true, "lean": true, "fidelity_interface": true, "prompt": "prompts/skill-lean-interface.md"},
+    {"id": "skill-lean-source-bound", "label": "Evidence-to-Proof Review with Lean and the source-bound formalization profile", "skill": true, "lean": true, "source_bound": true, "prompt": "prompts/skill-lean-source-bound.md"}
+  ]
+}
