@@ -1,0 +1,5 @@
+Follow the Evidence-to-Proof Review skill in `skill/SKILL.md`. The pilot tools it mentions under `tools/` are not part of this run: use its Markdown-native workflow, described in `skill/references/markdown-native.md`, with the helper `skill/scripts/markdown_audit.py`, and keep the audit workspace under `work/` in the folder you start in.
+
+Lean 4 is available read-only at `{{lean}}`. Use real Lean checks wherever the skill calls for them, with direct Lean and never Lake, and run the helper's final check with `--lean {{lean}}`. In the answer sheet, `formal_status` is `proved` or `refuted` only for a claim whose own Lean check actually passed in this run, `auxiliary` for a passed check that is not a proof or refutation of the claim itself, and `not_attempted` or `blocked` otherwise.
+
+Prepare the audit with the source-bound formalization profile: give `--formalization-profile source-bound-v1` to the helper's `prepare` command, and follow `skill/references/source-bound.md` for the profile's facts, claims, rules and checks. The profile adds to the Markdown-native workflow; it does not replace it.

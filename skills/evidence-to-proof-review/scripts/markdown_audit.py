@@ -94,6 +94,10 @@ def no_json(root):
 
 
 def prepare(args):
+    formalization_profile = getattr(args, 'formalization_profile', None)
+    if formalization_profile is not None:
+        from source_bound_audit import profile
+        profile({'Formalization profile': formalization_profile})
     root_base = Path(args.temp_root).resolve()
     sources = [Path(value).resolve() for value in args.sources]
     if any(path.is_dir() and root_base.is_relative_to(path) for path in sources):
@@ -152,6 +156,11 @@ def prepare(args):
     (root / 'claims.md').write_text('# Claim registry\n\nClassify every report anchor. Replace pending rows with atomic audited/deferred claim IDs or a reasoned non_claim row.\n\n' + table(['Claim ID', 'Report anchor', 'Disposition', 'Reason'], [('-', anchor, 'pending', 'Awaiting individual registration.') for anchor in report]))
     (root / 'finding-template.md').write_text('# C-01\n\n' + ''.join(f'## {heading}\n\nREPLACE with the actual individual analysis.\n\n' for heading in HEADINGS))
     (root / 'ingestion.md').write_text('# Ingestion scope and limits\n\n' + ('Native extraction was executed with original hashes, tool logs, coordinates, coverage and uncertainty preserved. [Extraction inventory](input/extraction-index.md) and [passage provenance](input/extraction-segments.md) identify partial or blocked documents. Converter output is not source authenticity or guaranteed transcription fidelity.' if extraction_rows else 'All supplied inputs have text-compatible extensions. UTF-8 parsing and quote correspondence are checked when passages are cited; authenticity is not established.') + '\n')
+    if formalization_profile is not None:
+        from source_bound_audit import initialize_intake
+        with (root / 'audit-policy.md').open('a', encoding='utf-8') as stream:
+            stream.write(f'\n- Formalization profile: {formalization_profile}\n')
+        initialize_intake(root, args)
     immutable = [p for p in (root / 'input').rglob('*') if p.is_file()] + [p for p in (root / 'extraction').rglob('*') if p.is_file()] + [root / 'audit-policy.md', root / 'report-ledger.md', root / 'ingestion.md']
     (root / 'manifest.md').write_text('# Immutable input manifest\n\nExact SHA-256 digests of preserved original bytes and intake records.\n\n' + table(['Path', 'SHA256'], [(path.relative_to(root).as_posix(), digest(path)) for path in immutable]))
     (root / 'phase-journal.md').write_text(f'# Phase journal\n\n## {now()} — Intake completed\n\nPreserved the supplied report and source bytes. Initialized a pending registry; no semantic analysis is claimed.\n\n[Input manifest](manifest.md) · [Report ledger](report-ledger.md)\n')
@@ -214,6 +223,9 @@ def validate(root):
     policy = fields((root / 'audit-policy.md').read_text())
     if policy.get('Profile') != 'markdown_claim_traces_v1':
         raise ValueError('Unsupported Markdown audit profile')
+    if 'Formalization profile' in policy:
+        from source_bound_audit import profile
+        profile(policy)
     manifest = rows((root / 'manifest.md').read_text())
     if not manifest:
         raise ValueError('Missing immutable input manifest entries')
@@ -370,6 +382,9 @@ def validate(root):
         findings.append({'claim_id': ident, 'sections': sec, 'proofs': proofs, 'evidence': evidence, 'path': path})
     if {f['claim_id'] for f in findings} != {ident for ident, row in registered.items() if row['Disposition'] == 'audited'}:
         raise ValueError('Every audited registry claim requires exactly one finding')
+    if 'Formalization profile' in policy:
+        from source_bound_audit import validate_findings
+        validate_findings(root, findings)
     return policy, findings
 
 
@@ -378,7 +393,13 @@ def fingerprints(root):
     for folder in ('input', 'findings', 'models', 'trace', 'proof-attempts', 'extraction'):
         paths += [p for p in (root / folder).rglob('*') if p.is_file()]
     paths += [root / name for name in ('extraction-review.md', 'ingestion-acknowledgement.md') if (root / name).is_file()]
-    return [(p.relative_to(root).as_posix(), digest(p)) for p in sorted(paths)]
+    result = [(p.relative_to(root).as_posix(), digest(p)) for p in sorted(paths)]
+    policy = fields((root / 'audit-policy.md').read_text())
+    if 'Formalization profile' in policy:
+        from source_bound_audit import profile, fingerprints as profile_fingerprints
+        profile(policy)
+        result += profile_fingerprints(root)
+    return result
 
 
 def check(args):
@@ -401,12 +422,20 @@ def _check(args):
     policy, findings = validate(root)
     proofs = [proof for finding in findings for proof in finding['proofs']]
     results = []
-    if proofs or list((root / 'models').rglob('*.lean')):
+    if 'Formalization profile' in policy:
+        from source_bound_audit import run
+        results, _ = run(root, args, findings=findings)
+    elif proofs or list((root / 'models').rglob('*.lean')):
         from markdown_proofs import check_models
         results = check_models(root, args.lean, proofs, policy['Lean version'], args.timeout)
     content = '# Audit validation\n\n- Status: passed\n- Recorded: ' + now() + '\n- Profile: markdown_claim_traces_v1\n\n'
+    if 'Formalization profile' in policy:
+        content += '- Formalization profile: ' + policy['Formalization profile'] + '\n\n[Source-bound guard results](source-bound/results.md) · [Generated claim renderings](source-bound/rendered.md)\n\n'
     content += 'Individual trace, source hashes, exact quotes, coverage and finding structure were checked. Semantic fidelity and summary adequacy still require human or agent review.\n\n'
-    content += '## Formal verification\n\n' + ('Executed exact-target and axiom checks.\n\n' if results else 'Not attempted: documentary findings only; no formal success is asserted.\n\n')
+    if 'Formalization profile' in policy:
+        content += '## Formal verification\n\nPer-claim baseline, exact-target, axiom and sensitivity outcomes, including blocked or unattempted checks, are retained in the [guard results](source-bound/results.md). Only accepted references appear below.\n\n'
+    else:
+        content += '## Formal verification\n\n' + ('Executed exact-target and axiom checks.\n\n' if results else 'Not attempted: documentary findings only; no formal success is asserted.\n\n')
     for result in results:
         content += f"- {result.get('claim_id') or 'Model audit'}: `{result['theorem']}` — [Executed check]({result['check_file']}) · [Actual command and output]({result['log']})\n"
     content += '\n## Proof targets\n\n' + table(['Claim ID', 'Module', 'Theorem', 'Target', 'Relation', 'Axioms', 'Check', 'Log', 'Status'], [(r.get('claim_id') or '', r['module'], r['theorem'], r.get('target') or '', r.get('relation') or '', ', '.join(r['axioms']), r['check_file'], r['log'], 'passed') for r in results])
@@ -451,6 +480,10 @@ def report_content(findings):
         content += '### Finding\n\n' + labels[sec['Semantic state']] + '\n\n' + sec['Executive conclusion']
         content += '\n\n### How verified\n\n' + sec['How verified']
         content += '\n\n### Limits\n\n' + sec['Executive limits']
+        if 'source_bound' in finding:
+            bound = finding['source_bound']
+            content += '\n\n### Source-bound formalization\n\n' + (bound['english'] or bound['reason'])
+            content += '\n\n[Generated target and correspondence](source-bound/rendered.md) · [Guard results and limitations](source-bound/results.md)'
         content += f'\n\n[Full individual analysis](findings/{ident}.md)\n\n'
     return content
 
@@ -512,6 +545,11 @@ def inspect(args):
         'phases': events, 'report_path': 'audit-report.md' if (root / 'audit-report.md').is_file() else None,
         'proof_results': proof_results, 'report_fresh': report_fresh,
         'trace_complete': not errors, 'errors': errors}
+    policy = fields((root / 'audit-policy.md').read_text())
+    if 'Formalization profile' in policy:
+        result['formalization_profile'] = policy['Formalization profile']
+        for item in findings:
+            item['source_bound'] = by_id.get(item['claim_id'], {}).get('source_bound')
     if args.machine:
         return json.dumps(result, ensure_ascii=False)
     return '# Markdown audit inspection\n\n- Findings: ' + str(len(findings)) + '\n- Individual trace complete: ' + str(not errors).lower() + '\n\n' + '\n'.join('- ' + error for error in errors)
@@ -525,6 +563,9 @@ def main(argv=None):
     prep.add_argument('--report', required=True); prep.add_argument('--sources', required=True, nargs='+')
     prep.add_argument('--ocr-language', default='eng'); prep.add_argument('--extract-timeout', type=float, default=60); prep.add_argument('--max-pages', type=int)
     prep.add_argument('--temp-root', default='tmp'); prep.add_argument('--lean-version', default='4.24.0')
+    prep.add_argument('--formalization-profile', choices=('source-bound-v1',))
+    prep.add_argument('--locale', choices=('en', 'ro'), default='en')
+    prep.add_argument('--source-locale', action='append', default=[], help='Profile-only workspace source path=en|ro override, bound at intake')
     tr = commands.add_parser('trace'); tr.add_argument('--workspace', required=True)
     tr.add_argument('--claim-id', required=True); tr.add_argument('--step', choices=STEPS, required=True)
     tr.add_argument('--status', choices=('completed', 'blocked', 'failed'), required=True)
@@ -536,6 +577,7 @@ def main(argv=None):
         sub = commands.add_parser(name); sub.add_argument('--workspace', required=True)
         if name == 'check':
             sub.add_argument('--lean', default='lean'); sub.add_argument('--timeout', type=float, default=60)
+            sub.add_argument('--command-prefix', default='', help='Source-bound reviewed no-network sandbox prefix')
     args = parser.parse_args(argv)
     try:
         print(globals()[args.operation](args))
