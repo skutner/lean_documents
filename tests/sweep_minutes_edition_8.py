@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """Sweeps of minutes edition 8 over many seeds. Calls no model. The gate does not run it (`unittest discover` takes `test*.py` only).
 
-    python3 tests/sweep_minutes_edition_8.py [--first SEED] [--against-edition-6 N] [--books N] [--jobs N]
+    python3 tests/sweep_minutes_edition_8.py [--first SEED] [--against-edition-6 N] [--books N] [--rule-seeds N] [--jobs N]
 
-For the seeds FIRST, FIRST + 1, ... (index 1):
+For the seeds FIRST, FIRST + 1, ... (index 1), 30 of them by default:
 
-  A4 (the first N = 20 seeds): edition 6 against edition 8 on each seed. R6 holds when edition 8 hands out edition 6's world: the same
-     event log, passages, names and readers, the same rows of the key (so the same `lure_states`), the same two reports and the same
-     `procedure.md`, and the sources differ only in the paragraphs of the quiet returns the key lists, and in each of those only in the
-     sentence of the return (the paragraph is edition 6's with that sentence replaced). A seed for which edition 8 redrew is listed with
-     the reason the generator gave (`WHY`) and is not counted as a failure unless more than 1 seed in 20 does it.
-  A5 (the first M = 30 seeds, edition 8 alone): the number of quiet returns (a third of the eligible ones, rounded, 6 at least and half of
-     the returns at most), each one eligible by this module's own reading of the key's facts, no form twice in a book, and each one read
-     back by the test module's reader as a return of the project and the meeting the log gives.
+  A4: edition 6 against edition 8 on each seed (all `--against-edition-6` of them). R6 holds when edition 8 hands out edition 6's world:
+     the same event log, passages, names and readers, the same rows of the key (so the same `lure_states`), the same two reports and the
+     same `procedure.md`, and the sources differ only in the paragraphs of the quiet returns the key lists, and in each of those only in
+     the sentence of the return (the paragraph is edition 6's with that sentence replaced). Edition 8 may redraw a world that edition 6
+     hands out only for the reasons R6 names: its attempt log shows a `quiet ...` refusal (the edition 8 text fails the size bound or the
+     quotability test) or `quiet thin` (fewer than 12 returns or fewer than 6 eligible ones) at the first attempt where edition 6 was
+     handed out; any other difference is a PROBLEM. A seed that redrew is listed with its reason; more than 1 in 20 of the first
+     `--rule-seeds` (20) stops the sweep with a failure.
+  A5 (edition 8 alone, every seed): the number of quiet returns (a third of the eligible ones, rounded, 6 at least and half of the returns
+     at most), each one eligible by this module's own reading of the key's facts, no form twice in a book, and each one read back by the
+     test module's reader as a return of the project and the meeting the log gives; and, where edition 6 hands out the same world, that
+     no `lure_states` differs from edition 6's (the rows of the key are equal).
 
 Exit status 0 when every check holds and at most 1 seed in 20 redrew; 1 otherwise. One build takes about 4 seconds, and edition 6 and
 edition 8 are each built once per seed, so 30 seeds take a few minutes with `--jobs` (default 4) processes."""
@@ -91,7 +95,12 @@ def one_seed(seed, against_six):
         row.update(attempts6=len(log6), why6=[w for ok, w in log6 if not ok])
         same = all(f6[part] == f8[part] for part in ('events', 'passages', 'names', 'readers')) and sorted(six['files']) == sorted(eight['files'])
         row['redrew'] = not same
-        if same:
+        if not same:
+            # legitimate only if the logs run alike up to an attempt that edition 6 hands out and edition 8 refuses for a quiet reason
+            first = next((i for i, (a, b) in enumerate(zip(log6, log8)) if a[0] != b[0]), None)
+            if first is None or not (log6[first][0] and not log8[first][0] and log8[first][1].startswith('quiet')):
+                row['problems'].append(f'R6: edition 8 differs from edition 6 and the attempts do not show a quiet refusal: {log6} / {log8}')
+        else:
             for name in ('report-correct.md', 'report-mixed.md', 'sources/procedure.md'):
                 if six['files'][name] != eight['files'][name]:
                     row['problems'].append(f'R6/R9: {name} differs')
@@ -107,8 +116,9 @@ def one_seed(seed, against_six):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--first', type=int, default=101, help='the first seed (default 101)')
-    parser.add_argument('--against-edition-6', type=int, default=20, help='seeds compared with edition 6 (A4, default 20)')
+    parser.add_argument('--against-edition-6', type=int, default=30, help='seeds compared with edition 6 (A4, A5; default 30)')
     parser.add_argument('--books', type=int, default=30, help='seeds of edition 8 checked on their own (A5, default 30)')
+    parser.add_argument('--rule-seeds', type=int, default=20, help='the seeds the rule "at most 1 redraw in 20" is applied to (default 20)')
     parser.add_argument('--jobs', type=int, default=4, help='processes (default 4)')
     args = parser.parse_args()
     generate_big.register()
@@ -129,8 +139,9 @@ def main():
     redrew = [r['seed'] for r in compared if r['redrew']]
     print(f'edition 8 against edition 6: {len(compared) - len(redrew)} of {len(compared)} seeds held R6; redrew: {redrew or "none"}')
     print(f'edition 8 alone: {len(rows)} books, {sum(not r["problems"] for r in rows)} without a problem')
-    if len(redrew) * 20 > len(compared):
-        print(f'STOP: edition 8 redrew on {len(redrew)} of {len(compared)} seeds, more than 1 in 20')
+    ruled = [r for r in compared if r['seed'] < args.first + args.rule_seeds]
+    if sum(r['redrew'] for r in ruled) * 20 > len(ruled):
+        print(f'STOP: edition 8 redrew on {sum(r["redrew"] for r in ruled)} of the first {len(ruled)} seeds, more than 1 in 20')
         bad += 1
     raise SystemExit(1 if bad else 0)
 
