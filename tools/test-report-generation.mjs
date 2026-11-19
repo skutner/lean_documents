@@ -166,6 +166,32 @@ await test('a draft needs a login; without it the draft is refused with the exac
   } finally { await server.close(); }
 });
 
+await test('a running draft lists only the writer documents that exist; a missing one is a readable 404 without a local path', { timeout: 20000 }, async () => {
+  const server = await start('running-draft-documents');
+  try {
+    const { id } = await example(server);
+    const queued = await generate(server, id, 'WAIT draft');
+    const directory = path.join(server.jobs, queued.id); await server.waitMarker(directory);
+    const file = name => '/api/file?' + new URLSearchParams({ job: queued.id, path: name });
+    const listed = async () => (await server.request('/api/examples')).find(v => v.id === id).generationJobs.find(v => v.id === queued.id);
+    // The writer has not written its notes yet: the file request is refused as missing, in words, without a local path.
+    const missing = await server.request(file('generation-notes.md'), undefined, 404);
+    assert.match(missing.error, /^generation-notes\.md does not exist in this report draft\./);
+    for (const leak of [server.directory, ROOT, 'ENOENT', 'realpath']) assert.equal(missing.error.includes(leak), false, `the refusal does not name ${leak}`);
+    const running = await listed();
+    assert.ok(running.documents.includes('generation.md'), 'the drafting record is listed while the writer runs');
+    assert.equal(running.documents.includes('generation-notes.md'), false, 'writer notes are not listed before they exist');
+    for (const name of running.documents) await server.request(file(name));
+    await fs.writeFile(path.join(directory, 'stub-release.md'), '# Release simulated writer\n');
+    const job = await server.terminal(queued.id); assert.equal(job.status, 'finished', job.error);
+    assert.deepEqual((await listed()).documents, ['generation.md', 'execution.md', 'generation-notes.md']);
+    assert.match((await server.request(file('generation-notes.md'))).text, /explicit test stub/);
+    // The list is computed for the catalog only and never reaches the job's own records.
+    assert.equal('documents' in JSON.parse(await fs.readFile(path.join(directory, 'internal/job.json'), 'utf8')), false);
+    assert.doesNotMatch(await fs.readFile(path.join(directory, 'generation.md'), 'utf8'), /\| documents \|/);
+  } finally { await server.close(); }
+});
+
 await test('invalid mode and missing sources are rejected before a job starts', { timeout: 10000 }, async () => {
   const server = await start('invalid-requests');
   try {
