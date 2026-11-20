@@ -365,13 +365,48 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   // A run of 200 or more characters without a space gives the line breaker nothing to use but the "anywhere" rule, which Chrome
   // pays for at about a second per 100,000 characters. A break opportunity every 100 characters of such a run costs nothing.
   var LONG_RUN = /\S{200,}/g;
+  var CUT_EVERY = 100, CUT_LOOKAHEAD = 40;
+  // Characters that belong to the one before them: combining marks, variation selectors, joiners, emoji skin tones, tag characters.
+  var EXTENDING = /^[\p{M}\u200C\u200D\p{Emoji_Modifier}\u{E0020}-\u{E007F}]$/u;
+  var REGIONAL = /^[\u{1F1E6}-\u{1F1FF}]$/u;
+  function codePointBefore(text, p) {
+    var c = text.charCodeAt(p - 1);
+    return c >= 0xDC00 && c <= 0xDFFF && p > 1 ? text.codePointAt(p - 2) : c;
+  }
+  /** True when a cut before position p would separate characters that are shown as one: the two halves of a surrogate pair, a
+   * character and a mark or joiner after it, anything after a joiner, or the two letters of a flag. */
+  function glued(text, p) {
+    var c = text.charCodeAt(p);
+    if (c >= 0xDC00 && c <= 0xDFFF) { var high = text.charCodeAt(p - 1); if (high >= 0xD800 && high <= 0xDBFF) return true; }
+    var here = String.fromCodePoint(text.codePointAt(p));
+    if (EXTENDING.test(here) || text.charCodeAt(p - 1) === 0x200D) return true;
+    return REGIONAL.test(here) && REGIONAL.test(String.fromCodePoint(codePointBefore(text, p)));
+  }
+  /** The cut points inside a run, each at least CUT_EVERY characters after the one before and moved on past any character that
+   * belongs to the one before it, by at most CUT_LOOKAHEAD characters (a run of nothing but marks is cut there regardless),
+   * and never between the halves of a surrogate pair. Linear: each position is looked at once. */
+  function cutPoints(run) {
+    var cuts = [], p = CUT_EVERY;
+    while (p < run.length) {
+      var stop = Math.min(run.length, p + CUT_LOOKAHEAD);
+      while (p < stop && glued(run, p)) p++;
+      var low = run.charCodeAt(p);
+      if (p < run.length && low >= 0xDC00 && low <= 0xDFFF && run.charCodeAt(p - 1) >= 0xD800 && run.charCodeAt(p - 1) <= 0xDBFF) p++;
+      if (p >= run.length) break;
+      cuts.push(p);
+      p += CUT_EVERY;
+    }
+    return cuts;
+  }
   function escLong(text) {
     if (text.length < 200) return esc(text);
     var out = '', at = 0, m;
     LONG_RUN.lastIndex = 0;
     while ((m = LONG_RUN.exec(text)) !== null) {
       out += esc(text.slice(at, m.index));
-      for (var i = 0; i < m[0].length; i += 100) out += (i ? '<wbr>' : '') + esc(m[0].slice(i, i + 100));
+      var from = 0, cuts = cutPoints(m[0]);
+      for (var i = 0; i < cuts.length; i++) { out += esc(m[0].slice(from, cuts[i])) + '<wbr>'; from = cuts[i]; }
+      out += esc(m[0].slice(from));
       at = m.index + m[0].length;
     }
     return out + esc(text.slice(at));
@@ -384,10 +419,13 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     LONG_RUN.lastIndex = 0;
     while ((m = LONG_RUN.exec(text)) !== null) {
       el.appendChild(document.createTextNode(text.slice(at, m.index)));
-      for (var i = 0; i < m[0].length; i += 100) {
-        if (i) el.appendChild(document.createElement('wbr'));
-        el.appendChild(document.createTextNode(m[0].slice(i, i + 100)));
+      var from = 0, cuts = cutPoints(m[0]);
+      for (var i = 0; i < cuts.length; i++) {
+        el.appendChild(document.createTextNode(m[0].slice(from, cuts[i])));
+        el.appendChild(document.createElement('wbr'));
+        from = cuts[i];
       }
+      el.appendChild(document.createTextNode(m[0].slice(from)));
       at = m.index + m[0].length;
     }
     el.appendChild(document.createTextNode(text.slice(at)));
@@ -619,13 +657,17 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   }
   /** Two spaces before a line break make a break. Written without a pattern: a long run of spaces would cost quadratic time. */
   function hardBreaks(html) {
-    var pieces = html.split('\n'), out = pieces[0];
-    for (var i = 1; i < pieces.length; i++) {
-      var end = out.length;
-      while (end > 0 && out.charCodeAt(end - 1) === 32) end--;
-      out = out.length - end >= 2 ? out.slice(0, end) + '<br>' + pieces[i] : out + '\n' + pieces[i];
+    if (html.indexOf('\n') < 0) return html;
+    var pieces = html.split('\n'), parts = [];
+    for (var i = 0; i < pieces.length; i++) {
+      var piece = pieces[i];
+      if (i === pieces.length - 1) { parts.push(piece); break; }
+      var end = piece.length;
+      while (end > 0 && piece.charCodeAt(end - 1) === 32) end--;
+      if (piece.length - end >= 2) parts.push(piece.slice(0, end), '<br>');
+      else parts.push(piece, '\n');
     }
-    return out;
+    return parts.join('');
   }
   // Every quantifier that runs over text of unknown length is bounded or stops at a character the pattern also needs, so
   // that no input makes the matcher scan the rest of the text again from each start.

@@ -24,6 +24,15 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WATCHDOG_MS = 8 * 60 * 1000;
 // To see that an assertion has teeth, run the test against a page with a fix taken out: PV_BROWSER_PAGE=<that page file>.
 const PAGE_FILE = process.env.PV_BROWSER_PAGE ? path.resolve(process.env.PV_BROWSER_PAGE) : undefined;
+// Which page is under test, said in the console and in result.md: with PV_BROWSER_PAGE left exported after a mutation run the plain
+// command would test another page without a word.
+const OWN_PAGE = path.join(root, 'tools', 'process-viewer.html');
+const pageUnderTest = PAGE_FILE ?? OWN_PAGE;
+const pageHash = crypto.createHash('sha256').update(readFileSync(pageUnderTest)).digest('hex');
+const pageStatement = PAGE_FILE
+  ? `NOT THE VIEWER'S OWN PAGE: this run tested ${PAGE_FILE} (SHA-256 ${pageHash}) because PV_BROWSER_PAGE is set. A pass says nothing about tools/process-viewer.html.`
+  : `The viewer's own page was tested: tools/process-viewer.html, SHA-256 ${pageHash}.`;
+console.log(PAGE_FILE ? `WARNING: ${pageStatement}` : pageStatement);
 const WIDTHS = [[1440, 900], [390, 844]];
 const STATUS_WORDS = ['Running', 'Completed', 'Time Limit Reached', 'Failed', 'Interrupted', 'Not Recorded', 'Imported Report'];
 // A path in a page text: a slash followed by the name of a top folder of a unix machine. Built from parts so that this file holds none.
@@ -234,6 +243,11 @@ try {
   ].join('\n');
   writeFileSync(path.join(keptNotes, 'hostile.md'), HOSTILE);
   writeFileSync(path.join(keptNotes, 'quotes.md'), `${'>'.repeat(3000)} deep text\n`);
+  // Long runs with emoji, joined emoji and marks at the places where the page cuts them (after 100 characters, and again after each 100).
+  const FAMILY = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}';
+  const GRAPHEME_RUNS = ['a' + '\u{1F600}'.repeat(300), 'b'.repeat(95) + FAMILY.repeat(6) + 'z'.repeat(150), 'c'.repeat(99) + 'e\u0301' + 'c'.repeat(150), 'd'.repeat(99) + '\u2764\uFE0F' + 'd'.repeat(120), 'f'.repeat(98) + '\u{1F44D}\u{1F3FD}' + 'f'.repeat(120), 'g'.repeat(98) + '\u{1F1FA}\u{1F1F8}\u{1F1EB}\u{1F1F7}' + 'g'.repeat(120)].join(' ');
+  writeFileSync(path.join(keptNotes, 'graphemes.md'), GRAPHEME_RUNS);
+  writeFileSync(path.join(keptNotes, 'graphemes.txt'), GRAPHEME_RUNS);
   writeFileSync(path.join(keptNotes, 'wide-cell.md'), ['| A | B |', '| --- | --- |', `| ${'x'.repeat(100000)} | y |`, ''].join('\n'));
   writeFileSync(path.join(keptNotes, 'wide-columns.md'), [`|${Array.from({length: 2000}, (_, i) => ` h${i} `).join('|')}|`, `|${' --- |'.repeat(2000)}`, `|${' c |'.repeat(2000)}`, ''].join('\n'));
   writeFileSync(path.join(keptNotes, 'nested.md'), [`${Array.from({length: 40}, () => '>').join(' ')} forty quotes deep`, '', ...Array.from({length: 40}, (_, i) => `${'  '.repeat(i)}- level ${i + 1}`), ''].join('\n'));
@@ -503,7 +517,7 @@ try {
     const rows = await ev(`document.querySelectorAll('[data-card-id="register:claims"] .body tbody tr').length`);
     assert.equal(rows, 2);
     assert.equal(await ev(`document.querySelector('details.kept').open`), false, 'the kept files are closed by default');
-    assert.equal(await ev(`document.querySelectorAll('details.kept .cards > *').length`), 13);
+    assert.equal(await ev(`document.querySelectorAll('details.kept .cards > *').length`), 15);
   });
 
   await check('hostile Markdown (a javascript: link, an image, raw HTML, an attribute quote) is shown as text: no element, no script run, no request leaving the origin', async () => {
@@ -547,6 +561,34 @@ try {
     assert.ok((await polls()) > before, 'the page still polls');
     timings.push(`3,000 quote marks ${quote} ms; 40 nested quotes and lists ${nested} ms; table row of 100 KB ${cell} ms; table of 2,000 columns ${columns} ms`);
     return `quotes ${quote} ms, nesting ${nested} ms, wide cell ${cell} ms, 2,000 columns ${columns} ms`;
+  });
+
+  await check('a long run is cut only between whole characters: an emoji at every cut, a joined emoji sequence, a letter with a mark, a variation selector, a skin tone and flags; the text is exactly the input and no text node holds half a pair (N1)', async () => {
+    const lone = `/[\\uD800-\\uDBFF](?![\\uDC00-\\uDFFF])|(?<![\\uD800-\\uDBFF])[\\uDC00-\\uDFFF]/`;
+    for (const [id, bodySelector, container] of [['graphemes.md', '.md', '.md'], ['graphemes.txt', 'pre', 'pre']]) {
+      const card = `[data-card-id="kept:notes/${id}"]`;
+      await openCardTimed(card, bodySelector);
+      const found = await ev(`(() => {
+        const box = document.querySelector(${json(`${card} .body ${container}`)});
+        const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+        const lone = ${lone}, joined = /^[\\p{M}\\u200C\\u200D\\p{Emoji_Modifier}]/u, flagPair = /[\\u{1F1E6}-\\u{1F1FF}]$/u, flagStart = /^[\\u{1F1E6}-\\u{1F1FF}]/u;
+        const problems = [];
+        let cuts = 0;
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) if (lone.test(node.data)) problems.push('half a pair in a text node: ' + JSON.stringify(node.data.slice(0, 12)) + '...');
+        for (const wbr of box.querySelectorAll('wbr')) {
+          cuts++;
+          const before = wbr.previousSibling && wbr.previousSibling.nodeType === 3 ? wbr.previousSibling.data : '', after = wbr.nextSibling && wbr.nextSibling.nodeType === 3 ? wbr.nextSibling.data : '';
+          if (joined.test(after)) problems.push('a cut before a mark or joiner');
+          if (before.endsWith('\\u200D')) problems.push('a cut after a joiner');
+          if (flagPair.test(before) && flagStart.test(after)) problems.push('a cut between two regional indicators');
+        }
+        return {text: box.textContent, problems, cuts};
+      })()`);
+      assert.equal(found.text, GRAPHEME_RUNS, `${id}: the text is exactly the input`);
+      assert.deepEqual(found.problems, [], id);
+      assert.ok(found.cuts >= 15, `${id}: the runs are cut (${found.cuts} cuts)`);
+    }
+    return 'markdown and plain text';
   });
 
   // ----- Sweep: every run, everything opened -----
@@ -887,6 +929,22 @@ try {
     return done.join(', ');
   });
 
+  await check('a paragraph of 120,000 short lines, some ending in two spaces, is shown quickly with the right number of line breaks (N2)', async () => {
+    const LINES = 120000;
+    const text = Array.from({length: LINES}, (_, i) => `x${i % 20 === 0 ? '  ' : ''}`).join('\n');
+    assert.ok(Buffer.byteLength(text) < 262144, 'one part');
+    writeFileSync(path.join(fx.data, 'projects', fx.pid, 'analyses', 'run-untraced-pasted', 'report.md'), `${text}\n`);
+    await openRun('run-untraced-pasted');
+    const ms = await openCardTimed('[data-card-id="report"]', 'p');
+    const shown = await ev(`({paragraphs: document.querySelectorAll('[data-card-id="report"] .md p').length, breaks: document.querySelectorAll('[data-card-id="report"] .md p br').length, length: document.querySelector('[data-card-id="report"] .md p').textContent.length})`);
+    assert.equal(shown.paragraphs, 1);
+    assert.equal(shown.breaks, LINES / 20, 'one line break for each line that ends in two spaces');
+    assert.ok(shown.length > LINES, 'every line is there');
+    assert.ok(ms < 500, `${ms} ms`);
+    timings.push(`paragraph of 120,000 short lines ${ms} ms`);
+    return `${ms} ms, ${shown.breaks} line breaks`;
+  });
+
   // ----- Whole session -----
   await check('no request other than GET was sent, every request went to the viewer, and every request carried no key in its address', async () => {
     const wrong = events.requests.filter(r => r.method !== 'GET');
@@ -935,6 +993,7 @@ const lines = [
   '# Process viewer browser test', '',
   `Command: \`CHROME=<Chrome binary> node tools/test-process-viewer-browser.mjs\``,
   `Result: **${failed.length ? 'FAIL' : 'PASS'}**, ${results.length - failed.length} of ${results.length} assertions passed.`, '',
+  PAGE_FILE ? `**${pageStatement}**` : pageStatement, '',
   ...notes.map(n => `- ${n}`), ...timings.map(t => `- Time in Chrome, from the click to the text on the page, including the request: ${t}.`), '',
   '| Assertion | Result | Detail |', '| --- | --- | --- |',
   ...results.map(r => `| ${r.name.replace(/\|/g, '/')} | ${r.ok ? 'PASS' : 'FAIL'} | ${String(r.detail).replace(/\|/g, '/').replace(/\n/g, ' ')} |`), '',
@@ -944,5 +1003,6 @@ const lines = [
 if (events.ignored.length) lines.push('', '## Set aside', '', ...events.ignored.map(e => `- ${e}`));
 if (outDir) await fs.writeFile(path.join(outDir, 'result.md'), lines.join('\n') + '\n');
 console.log(`${failed.length ? 'FAIL' : 'PASS'}: ${results.length - failed.length} of ${results.length} assertions. Output: ${outDir ? path.relative(root, outDir) : 'none'}`);
+if (PAGE_FILE) console.log(`WARNING: ${pageStatement}`);
 if (failedSetup) console.error(failedSetup.stack);
 process.exit(failed.length ? 1 : 0);
