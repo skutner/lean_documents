@@ -41,7 +41,7 @@ function fixture(t, options) {
 
 // The server modules, in the order they are built. Each must exist: a missing module fails the static test.
 // Every server module must exist: a missing one fails this test.
-/** A settings file below the worktree's tmp/ for a child viewer, so that no child reads a real tmp/process-viewer/settings.json. */
+/** A settings file below the worktree's tmp/ for a child viewer, so that no child reads the user's own settings file. */
 function pinnedSettings(t, fx, content = null) {
   fs.mkdirSync(path.join(repoRoot, 'tmp'), {recursive: true});
   const dir = fs.mkdtempSync(path.join(repoRoot, 'tmp', 'pv-pinned-'));
@@ -1114,7 +1114,7 @@ test('the read-only check tool reports an unchanged manifest on a fixture and fi
   // The manifest covers projects/ only: the database files beside it are not part of it.
   assert.ok(treeManifest(path.join(fx.data, 'projects')).every(line => !line.includes('analyst')));
   // Exit 2 means a named problem each time: an explicit settings file that is not there, one outside tmp/, and no data folder.
-  const check = env => spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs')], {env: {PATH: process.env.PATH, ...env}, encoding: 'utf8', timeout: 60000});
+  const check = env => spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs')], {env: childEnv(t, fx, {VIEWER_DEEP_PROOF_DATA: '', VIEWER_DEEP_PROOF_TMP: '', VIEWER_DOSSIERS: '', ...env}), encoding: 'utf8', timeout: 60000});
   const missing = check({VIEWER_SETTINGS: path.join(repoRoot, 'tmp', 'pv-no-such-settings', 'settings.json')});
   assert.equal(missing.status, 2);
   assert.match(missing.stderr, /The settings file cannot be read\./);
@@ -1128,34 +1128,45 @@ test('the read-only check tool reports an unchanged manifest on a fixture and fi
   assert.match(run(['--bogus']).stderr, /Usage: node tools\/check-viewer-readonly\.mjs/);
 });
 
-test('a child viewer pinned to fixture settings never reads a settings file in tmp/process-viewer', async t => {
-  const fx = fixture(t);
-  const real = path.join(repoRoot, 'tmp/process-viewer/settings.json');
-  if (fs.existsSync(real)) {
-    t.diagnostic('a settings file exists in tmp/process-viewer; it is left alone and the decoy part is skipped');
-    return t.skip('tmp/process-viewer/settings.json exists (it is not touched by tests)');
+test('every child viewer is pinned to fixture settings, and no test writes where the real settings file lives', () => {
+  // Static check of this file and of the fixture builder. The place of the user's own settings file is named in two
+  // pieces here, so that this check does not match itself.
+  const place = 'tmp/' + 'process-viewer';
+  const split = "'process-viewer', " + "'settings";
+  const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8');
+  const fixtureSource = fs.readFileSync(path.join(tools, 'process-viewer-fixture.mjs'), 'utf8');
+  // 1. Each place that starts the viewer or its check as a child process builds its environment with childEnv(, so
+  // that none can fall back to the default settings file.
+  const starts = [...source.matchAll(/spawn(?:Sync)?\(process\.execPath, \[path\.join\(tools, '([a-z-]+\.mjs)'\)[^\n]*/g)];
+  assert.ok(starts.length >= 4, `found ${starts.length} places that start a viewer script`);
+  for (const m of starts) assert.ok(m[0].includes('childEnv('), `${m[1]} is started without childEnv(: ${m[0].slice(0, 120)}`);
+  // 2. The place of the real settings file is named only through the temporary repository root (a folder of this test),
+  // (also through the `write` helper of the test below, which joins it with that root) and the fixture builder never names it.
+  for (const line of source.split('\n')) {
+    if (line.includes(place) || line.includes(split)) assert.ok(/path\.join\(repo, |^\s*write\('/.test(line), `a line names the real settings place: ${line.trim().slice(0, 120)}`);
   }
-  // A decoy at the default place: a data folder that does not exist, so that a viewer that read it would stop.
-  fs.mkdirSync(path.dirname(real), {recursive: true});
-  fs.writeFileSync(real, JSON.stringify({deepProofData: path.join(fx.base, 'decoy-data-folder'), dossiers: [path.join(fx.base, 'decoy-dossier')], port: 0}));
-  t.after(() => {
-    fs.rmSync(real, {force: true});
-    try { fs.rmdirSync(path.dirname(real)); } catch { /* the folder holds something else: leave it */ }
-  });
-  // Unpinned, the decoy is what the viewer reads (the hazard the pinning prevents) ...
-  const unpinned = spawnSync(process.execPath, [path.join(tools, 'process-viewer.mjs')], {env: {PATH: process.env.PATH, VIEWER_PORT: '0'}, encoding: 'utf8', timeout: 20000});
-  assert.equal(unpinned.status, 1);
-  assert.match(unpinned.stderr, /Deep Proof data folder cannot be opened/);
-  // ... pinned, it is not read at all.
-  const child = spawn(process.execPath, [path.join(tools, 'process-viewer.mjs')], {env: childEnv(t, fx), stdio: ['ignore', 'pipe', 'pipe']});
-  t.after(() => child.kill('SIGKILL'));
-  const line = await new Promise((resolve, reject) => {
-    let out = '';
-    child.stdout.on('data', c => { out += c; const m = /Process viewer: http:\/\/127\.0\.0\.1:(\d+)\/#key=([0-9a-f]{32})/.exec(out); if (m) resolve(m); });
-    child.on('exit', code => reject(new Error(`the pinned viewer exited with ${code}`)));
-    setTimeout(() => reject(new Error('the pinned viewer did not start')), 20000);
-  });
-  const status = JSON.parse((await request({port: Number(line[1]), key: line[2]}, '/api/status')).text);
-  assert.equal(status.folders.data, fs.realpathSync(fx.data));
-  assert.equal(status.folders.dossiers.length, 6);
+  assert.ok(!fixtureSource.includes(place) && !fixtureSource.includes('settings.json'));
+  // No write call joins the worktree root with that place.
+  assert.doesNotMatch(source, /(?:writeFileSync|mkdirSync|rmSync|rmdirSync|mkdtempSync|renameSync|symlinkSync|appendFileSync)\([^\n]*repoRoot[^\n]*process-viewer'/);
+});
+
+test('an explicit settings file wins over the default file, and the default file of a temporary root is read without it', t => {
+  const repo = fs.mkdtempSync(path.join(realTmp, 'pv-repo-'));
+  t.after(() => fs.rmSync(repo, {recursive: true, force: true}));
+  const write = (rel, value) => {
+    fs.mkdirSync(path.dirname(path.join(repo, rel)), {recursive: true});
+    fs.writeFileSync(path.join(repo, rel), JSON.stringify(value));
+    return path.join(repo, rel);
+  };
+  write('tmp/process-viewer/settings.json', {deepProofData: '/decoy/default/data', dossiers: ['/decoy/default/dossier'], port: 8801});
+  const explicit = write('tmp/elsewhere/own-settings.json', {deepProofData: '/chosen/data', dossiers: ['/chosen/dossier'], port: 8802});
+  // Without VIEWER_SETTINGS the default file of this root is the one read.
+  assert.deepEqual(loadSettings({env: {}, repoRoot: repo}), {deepProofData: '/decoy/default/data', dossiers: ['/decoy/default/dossier'], deepProofTmp: null, port: 8801});
+  // With it, the named file wins and the default one is not read.
+  assert.deepEqual(loadSettings({env: {VIEWER_SETTINGS: explicit}, repoRoot: repo}), {deepProofData: '/chosen/data', dossiers: ['/chosen/dossier'], deepProofTmp: null, port: 8802});
+  // Environment values win over both files.
+  assert.equal(loadSettings({env: {VIEWER_SETTINGS: explicit, VIEWER_DEEP_PROOF_DATA: '/from/env'}, repoRoot: repo}).deepProofData, '/from/env');
+  // A named file that is not below the root's tmp/ is refused, and a named file that is missing is an error, never a fallback.
+  assert.throws(() => loadSettings({env: {VIEWER_SETTINGS: path.join(repo, 'outside.json')}, repoRoot: repo}), /below the repository tmp\//);
+  assert.throws(() => loadSettings({env: {VIEWER_SETTINGS: path.join(repo, 'tmp/elsewhere/missing.json')}, repoRoot: repo}), /cannot be read/);
 });
