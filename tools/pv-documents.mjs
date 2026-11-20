@@ -4,7 +4,7 @@
  * Every file is reached through the read gate, and a file path is never taken from a request except for a file of the
  * kept copy of a work folder, which the gate checks like every other path. */
 import * as defaultGate from './pv-read.mjs';
-import {ViewerError, isId, partOf, table, cell, firstLine, scrub, formatBytes, formatDuration, TIMELINE_CAP} from './pv-trace.mjs';
+import {ViewerError, isId, partOf, readable, table, cell, firstLine, scrub, formatBytes, formatDuration, TIMELINE_CAP} from './pv-trace.mjs';
 
 const TEXT_LIMIT = 10 * 1024 * 1024;
 const TRANSCRIPT_LIMIT = 8 * 1024 * 1024;
@@ -22,7 +22,7 @@ const DRAFT_NOTICE = 'Draft: not validated. This text comes from the work folder
 const DATA_FILE = 'Data file, not displayed.';
 
 const label = value => (typeof value === 'string' && value ? value.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()) : NOT_RECORDED);
-const text = value => (value === null || value === undefined || value === '' ? NOT_RECORDED : typeof value === 'string' ? value : typeof value === 'object' ? JSON.stringify(value) : String(value));
+const text = value => (value === null || value === undefined || value === '' ? NOT_RECORDED : typeof value === 'string' ? value : readable(value));
 const isDataFile = name => /\.(?:jsonl?|ndjson)$/i.test(name);
 const clip = (value, limit = 1000) => {
   const s = text(value);
@@ -410,7 +410,7 @@ export function createDocuments({roots, traces, runs, dossiers = null, gate = de
   function timeline(pid, rid, after = 0) {
     const run = requireRun(pid, rid);
     if (run.traced) {
-      const answer = traces.timeline(pid, rid, after);
+      const answer = traces.timeline(pid, rid, after, {final: run.status !== 'running'});
       if (!answer) throw new ViewerError(404, 'The trace of this run is not available.');
       return {...answer, traced: true, banner: null};
     }
@@ -428,7 +428,7 @@ export function createDocuments({roots, traces, runs, dossiers = null, gate = de
     const run = requireRun(pid, rid);
     let body;
     if (run.traced) {
-      body = traces.body(pid, rid, n);
+      body = traces.body(pid, rid, n, {final: run.status !== 'running'});
       if (!body) throw new ViewerError(404, 'This step does not exist.');
       if (body.needsPrompt !== undefined) {
         const turn = body.needsPrompt;

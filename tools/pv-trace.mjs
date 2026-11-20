@@ -55,7 +55,14 @@ export function formatDuration(ms) {
   return `${Math.floor(s / 60)} min ${s % 60} s`;
 }
 /** A Markdown table cell: no pipe, no line break. */
-export const cell = value => String(value ?? 'Not recorded').replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim() || 'Not recorded';
+/** Plain text for a value of any shape: lists joined by commas, objects as `name: value` pairs, nothing as JSON. */
+export function readable(value) {
+  if (value === null || value === undefined || value === '') return 'Not recorded';
+  if (Array.isArray(value)) return value.map(readable).join(', ');
+  if (typeof value === 'object') return Object.entries(value).map(([k, v]) => `${k}: ${readable(v)}`).join('; ');
+  return String(value);
+}
+export const cell = value => readable(value).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|').trim() || 'Not recorded';
 export function table(headers, rows) {
   if (!rows.length) return '';
   return [`| ${headers.map(cell).join(' | ')} |`, `| ${headers.map(() => '---').join(' | ')} |`, ...rows.map(r => `| ${r.map(cell).join(' | ')} |`)].join('\n');
@@ -264,6 +271,20 @@ function flushPending(state) {
     at: p.at, offsetMs: offsetOf(state, p.at), kind: assistant ? 'agent-message' : 'command-output', title: assistant ? 'Agent Message' : 'Command Output',
     summary: firstLine(p.head), hasBody: true, turn: p.turn, seq: p.seq, spans: p.spans
   });
+}
+
+const CUT_OFF_NOTE = 'The output was cut off: the run ended before it completed.';
+
+/** The output still being joined, shown as an entry of its usual kind for a run that is no longer running. It is
+ * never stored: when a later record flushes the output, the stored entry takes the same number. */
+function cutOffEntry(state) {
+  const p = state.pending;
+  if (!p || p.chars === 0 || !state.wantEntries || state.entries.length >= MAX_ENTRIES) return null;
+  const assistant = p.kind === 'assistant';
+  return {
+    n: state.entries.length + 1, at: p.at, offsetMs: offsetOf(state, p.at), kind: assistant ? 'agent-message' : 'command-output', title: assistant ? 'Agent Message' : 'Command Output',
+    summary: `${firstLine(p.head, 160)} (output cut off)`, hasBody: true, turn: p.turn, seq: p.seq, spans: [...p.spans], cutOff: true
+  };
 }
 
 function fragment(state, rec, off, len) {
@@ -495,25 +516,29 @@ export function createTraceIndex({root, gate = defaultGate}) {
       }
       return state(pid, rid, false);
     },
-    /** The next entries after number `after`, at most TIMELINE_CAP. Null when there is no trace. */
-    timeline(pid, rid, after = 0) {
+    /** The next entries after number `after`, at most TIMELINE_CAP. Null when there is no trace. With `final` (the run is
+     * no longer running) an output that never completed is added as a last entry, marked as cut off. */
+    timeline(pid, rid, after = 0, {final = false} = {}) {
       const s = state(pid, rid, true);
       if (!s) return null;
-      const start = Math.max(0, Math.min(Number.isInteger(after) ? after : 0, s.entries.length));
-      const slice = s.entries.slice(start, start + TIMELINE_CAP);
+      const cut = final ? cutOffEntry(s) : null;
+      const all = cut ? s.entries.concat([cut]) : s.entries;
+      const start = Math.max(0, Math.min(Number.isInteger(after) ? after : 0, all.length));
+      const slice = all.slice(start, start + TIMELINE_CAP);
       return {
         entries: slice.map(toPublic),
         next: slice.length ? slice.at(-1).n : start,
-        more: start + slice.length < s.entries.length,
+        more: start + slice.length < all.length,
         lastChanged: s.mtimeMs,
-        total: s.entries.length
+        total: all.length
       };
     },
     /** The body of entry `n`: {format, text, note?} or {needsPrompt, turn}; null when the entry does not exist. */
-    body(pid, rid, n) {
+    body(pid, rid, n, {final = false} = {}) {
       const s = state(pid, rid, true);
-      if (!s || !Number.isInteger(n) || n < 1 || n > s.entries.length) return null;
-      const entry = s.entries[n - 1];
+      const cut = s && final ? cutOffEntry(s) : null;
+      if (!s || !Number.isInteger(n) || n < 1 || n > s.entries.length + (cut ? 1 : 0)) return null;
+      const entry = n > s.entries.length ? cut : s.entries[n - 1];
       if (!entry.hasBody) return {format: 'text', text: ''};
       // The parts of one long body are asked for one after the other: the last body is kept for them.
       if (lastBody && lastBody.state === s && lastBody.n === n) return lastBody.body;
@@ -531,6 +556,7 @@ export function createTraceIndex({root, gate = defaultGate}) {
       }
       if (!records.length) return {format: 'text', text: ''};
       const body = bodyFrom(entry, records);
+      if (entry.cutOff) return {...body, note: [body.note, CUT_OFF_NOTE].filter(Boolean).join(' ')};
       const answer = body.needsPrompt !== undefined ? {...body, turn: entry.turn, kind: entry.kind} : body;
       lastBody = answer.text && answer.text.length > PART_BYTES ? {state: s, n, body: answer} : null;
       return answer;

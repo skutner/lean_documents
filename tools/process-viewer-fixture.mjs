@@ -93,7 +93,7 @@ const REGISTERS = {
   'review-coverage': [{id: 'R-001', originalClaimId: 'CL-001', reviewerClaimId: null, findingId: 'F-001', status: 'covered_partially', reason: 'The original named the total only.'}],
   'external-sources': []
 };
-const MANDATE = {id: 'M-001', targetDocumentId: 'report-under-review', scope: 'The quarterly figures', purpose: 'Decide on funding', audience: 'Board', reportDate: '2026-01-01', depth: 'deep', researchMode: 'closed', materiality: 'Figures that change a decision', profiles: [{id: 'review', reason: 'A review is under check'}], assumptions: ['Dates are in UTC'], limits: ['No spreadsheet access']};
+const MANDATE = {id: 'M-001', targetDocumentId: 'report-under-review', scope: 'The quarterly figures', purpose: 'Decide on funding', audience: 'Board', reportDate: '2026-01-01', coveredPeriod: {from: '2026-01-01', to: '2026-03-31'}, depth: 'deep', researchMode: 'closed', materiality: 'Figures that change a decision', profiles: [{id: 'review', reason: 'A review is under check'}], assumptions: ['Dates are in UTC'], limits: ['No spreadsheet access']};
 const COVERAGE = {id: 'CV-001', completion: 'complete', counts: {segmentsRead: 4, claimsChecked: 2, confirmedFindings: 1}, gates: [{id: 'G1', status: 'passed', reason: 'All references resolve.'}], sources: [{id: 'doc-a', originalReview: 'limited', reason: 'Extracted text only.'}], segments: [{id: 's1', reading: 'read', claims: 'checked', requirements: 'checked'}], limitations: ['Spreadsheet not inspected.']};
 
 /** Writes the quality registers into `base/<rel>/quality` and the matching report. */

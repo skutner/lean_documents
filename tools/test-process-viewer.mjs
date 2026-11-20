@@ -14,7 +14,7 @@ import crypto from 'node:crypto';
 import {spawn, spawnSync, execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import * as gate from './pv-read.mjs';
-import {createTraceIndex, ViewerError, partOf} from './pv-trace.mjs';
+import {createTraceIndex, ViewerError, partOf, cell} from './pv-trace.mjs';
 import {createRunIndex, processAlive} from './pv-runs.mjs';
 import {createDocuments} from './pv-documents.mjs';
 import {createDossiers} from './pv-dossiers.mjs';
@@ -40,6 +40,19 @@ function fixture(t, options) {
 }
 
 // The server modules, in the order they are built. Each must exist: a missing module fails the static test.
+// Every server module must exist: a missing one fails this test.
+/** A settings file below the worktree's tmp/ for a child viewer, so that no child reads a real tmp/process-viewer/settings.json. */
+function pinnedSettings(t, fx, content = null) {
+  fs.mkdirSync(path.join(repoRoot, 'tmp'), {recursive: true});
+  const dir = fs.mkdtempSync(path.join(repoRoot, 'tmp', 'pv-pinned-'));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, 'settings.json');
+  fs.writeFileSync(file, JSON.stringify(content ?? {deepProofData: fx.data, dossiers: fx.dossiers, deepProofTmp: fx.tmp, port: 0}));
+  return file;
+}
+/** The environment of a child viewer: pinned to fixture settings and to an explicit dossier list. */
+const childEnv = (t, fx, extra = {}) => ({PATH: process.env.PATH, VIEWER_SETTINGS: pinnedSettings(t, fx), VIEWER_DOSSIERS: fx.dossiers.join(path.delimiter), VIEWER_DEEP_PROOF_DATA: fx.data, VIEWER_DEEP_PROOF_TMP: fx.tmp, VIEWER_PORT: '0', ...extra});
+
 // Every server module must exist: a missing one fails this test.
 const SERVER_MODULES = ['pv-read.mjs', 'pv-trace.mjs', 'pv-runs.mjs', 'pv-documents.mjs', 'pv-dossiers.mjs', 'process-viewer.mjs'];
 const FS_FUNCTIONS = ['openSync', 'readSync', 'fstatSync', 'lstatSync', 'readdirSync', 'closeSync', 'realpathSync', 'readFileSync', 'constants'];
@@ -238,6 +251,38 @@ test('on macOS the no-follow flag is proven at start without a write: a system l
   assert.throws(() => gate.proveNoFollow({open: () => 1, close: () => {}}), /cannot prove/);
   assert.throws(() => gate.proveNoFollow({open: file => { if (file === '/etc/hosts') { const e = new Error('x'); e.code = 'ELOOP'; throw e; } const e = new Error('y'); e.code = 'EACCES'; throw e; }, close: () => {}}), /cannot prove/);
   assert.deepEqual(Object.keys(gate.proveNoFollow({platform: 'linux'})), ['skipped']);
+});
+
+test('the check of a descriptor after an open admits only the located path, on any system', () => {
+  const root = {kind: 'data', path: '/data'};
+  const located = '/data/projects/p/analyses/r/report.md';
+  assert.equal(gate.openedPathVerdict({real: located, located, root}), 'ok');
+  // A real path inside the root but not the located one: a link was swapped in between the check and the open.
+  assert.equal(gate.openedPathVerdict({real: '/data/projects/p/analyses/r/other.md', located, root}), 'link');
+  assert.equal(gate.openedPathVerdict({real: '/data/projects/q/analyses/r/report.md', located, root}), 'link');
+  // The database below the data root is inside the root, and still refused.
+  assert.equal(gate.openedPathVerdict({real: '/data/analyst.sqlite', located, root}), 'link');
+  assert.equal(gate.openedPathVerdict({real: '/etc/hosts', located, root}), 'link');
+  assert.equal(gate.openedPathVerdict({real: located + ' (deleted)', located, root}), 'missing');
+  assert.equal(gate.openedPathVerdict({real: null, located, root}), 'link');
+});
+
+test('a folder swapped for a link between the check and the open is refused', t => {
+  const fx = fixture(t);
+  const outside = fs.mkdtempSync(path.join(realTmp, 'pv-outside-'));
+  t.after(() => fs.rmSync(outside, {recursive: true, force: true}));
+  fs.writeFileSync(path.join(outside, 'report.md'), SENTINEL);
+  const run = path.join(fx.data, 'projects/proj-alpha/analyses/run-analysis-done');
+  const rel = 'projects/proj-alpha/analyses/run-analysis-done/report.md';
+  let swapped = false;
+  const answer = gate.read(fx.roots.data, rel, {beforeOpen: () => {
+    fs.renameSync(run, run + '-aside');
+    fs.symlinkSync(outside, run);
+    swapped = true;
+  }});
+  assert.ok(swapped, 'the hook ran between the check and the open');
+  assert.deepEqual([answer.ok, answer.reason], [false, 'link']);
+  assert.ok(!JSON.stringify(answer).includes(SENTINEL));
 });
 
 // ---------- Readers: trace, runs, documents ----------
@@ -551,8 +596,53 @@ test('two traces written at the same time keep their own sequence numbers from 1
   }
 });
 
+test('an output that never completed is shown as a last entry once the run is no longer running', t => {
+  const fx = fixture(t);
+  const file = path.join(fx.data, 'projects/proj-alpha/traces/run-only-start/trace.jsonl');
+  const fragment = (seq, message) => JSON.stringify({seq, at: new Date().toISOString(), type: 'ala-event', turn: '1', event: {type: 'coding-agent-message', agent: 'codex', outputKind: 'assistant', outputId: 'mx', message}}) + '\n';
+  fs.appendFileSync(file, fragment(2, 'First half of the last message, ') + fragment(3, 'second half, never completed.'));
+  const live = services(fx);
+  const before = live.docs.timeline(fx.pid, fx.ids.onlyStart, 0);
+  assert.deepEqual(before.entries.map(e => e.kind), ['run-started'], 'a live run behaves as before: the open message is not shown yet');
+  assert.throws(() => live.docs.entryBody(fx.pid, fx.ids.onlyStart, 2), e => e.status === 404);
+  const ended = services(fx, {alive: () => false});
+  assert.equal(ended.runs.get(fx.pid, fx.ids.onlyStart).status, 'interrupted');
+  const after = ended.docs.timeline(fx.pid, fx.ids.onlyStart, 0);
+  assert.deepEqual(after.entries.map(e => [e.n, e.kind]), [[1, 'run-started'], [2, 'agent-message']]);
+  assert.deepEqual(after.entries[0], before.entries[0], 'earlier entries do not change');
+  assert.match(after.entries[1].summary, /First half of the last message/);
+  assert.match(after.entries[1].summary, /cut off/);
+  assert.equal(after.entries[1].hasBody, true);
+  assert.equal(after.total, 2);
+  const body = ended.docs.entryBody(fx.pid, fx.ids.onlyStart, 2);
+  assert.equal(body.text, 'First half of the last message, second half, never completed.');
+  assert.match(body.note, /cut off/);
+  // The next poll with the same state gives the same entry; paging past it is empty.
+  assert.deepEqual(ended.docs.timeline(fx.pid, fx.ids.onlyStart, 1).entries.map(e => e.n), [2]);
+  assert.deepEqual(ended.docs.timeline(fx.pid, fx.ids.onlyStart, 2).entries, []);
+  // When a record arrives later and flushes the message, it keeps number 2.
+  fs.appendFileSync(file, JSON.stringify({seq: 4, at: new Date().toISOString(), type: 'progress-note', turn: '1', text: 'Later note.', blocks: 1}) + '\n');
+  const later = ended.docs.timeline(fx.pid, fx.ids.onlyStart, 0);
+  assert.deepEqual(later.entries.map(e => [e.n, e.kind]), [[1, 'run-started'], [2, 'agent-message'], [3, 'progress-note']]);
+  // A run that ended with run-end has nothing pending and gains no entry.
+  assert.equal(ended.docs.timeline(fx.pid, fx.ids.analysisDone, 0).total, 18);
+});
+
+test('an object in a register field is shown as readable text, never as [object Object]', t => {
+  const fx = fixture(t);
+  const {docs} = services(fx);
+  const mandate = docs.document(fx.pid, fx.ids.checkDone, 'register:mandate').text;
+  assert.match(mandate, /\| Covered period \| from: 2026-01-01; to: 2026-03-31 \|/);
+  assert.equal(cell({a: 1, b: ['x', 'y'], c: {d: null}}), 'a: 1; b: x, y; c: d: Not recorded');
+  assert.equal(cell(['one', {two: 2}]), 'one, two: 2');
+  const rid = fx.ids.checkDone;
+  const page = docs.runPage(fx.pid, rid);
+  for (const card of page.results) if (card.doc) assert.ok(!docs.document(fx.pid, rid, card.doc).text.includes('[object Object]'), card.doc);
+});
+
 const GOLDEN = path.join(tools, 'fixtures/deep-proof-trace-v1-sample.jsonl');
-test('the golden trace sample gives the expected timeline', {skip: fs.existsSync(GOLDEN) ? false : 'golden sample not delivered yet'}, t => {
+test('the golden trace sample gives the expected timeline', t => {
+  assert.ok(fs.existsSync(GOLDEN), 'the golden sample must be present: tools/fixtures/deep-proof-trace-v1-sample.jsonl');
   const base = fs.mkdtempSync(path.join(realTmp, 'pv-golden-'));
   t.after(() => fs.rmSync(base, {recursive: true, force: true}));
   const records = fs.readFileSync(GOLDEN, 'utf8').trim().split('\n').map(l => JSON.parse(l));
@@ -837,7 +927,7 @@ test('the six dossiers are listed; the keys folders beside fixtures are never op
   const evaluator = path.join(fx.base, 'evaluator', 'book');
   fs.mkdirSync(evaluator, {recursive: true});
   await assert.rejects(startViewer({settings: settingsOf(fx, {dossiers: [evaluator]})}), /answer keys or evaluator/);
-  const child = spawnSync(process.execPath, [path.join(tools, 'process-viewer.mjs')], {env: {PATH: process.env.PATH, VIEWER_DEEP_PROOF_DATA: fx.data, VIEWER_DEEP_PROOF_TMP: fx.tmp, VIEWER_DOSSIERS: [fx.dossiers[0], fx.keysFolders[1]].join(path.delimiter), VIEWER_PORT: '0'}, encoding: 'utf8', timeout: 20000});
+  const child = spawnSync(process.execPath, [path.join(tools, 'process-viewer.mjs')], {env: childEnv(t, fx, {VIEWER_DOSSIERS: [fx.dossiers[0], fx.keysFolders[1]].join(path.delimiter)}), encoding: 'utf8', timeout: 20000});
   assert.equal(child.status, 1);
   assert.match(child.stderr, /answer keys or evaluator/);
   assert.doesNotMatch(child.stdout, /Process viewer:/);
@@ -966,7 +1056,7 @@ test('a 70 MiB trace and a 2 MiB line are read in parts within the memory bound'
   const size = fs.statSync(file).size;
   assert.ok(size > 70 * 1024 * 1024, `${size} bytes`);
   // The server runs as a child process, so that its resident memory can be sampled from outside.
-  const child = spawn(process.execPath, [path.join(tools, 'process-viewer.mjs')], {env: {PATH: process.env.PATH, VIEWER_DEEP_PROOF_DATA: fx.data, VIEWER_DEEP_PROOF_TMP: fx.tmp, VIEWER_PORT: '0'}, stdio: ['ignore', 'pipe', 'pipe']});
+  const child = spawn(process.execPath, [path.join(tools, 'process-viewer.mjs')], {env: childEnv(t, fx), stdio: ['ignore', 'pipe', 'pipe']});
   t.after(() => child.kill('SIGKILL'));
   const line = await new Promise((resolve, reject) => {
     let out = '';
@@ -1015,7 +1105,7 @@ test('the read-only check tool reports an unchanged manifest on a fixture and fi
   const fx = fixture(t);
   const repo = fs.mkdtempSync(path.join(realTmp, 'pv-repo-'));
   t.after(() => fs.rmSync(repo, {recursive: true, force: true}));
-  const run = args => spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs'), ...args], {env: {PATH: process.env.PATH, VIEWER_DEEP_PROOF_DATA: fx.data, VIEWER_DEEP_PROOF_TMP: fx.tmp, VIEWER_DOSSIERS: fx.dossiers.join(path.delimiter)}, encoding: 'utf8', timeout: 60000});
+  const run = args => spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs'), ...args], {env: childEnv(t, fx), encoding: 'utf8', timeout: 60000});
   const ok = run([]);
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
   assert.match(ok.stdout, /Manifest unchanged\./);
@@ -1023,5 +1113,49 @@ test('the read-only check tool reports an unchanged manifest on a fixture and fi
   assert.equal(run(['--bogus']).status, 2);
   // The manifest covers projects/ only: the database files beside it are not part of it.
   assert.ok(treeManifest(path.join(fx.data, 'projects')).every(line => !line.includes('analyst')));
-  assert.equal(spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs')], {env: {PATH: process.env.PATH, VIEWER_SETTINGS: path.join(repo, 'tmp/none.json')}, encoding: 'utf8'}).status, 2);
+  // Exit 2 means a named problem each time: an explicit settings file that is not there, one outside tmp/, and no data folder.
+  const check = env => spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs')], {env: {PATH: process.env.PATH, ...env}, encoding: 'utf8', timeout: 60000});
+  const missing = check({VIEWER_SETTINGS: path.join(repoRoot, 'tmp', 'pv-no-such-settings', 'settings.json')});
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /The settings file cannot be read\./);
+  const outside = check({VIEWER_SETTINGS: path.join(repo, 'tmp/none.json')});
+  assert.equal(outside.status, 2);
+  assert.match(outside.stderr, /The settings file must lie below the repository tmp\/ folder\./);
+  const empty = check({VIEWER_SETTINGS: pinnedSettings(t, fx, {}), VIEWER_DOSSIERS: ''});
+  assert.equal(empty.status, 2);
+  assert.match(empty.stderr, /No Deep Proof data folder is set\./);
+  assert.equal(run(['--bogus']).status, 2);
+  assert.match(run(['--bogus']).stderr, /Usage: node tools\/check-viewer-readonly\.mjs/);
+});
+
+test('a child viewer pinned to fixture settings never reads a settings file in tmp/process-viewer', async t => {
+  const fx = fixture(t);
+  const real = path.join(repoRoot, 'tmp/process-viewer/settings.json');
+  if (fs.existsSync(real)) {
+    t.diagnostic('a settings file exists in tmp/process-viewer; it is left alone and the decoy part is skipped');
+    return t.skip('tmp/process-viewer/settings.json exists (it is not touched by tests)');
+  }
+  // A decoy at the default place: a data folder that does not exist, so that a viewer that read it would stop.
+  fs.mkdirSync(path.dirname(real), {recursive: true});
+  fs.writeFileSync(real, JSON.stringify({deepProofData: path.join(fx.base, 'decoy-data-folder'), dossiers: [path.join(fx.base, 'decoy-dossier')], port: 0}));
+  t.after(() => {
+    fs.rmSync(real, {force: true});
+    try { fs.rmdirSync(path.dirname(real)); } catch { /* the folder holds something else: leave it */ }
+  });
+  // Unpinned, the decoy is what the viewer reads (the hazard the pinning prevents) ...
+  const unpinned = spawnSync(process.execPath, [path.join(tools, 'process-viewer.mjs')], {env: {PATH: process.env.PATH, VIEWER_PORT: '0'}, encoding: 'utf8', timeout: 20000});
+  assert.equal(unpinned.status, 1);
+  assert.match(unpinned.stderr, /Deep Proof data folder cannot be opened/);
+  // ... pinned, it is not read at all.
+  const child = spawn(process.execPath, [path.join(tools, 'process-viewer.mjs')], {env: childEnv(t, fx), stdio: ['ignore', 'pipe', 'pipe']});
+  t.after(() => child.kill('SIGKILL'));
+  const line = await new Promise((resolve, reject) => {
+    let out = '';
+    child.stdout.on('data', c => { out += c; const m = /Process viewer: http:\/\/127\.0\.0\.1:(\d+)\/#key=([0-9a-f]{32})/.exec(out); if (m) resolve(m); });
+    child.on('exit', code => reject(new Error(`the pinned viewer exited with ${code}`)));
+    setTimeout(() => reject(new Error('the pinned viewer did not start')), 20000);
+  });
+  const status = JSON.parse((await request({port: Number(line[1]), key: line[2]}, '/api/status')).text);
+  assert.equal(status.folders.data, fs.realpathSync(fx.data));
+  assert.equal(status.folders.dossiers.length, 6);
 });

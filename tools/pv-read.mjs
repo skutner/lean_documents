@@ -106,6 +106,15 @@ export function openWorkFolder(roots, absolute) {
   }
 }
 
+/** The verdict on an opened descriptor: its real path must be exactly the path that was located and checked. A real
+ * path that lies elsewhere, even inside the root (another file, or the database beside `projects/`), means a link was
+ * swapped in between the check and the open. A file removed after the open is reported as missing. */
+export function openedPathVerdict({real, located, root}) {
+  if (typeof real !== 'string' || typeof located !== 'string') return 'link';
+  if (real === `${located} (deleted)`) return 'missing';
+  return real === located && located.startsWith(root.path + path.sep) ? 'ok' : 'link';
+}
+
 /** Checks the path and each component below the root with lstat. `last` tells what the final component may be. */
 function locate(root, rel, {want = 'any'} = {}) {
   if (!root || typeof root.path !== 'string') return {ok: false, reason: 'refused'};
@@ -192,13 +201,14 @@ export function list(root, rel) {
 /** Reads a file. Without `length`, the whole file must be at most `maxBytes`. With `length`, the window starting at
  * `offset` is returned (at most `maxBytes`), however large the file is. A file that vanishes, shrinks or grows during
  * a whole-file read gives `{ok: false, reason: 'changed'}`; a window read returns the bytes that were read. Never throws.
- * `afterOpen` is a test hook that runs between the open and the read. `buffer` lends a buffer for the bytes: the answer's
+ * `beforeOpen` and `afterOpen` are test hooks that run between the check and the open, and between the open and the read. `buffer` lends a buffer for the bytes: the answer's
  * `bytes` then lies in it and is valid only until the next read into it. */
-export function read(root, rel, {maxBytes = 10000000, offset = 0, length, afterOpen, buffer: reuse} = {}) {
+export function read(root, rel, {maxBytes = 10000000, offset = 0, length, beforeOpen, afterOpen, buffer: reuse} = {}) {
   const found = locate(root, rel, {want: 'file'});
   if (!found.ok) return found;
   let fd = null;
   try {
+    if (beforeOpen) beforeOpen();
     try {
       fd = openSync(found.absolute, openFlags());
     } catch (error) {
@@ -208,8 +218,8 @@ export function read(root, rel, {maxBytes = 10000000, offset = 0, length, afterO
     // Where the open flag cannot refuse every link, the descriptor's real path must still lie inside the root.
     if (process.platform === 'linux') {
       try {
-        const real = realpathSync(`/proc/self/fd/${fd}`);
-        if (real !== found.absolute && !real.startsWith(root.path + path.sep)) return {ok: false, reason: 'link'};
+        const verdict = openedPathVerdict({real: realpathSync(`/proc/self/fd/${fd}`), located: found.absolute, root});
+        if (verdict !== 'ok') return {ok: false, reason: verdict};
       } catch {
         return {ok: false, reason: 'refused'};
       }
