@@ -22,8 +22,27 @@ export const WORK_FOLDER_PATTERN = /^deep-proof-verification-[A-Za-z0-9]{6}$/;
 const MAX_REL = 4096;
 const MAX_LIST = 50000;
 
-/** True for a name the viewer never opens or lists: answer keys and evaluator material. */
-export const refusedName = name => /^keys/i.test(name) || /^evaluator$/i.test(name);
+/** A name as a file system that ignores case, normalization form or compatibility forms may see it: decomposed,
+ * without combining marks and invisible code points, lower-cased, composed again with compatibility forms folded
+ * (so the Kelvin sign and the long s become k and s, and full-width letters become plain ones). */
+export const foldName = name => String(name).normalize('NFKD').replace(/[\p{M}\p{Default_Ignorable_Code_Point}]/gu, '').toLowerCase().normalize('NFKC');
+
+/** True for a name the viewer never opens or lists: answer keys and evaluator material. The decision is made on the
+ * folded name and, independently, on the name itself with Unicode case folding. */
+export const refusedName = name => {
+  const folded = foldName(name);
+  return folded.startsWith('keys') || folded === 'evaluator' || /^keys/iu.test(name) || /^evaluator$/iu.test(name);
+};
+
+/** True when a path is spelled exactly as it is on disk: the native real path equals it byte for byte. A folded or
+ * differently normalized spelling, which a volume that ignores case or normalization would resolve, is not. */
+const spelledOnDisk = absolute => {
+  try {
+    return realpathSync.native(absolute) === absolute;
+  } catch {
+    return false;
+  }
+};
 
 /** Splits a relative path into segments, or returns null when the path is refused. */
 export function relativeSegments(rel) {
@@ -67,7 +86,8 @@ function realDirectory(folder, what) {
   if (typeof folder !== 'string' || !path.isAbsolute(folder)) throw new Error(`The ${what} folder must be an absolute path.`);
   let real;
   try {
-    real = realpathSync(folder);
+    // The native real path keeps the spelling on disk, so a folded spelling of a keys folder is seen as what it is.
+    real = realpathSync.native(folder);
     if (!lstatSync(real).isDirectory()) throw new Error('not a directory');
   } catch {
     throw new Error(`The ${what} folder cannot be opened as a folder.`);
@@ -99,7 +119,7 @@ export function openWorkFolder(roots, absolute) {
     const st = lstatSync(absolute);
     if (!st.isDirectory() || st.isSymbolicLink()) return null;
     if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return null;
-    if (realpathSync(absolute) !== absolute) return null;
+    if (!spelledOnDisk(absolute)) return null;
     return {kind: 'work', path: absolute};
   } catch {
     return null;
@@ -142,6 +162,8 @@ function locate(root, rel, {want = 'any'} = {}) {
     if (st.isSymbolicLink()) return {ok: false, reason: 'link'};
     if (i < segments.length - 1 && !st.isDirectory()) return {ok: false, reason: 'missing'};
   }
+  // Every component must be spelled as on disk: a folded or differently normalized spelling is never opened.
+  if (!spelledOnDisk(current)) return {ok: false, reason: 'refused'};
   if (want === 'file' && !st.isFile()) return {ok: false, reason: 'refused'};
   if (want === 'dir' && !st.isDirectory()) return {ok: false, reason: 'refused'};
   if (st.isFile() && st.nlink !== 1) return {ok: false, reason: 'refused'};
@@ -171,7 +193,7 @@ export function tryList(root, rel) {
   }
   // The folder may have been swapped for a link between the check and the listing.
   try {
-    if (realpathSync(found.absolute) !== found.absolute) return {ok: false, reason: 'link', entries: []};
+    if (!spelledOnDisk(found.absolute)) return {ok: false, reason: 'link', entries: []};
   } catch {
     return {ok: false, reason: 'missing', entries: []};
   }

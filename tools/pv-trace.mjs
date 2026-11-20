@@ -36,6 +36,23 @@ export const isId = value => typeof value === 'string' && value.length > 0 && va
 
 /** Hides absolute-looking paths in a short line that came from a host record. Agent text is not changed. */
 export const scrub = text => String(text ?? '').replace(/(?<![\w:/])(?:\/[\w.@%+~-]+){2,}/g, '<path>');
+/** Clips a one-line field of a card or a list item to LINE_LIMIT characters, never inside a surrogate pair. The full text
+ * stays in the document that opens. Strings under the keys in `keep` (identifiers) are left as they are. */
+export const LINE_LIMIT = 240;
+export function bound(value, keep = ['id', 'doc', 'key']) {
+  const walk = (v, key) => {
+    if (typeof v === 'string') {
+      if (keep.includes(key) || v.length <= LINE_LIMIT) return v;
+      let end = LINE_LIMIT - 1;
+      if (/[\ud800-\udbff]/.test(v[end - 1] ?? '')) end--;
+      return v.slice(0, end) + '…';
+    }
+    if (Array.isArray(v)) return v.map(x => walk(x, key));
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, k)]));
+    return v;
+  };
+  return walk(value, null);
+}
 export const firstLine = (text, limit = 200) => {
   const line = String(text ?? '').split(/\r?\n/).find(l => l.trim()) ?? '';
   const flat = line.trim().replace(/\s+/g, ' ');

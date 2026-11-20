@@ -285,6 +285,149 @@ test('a folder swapped for a link between the check and the open is refused', t 
   assert.ok(!JSON.stringify(answer).includes(SENTINEL));
 });
 
+const KELVIN = '\u212A';
+const LONG_S = '\u017F';
+const KEPT = 'projects/proj-alpha/traces/run-check-done/workspace';
+
+test('a folded spelling of keys, evaluator or any allowed name is never opened, whatever the volume folds', async t => {
+  const fx = fixture(t);
+  const keptFolder = path.join(fx.data, KEPT);
+  const folds = fs.existsSync(path.join(keptFolder, 'KEYS-x'));
+  t.diagnostic(`this volume ${folds ? 'ignores' : 'keeps'} case in file names`);
+  const kelvinFolds = fs.existsSync(path.join(keptFolder, `${KELVIN}eys-x`));
+  // Spellings of a keys folder at depth 1 and deeper: plain, upper case, Kelvin sign, long s, full width, accents.
+  const keys = ['keys', 'KEYS', 'Keys', `${KELVIN}eys`, `key${LONG_S}`, `${KELVIN}EY${LONG_S}`, '\uFF4B\uFF45\uFF59\uFF53', 'k\u00E9ys'];
+  const evaluator = ['evaluator', 'EVALUATOR', 'Evaluator', '\uFF45valuator', 'evalu\u0061tor\u200B'];
+  const cases = [];
+  for (const k of keys) cases.push(`${KEPT}/${k}-x/s.md`, `${KEPT}/notes/${k}-deep/s.md`);
+  for (const e of evaluator) cases.push(`${KEPT}/notes/${e}/e.md`);
+  for (const rel of cases) {
+    const a = gate.read(fx.roots.data, rel);
+    assert.equal(a.ok, false, `read ${JSON.stringify(rel)}`);
+    assert.ok(!a.bytes, rel);
+    assert.equal(gate.stat(fx.roots.data, rel).ok, false, `stat ${JSON.stringify(rel)}`);
+    assert.equal(gate.tryList(fx.roots.data, path.posix.dirname(rel)).ok, false, `list ${JSON.stringify(rel)}`);
+  }
+  // A name that is allowed but spelled with another case or another normalization form is refused as well: the viewer
+  // opens a name only when it is spelled as the file system holds it (decision: refused, not matched).
+  fs.writeFileSync(path.join(keptFolder, 'notes/caf\u00e9.md'), 'A file with a composed accent in its name.\n');
+  const allowed = `${KEPT}/notes/agent-notes.md`;
+  assert.equal(gate.read(fx.roots.data, allowed).ok, true);
+  assert.match(gate.read(fx.roots.data, allowed).bytes.toString(), /A file the agent wrote/);
+  assert.equal(gate.read(fx.roots.data, `${KEPT}/NOTES/agent-notes.md`).ok, false, 'another case');
+  assert.equal(gate.read(fx.roots.data, `${KEPT}/notes/Agent-Notes.md`).ok, false);
+  assert.equal(gate.read(fx.roots.data, `${KEPT}/notes/caf\u00e9.md`).ok, true, 'a composed name, spelled as on disk');
+  const decomposed = gate.read(fx.roots.data, `${KEPT}/notes/cafe\u0301.md`);
+  assert.equal(decomposed.ok, false, 'the decomposed spelling of the same name');
+  if (fs.existsSync(path.join(keptFolder, 'notes/cafe\u0301.md'))) assert.equal(decomposed.reason, 'refused', 'this volume resolves it, so the viewer refuses it');
+  assert.equal(gate.read(fx.roots.data, 'Projects/proj-alpha/project.md').ok, false, 'another case of projects/');
+  assert.equal(gate.read(fx.roots.data, 'projects/proj-alpha/project.md').ok, true);
+  if (kelvinFolds) assert.ok(fs.existsSync(path.join(keptFolder, `${KELVIN}eys-x/s.md`)), 'on this volume the file system itself resolves the Kelvin spelling');
+  // Through the server.
+  const v = await startServer(t, fx);
+  for (const k of keys) {
+    for (const name of [`kept:${k}-x/s.md`, `kept:notes/${k}-deep/s.md`]) {
+      const r = await request(v, `/api/runs/proj-alpha/run-check-done/document?name=${encodeURIComponent(name)}`);
+      assert.equal(r.status, 404, name);
+      assert.ok(!r.text.includes(SENTINEL), name);
+    }
+  }
+  for (const e of evaluator) assert.equal((await request(v, `/api/runs/proj-alpha/run-check-done/document?name=${encodeURIComponent(`kept:notes/${e}/e.md`)}`)).status, 404, e);
+  assert.equal((await request(v, `/api/runs/proj-alpha/run-check-done/document?name=${encodeURIComponent('kept:NOTES/agent-notes.md')}`)).status, 404);
+  assert.equal((await request(v, `/api/runs/proj-alpha/run-check-done/document?name=${encodeURIComponent('kept:notes/agent-notes.md')}`)).status, 200);
+  const all = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  for (const [route, value] of all) assert.ok(!value.includes(SENTINEL), route);
+  const page = JSON.parse((await request(v, '/api/runs/proj-alpha/run-check-done')).text);
+  assert.ok(!page.results.some(r => /keys|evaluator/i.test(r.title)), 'the kept listing leaves answer-key names out');
+});
+
+/** The viewer must refuse these settings. A viewer that starts anyway is closed before the test fails. */
+async function refusesToStart(settings, expected, label) {
+  let started = null;
+  try {
+    started = await startViewer({settings});
+  } catch (error) {
+    assert.match(error.message, expected, label);
+    return;
+  }
+  await started.close();
+  assert.fail(`${label}: the viewer started`);
+}
+
+test('a dossier setting that a volume resolves to a keys or evaluator folder stops the server', async t => {
+  const fx = fixture(t);
+  const stage = path.join(fx.bench, 'stage-a');
+  const spellings = [`${KELVIN}eys-draft`, `key${LONG_S}-draft`, 'KEYS-DRAFT', 'Keys-sealed'];
+  for (const name of spellings) {
+    const folder = path.join(stage, name);
+    const exists = fs.existsSync(folder);
+    const expected = exists ? /answer keys or evaluator/ : /cannot be opened as a folder|answer keys or evaluator/;
+    await refusesToStart(settingsOf(fx, {dossiers: [folder]}), expected, name);
+    // Also as one of the six, and as an ancestor of a dossier.
+    await refusesToStart(settingsOf(fx, {dossiers: [fx.dossiers[0], folder]}), expected, name);
+  }
+  fs.mkdirSync(path.join(fx.base, 'Evaluator-data'), {recursive: true});
+  fs.mkdirSync(path.join(fx.base, 'evaluator', 'inner'), {recursive: true});
+  for (const folder of [path.join(fx.base, 'EVALUATOR', 'inner'), path.join(fx.base, '\uFF45valuator')]) {
+    await refusesToStart(settingsOf(fx, {dossiers: [folder]}), /answer keys or evaluator|cannot be opened as a folder/, folder);
+  }
+  // The same check holds for the data root: a folded spelling of an allowed folder is not accepted as a root either.
+  const folded = path.join(path.dirname(fx.data), 'DATA');
+  if (fs.existsSync(folded)) {
+    const started = await startViewer({settings: settingsOf(fx, {deepProofData: folded})});
+    try {
+      assert.equal(started.roots.data.path, fx.data, 'the root is kept as the file system spells it');
+    } finally {
+      await started.close();
+    }
+  }
+  // A plain dossier still starts, and the answers hold no sentinel.
+  const v = await startServer(t, fx);
+  for (const [route, value] of await crawl(`http://127.0.0.1:${v.port}`, v.key)) assert.ok(!value.includes(SENTINEL), route);
+});
+
+test('one-line fields of the run list and of the run page are clipped, and the full text still opens', async t => {
+  const fx = fixture(t);
+  const huge = 'H'.repeat(5 * 1024 * 1024);
+  // A hostile register: a finding with a 5 MB title, and more findings than a page lists.
+  const file = path.join(fx.data, 'projects/proj-alpha/analyses/run-check-done/quality/findings.jsonl');
+  const rows = fs.readFileSync(file, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  rows[0].title = huge;
+  rows[0].verdict = 'v'.repeat(100000);
+  rows[0].severity = 's'.repeat(100000);
+  for (let i = 0; i < 1100; i++) rows.push({id: `F-X${i}`, title: `Extra finding ${i}`, verdict: 'rejected'});
+  fs.writeFileSync(file, rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+  // A hostile trace: huge title, agent, model, skill name and document title in run-start.
+  const dir = path.join(fx.data, 'projects/proj-alpha/traces/run-hostile');
+  fs.mkdirSync(dir, {recursive: true});
+  const start = runStartFields({runId: 'run-hostile', kind: 'quality', createdAt: new Date().toISOString(), documents: [{id: 'doc-h', title: huge, fileType: 'md', originalName: huge, bytes: 3, sha256: 'a'.repeat(64)}],
+    overrides: {title: huge, agent: huge, model: huge, projectName: huge, skill: {id: 's', name: huge, revision: huge, verification: huge}}});
+  fs.writeFileSync(path.join(dir, 'trace.jsonl'), JSON.stringify({seq: 1, at: new Date().toISOString(), type: 'run-start', ...start}) + '\n');
+  const v = await startServer(t, fx);
+  const strings = value => (typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(strings) : value && typeof value === 'object' ? Object.values(value).flatMap(strings) : []);
+  const list = await request(v, '/api/runs');
+  assert.ok(list.bytes.length < 200000, `the run list answered ${list.bytes.length} bytes`);
+  for (const item of JSON.parse(list.text)) for (const s of strings(item)) assert.ok(s.length <= 400, `${item.key}: ${s.length} characters`);
+  for (const rid of ['run-check-done', 'run-hostile']) {
+    const page = await request(v, `/api/runs/proj-alpha/${rid}`);
+    assert.ok(page.bytes.length < 400000, `${rid} answered ${page.bytes.length} bytes`);
+    const parsed = JSON.parse(page.text);
+    for (const [key, value] of Object.entries(parsed)) for (const s of strings(value)) assert.ok(s.length <= 400, `${rid} ${key}: ${s.length} characters`);
+  }
+  const page = JSON.parse((await request(v, '/api/runs/proj-alpha/run-check-done')).text);
+  const cards = page.results.filter(r => r.kind === 'finding');
+  assert.equal(cards.length, 1000, 'findings with a card are capped');
+  assert.match(cards[0].title, /^H+…$/);
+  assert.ok(cards[0].title.length <= 240);
+  assert.ok(page.notices.some(n => n.kind === 'findings-capped' && /1000 of 1102/.test(n.text)));
+  assert.equal(cards[0].id, 'finding:F-001', 'identifiers are never clipped');
+  assert.equal(JSON.parse(list.text).find(r => r.key === 'proj-alpha/run-hostile').key, 'proj-alpha/run-hostile');
+  // The full text is still in the document that opens (its first part).
+  const doc = JSON.parse((await request(v, `/api/runs/proj-alpha/run-check-done/document?name=${encodeURIComponent('finding:F-001')}`)).text);
+  assert.ok(doc.text.startsWith('## F-001: HHHH'));
+  assert.ok(doc.parts >= 1 && doc.text.length <= 262144);
+});
+
 // ---------- Readers: trace, runs, documents ----------
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));

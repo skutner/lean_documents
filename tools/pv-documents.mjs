@@ -4,11 +4,12 @@
  * Every file is reached through the read gate, and a file path is never taken from a request except for a file of the
  * kept copy of a work folder, which the gate checks like every other path. */
 import * as defaultGate from './pv-read.mjs';
-import {ViewerError, isId, partOf, readable, table, cell, firstLine, scrub, formatBytes, formatDuration, TIMELINE_CAP} from './pv-trace.mjs';
+import {ViewerError, isId, partOf, readable, bound, table, cell, firstLine, scrub, formatBytes, formatDuration, TIMELINE_CAP} from './pv-trace.mjs';
 
 const TEXT_LIMIT = 10 * 1024 * 1024;
 const TRANSCRIPT_LIMIT = 8 * 1024 * 1024;
 const KEPT_FILES = 2000;
+const MAX_FINDING_CARDS = 1000;
 const KEPT_DEPTH = 8;
 export const REGISTERS = ['mandate', 'claims', 'criteria', 'evidence', 'checks', 'omissions', 'findings', 'review-coverage', 'external-sources', 'coverage'];
 const REGISTER_TITLES = {
@@ -517,15 +518,17 @@ export function createDocuments({roots, traces, runs, dossiers = null, gate = de
       if (name === 'findings') findingsRegister = reg;
       results.push({id: `register:${name}`, kind: 'register', title: REGISTER_TITLES[name], count: JSON_FILES.has(name) ? null : reg.rows.length, doc: `register:${name}`, draft: reg.origin !== 'run'});
     }
-    for (const f of findingsRegister?.rows ?? []) {
+    for (const f of (findingsRegister?.rows ?? []).slice(0, MAX_FINDING_CARDS)) {
       if (typeof f.id !== 'string' || !isId(f.id)) continue;
       results.push({id: `finding:${f.id}`, kind: 'finding', title: text(f.title), doc: `finding:${f.id}`, verdict: f.verdict ?? null, verdictLabel: VERDICTS[f.verdict] || label(f.verdict),
         chips: [{label: 'Verdict', value: VERDICTS[f.verdict] || label(f.verdict)}, {label: 'Severity', value: label(f.severity)}, {label: 'Urgency', value: label(f.urgency)}, {label: 'Confidence', value: label(f.confidence)}]});
     }
+    if ((findingsRegister?.rows.length ?? 0) > MAX_FINDING_CARDS) notices.push({kind: 'findings-capped', text: `Only the first ${MAX_FINDING_CARDS} of ${findingsRegister.rows.length} findings have a card here. The Findings register lists them all.`});
     for (const f of keptFiles(run)) {
       results.push({id: `kept:${f.name}`, kind: 'kept-file', title: f.name, bytes: f.size, doc: isDataFile(f.name) ? null : `kept:${f.name}`, note: isDataFile(f.name) ? DATA_FILE : null});
     }
-    return {header, inputs, results, notices, missing: missingList(run)};
+    // One-line fields are clipped: the full text opens in the document of the card.
+    return bound({header, inputs, results, notices, missing: missingList(run)});
   }
 
   return {runPage, timeline, entryBody, document};

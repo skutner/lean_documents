@@ -229,6 +229,10 @@ export function buildFixture(base, {now = Date.now(), deadPid = 2147483000, live
     put(data, `${kept}/progress.md`, 'Kept progress note.\n');
     put(data, `${kept}/validation-result.json`, JSON.stringify({valid: true, attempt: 1}));
     put(data, `${kept}/notes/agent-notes.md`, '# Agent notes\n\nA file the agent wrote.\n');
+    // Answer-key and evaluator names inside the kept copy, which the viewer must never open or list.
+    put(data, `${kept}/keys-x/s.md`, SENTINEL);
+    put(data, `${kept}/notes/keys-deep/s.md`, SENTINEL);
+    put(data, `${kept}/notes/evaluator/e.md`, SENTINEL);
     put(data, `${kept}/data/raw.json`, JSON.stringify({sentinel: 'raw json must not be shown'}));
     writeQuality(data, kept, {partial: true});
   }

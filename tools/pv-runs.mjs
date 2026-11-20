@@ -5,7 +5,7 @@
  * one gets a status worked out from its files, always marked as inferred. */
 import crypto from 'node:crypto';
 import * as defaultGate from './pv-read.mjs';
-import {isId} from './pv-trace.mjs';
+import {isId, bound} from './pv-trace.mjs';
 
 export const STATUS_LABELS = {
   running: 'Running', completed: 'Completed', 'time-limit': 'Time Limit Reached', failed: 'Failed',
@@ -291,7 +291,7 @@ export function createRunIndex({roots, traces, gate = defaultGate, now = Date.no
     return null;
   }
 
-  const publicItem = run => ({
+  const publicItem = run => bound({
     key: run.key, projectName: run.projectName, kind: run.kind, kindLabel: run.kindLabel, title: run.title, status: run.status, statusLabel: run.statusLabel,
     statusDetail: run.statusDetail, statusSource: run.statusSource, startedAt: run.startedAt, endedAt: run.endedAt, lastActivityAt: run.lastActivityAt,
     agent: run.agent, model: run.model, attempt: run.attempt, maxAttempts: run.maxAttempts, traced: run.traced,
