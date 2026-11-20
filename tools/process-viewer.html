@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deep Proof Process Viewer</title>
+<style>
+body{font:14px/1.5 system-ui;margin:0;padding:24px;color:#26354b;background:#f4f6f9}
+main{max-width:46rem}
+code{background:#e6ebf2;padding:1px 4px;border-radius:3px}
+</style>
+</head>
+<body>
+<main>
+<h1>Deep Proof Process Viewer</h1>
+<p id="note">This is a placeholder page. The viewer's server is running; the page that shows runs, steps and results replaces this file.</p>
+<p id="key-state"></p>
+</main>
+<script>
+// Placeholder: takes the access key from the address into sessionStorage and clears it from the address. No data.
+(function () {
+  var match = /[#&]key=([0-9a-f]+)/.exec(location.hash);
+  if (match) {
+    try { sessionStorage.setItem('viewer-key', match[1]); } catch (e) { /* storage may be blocked */ }
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+  var stored = null;
+  try { stored = sessionStorage.getItem('viewer-key'); } catch (e) { stored = null; }
+  document.getElementById('key-state').textContent = stored ? 'An access key is held for this tab.' : 'No access key: open the address the viewer printed in its terminal.';
+})();
+</script>
+</body>
+</html>

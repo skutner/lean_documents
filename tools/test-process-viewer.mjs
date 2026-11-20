@@ -8,12 +8,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {spawnSync} from 'node:child_process';
+import http from 'node:http';
+import net from 'node:net';
+import crypto from 'node:crypto';
+import {spawn, spawnSync, execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import * as gate from './pv-read.mjs';
 import {createTraceIndex, ViewerError, partOf} from './pv-trace.mjs';
 import {createRunIndex, processAlive} from './pv-runs.mjs';
 import {createDocuments} from './pv-documents.mjs';
-import {buildFixture, removeFixture, makeReadOnly, makeRemovable, SENTINEL, WORK_PREFIX} from './process-viewer-fixture.mjs';
+import {createDossiers} from './pv-dossiers.mjs';
+import {startViewer, loadSettings, pagePolicy} from './process-viewer.mjs';
+import {treeManifest, crawl, diff} from './check-viewer-readonly.mjs';
+import {buildFixture, removeFixture, makeReadOnly, makeRemovable, runStartFields, bookTexts, sha256, SENTINEL, WORK_PREFIX} from './process-viewer-fixture.mjs';
 
 const tools = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(tools, '..');
@@ -33,12 +40,13 @@ function fixture(t, options) {
 }
 
 // The server modules, in the order they are built. Each must exist: a missing module fails the static test.
-const SERVER_MODULES = ['pv-read.mjs', 'pv-trace.mjs', 'pv-runs.mjs', 'pv-documents.mjs'];
+// Every server module must exist: a missing one fails this test.
+const SERVER_MODULES = ['pv-read.mjs', 'pv-trace.mjs', 'pv-runs.mjs', 'pv-documents.mjs', 'pv-dossiers.mjs', 'process-viewer.mjs'];
 const FS_FUNCTIONS = ['openSync', 'readSync', 'fstatSync', 'lstatSync', 'readdirSync', 'closeSync', 'realpathSync', 'readFileSync', 'constants'];
 const FORBIDDEN_MODULES = ['node:child_process', 'child_process', 'node:sqlite', 'node:net', 'node:https', 'node:worker_threads', 'node:fs/promises', 'fs/promises', 'node:cluster', 'node:dgram', 'node:tls'];
 
 test('the server modules import only the allowed file functions and no process, database or network module', () => {
-  assert.ok(SERVER_MODULES.includes('pv-read.mjs'), 'the gate is always checked');
+  assert.equal(SERVER_MODULES.length, 6, 'the gate, the readers and the server are all checked');
   const kills = [];
   for (const name of SERVER_MODULES) {
     const file = path.join(tools, name);
@@ -64,9 +72,7 @@ test('the server modules import only the allowed file functions and no process, 
     for (const k of source.matchAll(/process\.kill\(([^)]*)\)/g)) kills.push({name, args: k[1].replace(/\s+/g, '')});
   }
   // The pid of a trace can be written by an agent: the only kill call passes the literal 0 (liveness, no signal).
-  if (SERVER_MODULES.includes('pv-runs.mjs')) {
-    assert.deepEqual(kills, [{name: 'pv-runs.mjs', args: 'pid,0'}]);
-  } else assert.deepEqual(kills, []);
+  assert.deepEqual(kills, [{name: 'pv-runs.mjs', args: 'pid,0'}]);
 });
 
 test('the read gate refuses absolute paths, parent segments, NUL, backslashes, answer keys and evaluator material', t => {
@@ -83,7 +89,7 @@ test('the read gate refuses absolute paths, parent segments, NUL, backslashes, a
   }
 });
 
-test('analyst.sqlite and everything outside projects/ is never opened by the gate', t => {
+test('analyst.sqlite and everything outside projects/ is never opened', async t => {
   const fx = fixture(t);
   for (const rel of ['analyst.sqlite', 'analyst.sqlite-wal', 'analyst.sqlite-shm', 'jobs/stale/note.txt', 'project.md']) {
     const answer = gate.read(fx.roots.data, rel);
@@ -95,6 +101,22 @@ test('analyst.sqlite and everything outside projects/ is never opened by the gat
   assert.deepEqual(gate.list(fx.roots.data, '.'), []);
   const top = gate.tryList(fx.roots.data, 'projects');
   assert.ok(top.ok && top.entries.some(e => e.name === 'proj-alpha'));
+  // Through the server: no answer holds the sentinel of the database files (mode 000), of jobs/ or of anything outside
+  // projects/, and a request that names them is a plain 404.
+  const v = await startServer(t, fx);
+  const answers = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  assert.ok(answers.size > 100, `the crawl reached ${answers.size} routes`);
+  for (const [route, value] of answers) assert.ok(!value.includes(SENTINEL), route);
+  for (const name of ['../analyst.sqlite', 'analyst.sqlite', '../../analyst.sqlite', 'kept:../../../analyst.sqlite', 'kept:../../../../jobs/stale/note.txt', 'source:../../../analyst.sqlite', 'report:analyst.sqlite']) {
+    const r = await request(v, `/api/runs/proj-alpha/run-check-done/document?name=${encodeURIComponent(name)}`);
+    assert.equal(r.status, 404, name);
+    assert.ok(!r.text.includes(SENTINEL));
+  }
+  for (const route of ['/api/runs/jobs/stale', '/api/runs/..%2Fanalyst.sqlite/x', '/analyst.sqlite', '/api/analyst.sqlite']) {
+    const r = await request(v, route);
+    assert.ok([400, 404].includes(r.status), `${route} gave ${r.status}`);
+    assert.ok(!r.text.includes(SENTINEL));
+  }
 });
 
 test('a link inside the data folder is not followed, as a file and as a folder', t => {
@@ -580,4 +602,426 @@ test('the golden trace sample gives the expected timeline', {skip: fs.existsSync
   assert.deepEqual([run.kind, run.traced, run.status, run.statusDetail, run.statusSource], ['quality', true, 'time-limit', 'Validated wrap-up report', 'trace']);
   assert.equal(records[0].type, 'run-start');
   assert.equal(traces.summary('project-sample', 'run-sample').runStart.runId, 'run-sample');
+});
+
+// ---------- The server ----------
+
+function settingsOf(fx, extra = {}) {
+  return {deepProofData: fx.data, deepProofTmp: fx.tmp, dossiers: fx.dossiers, port: 0, ...extra};
+}
+
+/** Starts the viewer in this process on a free port (port 0) and closes it when the test ends. */
+async function startServer(t, fx, {settings = settingsOf(fx), ...options} = {}) {
+  const v = await startViewer({settings, ...options});
+  t.after(() => v.close());
+  return v;
+}
+
+/** One request with full control of method, host and headers. Resolves with status, headers, bytes and text. */
+function request(v, route, {method = 'GET', headers = {}, host, body, key = v.key} = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({host: '127.0.0.1', port: v.port, path: route, method, headers: {host: host ?? `127.0.0.1:${v.port}`, ...(key === null ? {} : {'x-viewer-key': key}), ...headers}}, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const bytes = Buffer.concat(chunks);
+        resolve({status: res.statusCode, headers: res.headers, bytes, text: bytes.toString('utf8')});
+      });
+    });
+    req.on('error', reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+const ROUTES = [
+  '/api/status', '/api/runs', '/api/runs/proj-alpha/run-analysis-done', '/api/runs/proj-alpha/run-analysis-done/timeline?after=0', '/api/runs/proj-alpha/run-analysis-done/timeline/1',
+  '/api/runs/proj-alpha/run-analysis-done/document?name=report', '/api/dossiers', '/api/dossiers/1/document?name=source%3Aprocedure.md', '/api/dossiers/1/download?name=source%3Aprocedure.md'
+];
+const SECURITY = {'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer'};
+
+test('every route needs the key; a wrong key and a missing key answer 401', async t => {
+  const fx = fixture(t);
+  const v = await startServer(t, fx);
+  const message = 'Open the address the viewer printed in its terminal.';
+  for (const route of [...ROUTES, '/api/nothing-here']) {
+    const ok = await request(v, route);
+    for (const [name, value] of Object.entries(SECURITY)) assert.equal(ok.headers[name], value, `${route} ${name}`);
+    for (const key of [null, 'wrong', v.key.slice(0, -1), v.key + '0', v.key.toUpperCase().replace(/[a-f]/gi, 'F'), '']) {
+      const r = await request(v, route, {key});
+      assert.equal(r.status, 401, `${route} with key ${JSON.stringify(key)}`);
+      assert.deepEqual(JSON.parse(r.text), {error: message});
+      for (const [name, value] of Object.entries(SECURITY)) assert.equal(r.headers[name], value);
+    }
+    // A key in the address instead of the header does not count.
+    const query = await request(v, route + (route.includes('?') ? '&' : '?') + `key=${v.key}`, {key: null});
+    assert.equal(query.status, 401, `${route} with the key in the query`);
+    const hash = await request(v, route, {key: null, headers: {'x-api-key': v.key, authorization: `Bearer ${v.key}`, cookie: `key=${v.key}`}});
+    assert.equal(hash.status, 401);
+  }
+  assert.equal((await request(v, '/api/status')).status, 200);
+  assert.equal((await request(v, '/api/nothing-here')).status, 404);
+  assert.equal(v.key.length, 32);
+  assert.match(v.key, /^[0-9a-f]{32}$/);
+  assert.equal(v.url, `http://127.0.0.1:${v.port}/#key=${v.key}`);
+  // The page is served without the key, holds no data and carries the exact policy of its one script.
+  const page = await request(v, '/', {key: null});
+  assert.equal(page.status, 200);
+  assert.match(page.headers['content-type'], /^text\/html/);
+  assert.equal(page.text.split('<script').length, 2, 'exactly one script element');
+  const script = Buffer.from(page.text).subarray(Buffer.from(page.text).indexOf('<script>') + 8, Buffer.from(page.text).indexOf('</script>'));
+  assert.equal(page.headers['content-security-policy'], `default-src 'none'; script-src 'sha256-${crypto.createHash('sha256').update(script).digest('base64')}'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`);
+  assert.doesNotMatch(page.headers['content-security-policy'], /unsafe-eval|unsafe-hashes/);
+  for (const [name, value] of Object.entries(SECURITY)) assert.equal(page.headers[name], value);
+  assert.ok(!page.text.includes('Alpha Project') && !page.text.includes(fx.base) && !page.text.includes(v.key));
+  assert.equal(pagePolicy(Buffer.from('<p>no script</p>')).includes("script-src 'none'"), true);
+  assert.equal(pagePolicy(Buffer.from('<script>a</script><script>b</script>')).includes("script-src 'none'"), true);
+  assert.equal((await request(v, '/favicon.ico', {key: null})).status, 404);
+  const hosts = await request(v, '/', {key: null});
+  assert.equal(hosts.status, 200);
+});
+
+test('only GET is served and only for the host 127.0.0.1', async t => {
+  const fx = fixture(t);
+  const v = await startServer(t, fx);
+  for (const method of ['POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD']) {
+    for (const route of ['/api/runs', '/', '/api/dossiers/1/download?name=x']) {
+      const r = await request(v, route, {method});
+      assert.equal(r.status, 405, `${method} ${route}`);
+      assert.equal(r.headers.allow, 'GET');
+      if (method !== 'HEAD') assert.deepEqual(JSON.parse(r.text), {error: 'Only GET is served.'});
+    }
+  }
+  // A body that is announced is not read: the answer comes and the connection is cut, or it is reset.
+  for (const method of ['POST', 'PUT']) {
+    let status = null;
+    try {
+      status = (await request(v, '/api/runs', {method, body: 'x'.repeat(10000), headers: {'content-type': 'application/json'}})).status;
+    } catch (error) {
+      assert.match(error.code, /ECONNRESET|EPIPE/);
+    }
+    assert.ok(status === null || status === 405);
+  }
+  assert.equal((await request(v, '/api/status', {headers: {'content-length': '3'}, body: 'abc'}).catch(() => ({status: 400}))).status, 400);
+  // The host must be exactly 127.0.0.1 and the port of this server.
+  for (const host of ['localhost:' + v.port, `127.0.0.1:${v.port + 1}`, '127.0.0.1', 'evil.example', `evil.example:${v.port}`, `127.0.0.1.evil.example:${v.port}`, `[::1]:${v.port}`]) {
+    for (const route of ['/', '/api/status', '/api/runs']) {
+      const r = await request(v, route, {host});
+      assert.equal(r.status, 400, `host ${JSON.stringify(host)} ${route}`);
+      assert.ok(!r.text.includes(SENTINEL) && !r.text.includes('proj-alpha'));
+    }
+  }
+  assert.equal((await request(v, '/api/runs', {method: 'POST', host: 'evil.example'}).catch(() => ({status: 400}))).status, 400);
+  // An empty Host and a request with no Host at all (a raw socket, since the client library adds its own) are refused.
+  const raw = text => new Promise((resolve, reject) => {
+    const socket = net.connect(v.port, '127.0.0.1', () => socket.write(text));
+    let out = '';
+    socket.on('data', c => { out += c; });
+    socket.on('close', () => resolve(out));
+    socket.on('error', reject);
+  });
+  assert.match(await raw('GET /api/status HTTP/1.1\r\nHost:\r\nConnection: close\r\n\r\n'), /^HTTP\/1\.1 400 /);
+  assert.match(await raw('GET /api/status HTTP/1.0\r\n\r\n'), /^HTTP\/1\.[01] 400 /);
+  // An address that tries to name another authority is refused.
+  assert.equal((await request(v, '//evil.example/api/status')).status, 400);
+  const bad = await request(v, '/api/runs/proj-alpha/run-analysis-done/timeline?after=abc');
+  assert.deepEqual([bad.status, JSON.parse(bad.text).error], [400, 'after must be a whole number.']);
+  assert.equal((await request(v, '/api/runs/proj-alpha/run-analysis-done/timeline/abc')).status, 404);
+  // The server listens on 127.0.0.1 only.
+  assert.equal(v.server.address().address, '127.0.0.1');
+  assert.ok(v.port > 0 && v.port !== 8787 && v.port !== 8790);
+});
+
+test('the data folder is byte for byte and time for time the same after every route was read', async t => {
+  const fx = fixture(t);
+  const v = await startServer(t, fx);
+  // Manifest of every path, type, size, mode, inode, link count, modification time in nanoseconds and SHA-256.
+  const before = {data: treeManifest(fx.data), bench: treeManifest(fx.bench), tmp: treeManifest(fx.tmp)};
+  assert.ok(before.data.length > 150 && before.bench.length > 20);
+  const first = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  const second = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  const after = {data: treeManifest(fx.data), bench: treeManifest(fx.bench), tmp: treeManifest(fx.tmp)};
+  for (const name of ['data', 'bench', 'tmp']) assert.deepEqual(diff(before[name], after[name]), {removed: [], added: []}, name);
+  assert.deepEqual(after, before);
+  // Reading twice gives the same answers.
+  assert.equal(first.size, second.size);
+  for (const [route, value] of first) assert.equal(second.get(route), value, route);
+  // The crawl was not vacuous: it opened steps, documents, registers, kept files and dossiers.
+  const routes = [...first.keys()];
+  for (const pattern of [/\/timeline\/\d+/, /name=register%3Afindings/, /name=finding%3AF-001/, /name=kept%3Anotes/, /name=source%3A/, /\/api\/dossiers\/6\/download/, /name=transcript/, /name=progress/]) {
+    assert.ok(routes.some(r => pattern.test(r)), String(pattern));
+  }
+  assert.ok([...first.values()].every(a => a.startsWith('200:')), 'every route the pages offer answers 200');
+  // Also with the manifest mechanism itself checked: a change is seen.
+  fs.utimesSync(path.join(fx.data, 'projects/proj-alpha/project.md'), new Date(1e12), new Date(1e12));
+  assert.notDeepEqual(treeManifest(fx.data), before.data);
+});
+
+test('every route answers the same when the data folder and the dossiers are read-only for their owner', async t => {
+  const fx = fixture(t);
+  const normal = await startServer(t, fx);
+  const answers = await crawl(`http://127.0.0.1:${normal.port}`, normal.key);
+  await normal.close();
+  makeReadOnly(fx.data);
+  makeReadOnly(fx.bench);
+  t.after(() => { makeRemovable(fx.data); makeRemovable(fx.bench); });
+  assert.throws(() => fs.writeFileSync(path.join(fx.data, 'projects/proj-alpha/probe.txt'), 'x'), /EACCES|EPERM/, 'the data folder is read-only for its owner');
+  const locked = await startServer(t, fx);
+  const again = await crawl(`http://127.0.0.1:${locked.port}`, locked.key);
+  assert.equal(again.size, answers.size);
+  for (const [route, value] of answers) assert.equal(again.get(route), value, route);
+  assert.ok(answers.size > 100);
+});
+
+test('a link inside the data folder is not followed by any route', async t => {
+  const fx = fixture(t);
+  const outside = fs.mkdtempSync(path.join(realTmp, 'pv-outside-'));
+  t.after(() => fs.rmSync(outside, {recursive: true, force: true}));
+  fs.writeFileSync(path.join(outside, 'trace.jsonl'), SENTINEL + '\n');
+  const analyses = path.join(fx.data, 'projects/proj-alpha/analyses/run-analysis-done');
+  fs.rmSync(path.join(analyses, 'report.md'));
+  fs.symlinkSync('/etc/hosts', path.join(analyses, 'report.md'));
+  fs.rmSync(path.join(analyses, 'sources'), {recursive: true});
+  fs.symlinkSync(outside, path.join(analyses, 'sources'));
+  const traces = path.join(fx.data, 'projects/proj-alpha/traces');
+  fs.renameSync(traces, traces + '-moved');
+  fs.symlinkSync(outside, traces);
+  const v = await startServer(t, fx);
+  const answers = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  for (const [route, value] of answers) {
+    assert.ok(!value.includes(SENTINEL), route);
+    assert.ok(!/localhost|127\.0\.0\.1\s+localhost/.test(value) || route.includes('/api/status'), route);
+  }
+  const runs = JSON.parse((await request(v, '/api/runs')).text);
+  assert.ok(runs.every(r => r.traced === false), 'with `traces` replaced by a link, no run has a trace');
+  assert.equal((await request(v, '/api/runs/proj-alpha/run-analysis-done/document?name=report')).status, 404);
+  assert.equal((await request(v, '/api/runs/proj-alpha/run-analysis-done/document?name=source%3Adoc-a')).status, 404);
+  assert.equal((await request(v, '/api/runs/proj-alpha/run-check-done/document?name=kept%3Anotes%2Fagent-notes.md')).status, 404, 'the kept copy lay below the linked folder');
+});
+
+test('the six dossiers are listed; the keys folders beside fixtures are never opened', async t => {
+  const fx = fixture(t);
+  const v = await startServer(t, fx);
+  const list = JSON.parse((await request(v, '/api/dossiers')).text);
+  assert.deepEqual(list.map(d => [d.n, d.id]), [1, 2, 3, 4, 5, 6].map(n => [n, `book-00${n}`]));
+  for (const d of list) {
+    assert.deepEqual(d.sources.map(s => s.name), ['minute-book-1.md', 'minute-book-2.md', 'minute-book-3.md', 'minute-book-4.md', 'procedure.md']);
+    assert.equal(d.reports.length, 2);
+    assert.deepEqual(d.reports.map(r => r.sha12), d.reports.map(r => r.sha12).sort(), 'reports are in the order of their digest, not of their names');
+    for (const r of d.reports) assert.equal(r.neutralName, `report-${r.sha12}.md`);
+  }
+  // The answer holds no report file name, no label of a report and no key.
+  const text = (await request(v, '/api/dossiers')).text;
+  assert.doesNotMatch(text, /correct|mixed/i);
+  assert.ok(!text.includes(SENTINEL) && !text.includes('keys-'));
+  // The keys folders (mode 000, sentinel) are outside every root: nothing a request names reaches them.
+  for (const name of ['source:../keys-sealed/book-001.json', 'source:../../keys-draft/book-001.json', 'source:keys-sealed', 'report:../keys-sealed', 'report:000000000000', 'source:report-correct.md', 'source:']) {
+    for (const kind of ['document', 'download']) {
+      const r = await request(v, `/api/dossiers/1/${kind}?name=${encodeURIComponent(name)}`);
+      assert.equal(r.status, 404, `${kind} ${name}`);
+      assert.ok(!r.text.includes(SENTINEL));
+    }
+  }
+  for (const route of ['/api/dossiers/7/document?name=source%3Aprocedure.md', '/api/dossiers/0/download?name=x', '/api/dossiers/-1/download', '/api/dossiers/x', '/api/dossiers/1/other']) assert.equal((await request(v, route)).status, 404, route);
+  assert.equal((await request(v, '/api/dossiers/1/document')).status, 404);
+  assert.equal((await request(v, '/api/dossiers/1/document?name=source%3Aprocedure.md&part=9')).status, 404);
+  const all = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  for (const [route, value] of all) assert.ok(!value.includes(SENTINEL), route);
+  // A dossier path with a keys segment stops the server, also through a link whose real path has one.
+  for (const folder of fx.keysFolders) {
+    await assert.rejects(startViewer({settings: settingsOf(fx, {dossiers: [folder]})}), /answer keys or evaluator/);
+  }
+  const link = path.join(fx.base, 'innocent-name');
+  fs.symlinkSync(fx.keysFolders[0], link);
+  await assert.rejects(startViewer({settings: settingsOf(fx, {dossiers: [fx.dossiers[0], link]})}), /answer keys or evaluator/);
+  const evaluator = path.join(fx.base, 'evaluator', 'book');
+  fs.mkdirSync(evaluator, {recursive: true});
+  await assert.rejects(startViewer({settings: settingsOf(fx, {dossiers: [evaluator]})}), /answer keys or evaluator/);
+  const child = spawnSync(process.execPath, [path.join(tools, 'process-viewer.mjs')], {env: {PATH: process.env.PATH, VIEWER_DEEP_PROOF_DATA: fx.data, VIEWER_DEEP_PROOF_TMP: fx.tmp, VIEWER_DOSSIERS: [fx.dossiers[0], fx.keysFolders[1]].join(path.delimiter), VIEWER_PORT: '0'}, encoding: 'utf8', timeout: 20000});
+  assert.equal(child.status, 1);
+  assert.match(child.stderr, /answer keys or evaluator/);
+  assert.doesNotMatch(child.stdout, /Process viewer:/);
+});
+
+test('a run is linked to a dossier by file hashes; pasted text matches after trimming', async t => {
+  const fx = fixture(t);
+  const v = await startServer(t, fx);
+  const runs = JSON.parse((await request(v, '/api/runs')).text);
+  const dossierOf = id => runs.find(r => r.key === `proj-alpha/${fx.ids[id]}`).dossier;
+  assert.deepEqual(dossierOf('analysisDone'), {id: 'book-001', match: 'full', trimmed: false}, 'hashes taken from the trace');
+  assert.deepEqual(dossierOf('untracedDone'), {id: 'book-002', match: 'full', trimmed: false}, 'hashes taken from the files, byte for byte');
+  assert.deepEqual(dossierOf('untracedPasted'), {id: 'book-003', match: 'full', trimmed: true}, 'pasted text is trimmed, so it matches after trimming');
+  assert.deepEqual(dossierOf('checkDone'), {id: 'book-001', match: 'full', trimmed: false});
+  assert.deepEqual(dossierOf('imported'), {id: 'book-001', match: 'report', trimmed: false});
+  assert.equal(dossierOf('untracedNotes'), null);
+  assert.equal(dossierOf('failed'), null);
+  // The dossier lists its runs; the check's report matches one report by digest, never by name.
+  const list = JSON.parse((await request(v, '/api/dossiers')).text);
+  const book1 = list[0];
+  const mixed = sha256(bookTexts(1).reports['report-mixed.md']).slice(0, 12);
+  const correct = sha256(bookTexts(1).reports['report-correct.md']).slice(0, 12);
+  // The procedure file is the same in every book, so a run that holds another book's files also matches this dossier in part.
+  const matchOf = (d, id) => d.runs.find(r => r.key === `proj-alpha/${fx.ids[id]}`)?.match;
+  assert.deepEqual(book1.runs.map(r => [r.key.split('/')[1], r.match]).sort(), [['run-analysis-done', 'full'], ['run-check-done', 'full'], ['run-imported', 'report'], ['run-untraced-done', 'partial'], ['run-untraced-pasted', 'partial']]);
+  assert.equal(matchOf(list[1], 'untracedDone'), 'full');
+  assert.equal(book1.runs.find(r => r.key.endsWith('run-check-done')).report, mixed);
+  assert.equal(book1.runs.find(r => r.key.endsWith('run-imported')).report, correct);
+  assert.deepEqual(list[2].runs.find(r => r.key.endsWith('run-untraced-pasted')), {key: 'proj-alpha/run-untraced-pasted', match: 'full', trimmed: true, report: null});
+  // A run page says which dossier file each input is.
+  const page = JSON.parse((await request(v, `/api/runs/proj-alpha/${fx.ids.checkDone}`)).text);
+  assert.ok(page.inputs.some(i => i.kind === 'document' && i.note === 'Matches dossier book-001, source minute-book-1.md'));
+  assert.ok(page.inputs.some(i => i.kind === 'report-under-review' && i.note === `Matches dossier book-001, report ${mixed}`));
+  const pasted = JSON.parse((await request(v, `/api/runs/proj-alpha/${fx.ids.untracedPasted}`)).text);
+  assert.ok(pasted.inputs.some(i => /after trimming$/.test(i.note ?? '')));
+  // One document matches only: the link is partial.
+  const partial = path.join(fx.data, 'projects/proj-alpha/analyses/run-untraced-notes/sources');
+  fs.writeFileSync(path.join(partial, 'doc-a.md'), bookTexts(4).sources['minute-book-2.md']);
+  const again = JSON.parse((await request(v, '/api/runs')).text);
+  assert.deepEqual(again.find(r => r.key.endsWith('run-untraced-notes')).dossier, {id: 'book-004', match: 'partial', trimmed: false});
+  // The name told the agent which report this is: a title or an original name with correct or mixed.
+  const named = path.join(fx.data, 'projects/proj-alpha/traces/run-named');
+  fs.mkdirSync(named, {recursive: true});
+  fs.writeFileSync(path.join(named, 'trace.jsonl'), JSON.stringify({seq: 1, at: new Date().toISOString(), type: 'run-start', ...runStartFields({runId: 'run-named', kind: 'quality', createdAt: new Date().toISOString(), overrides: {title: 'Report Mixed Edition'}})}) + '\n');
+  const notice = JSON.parse((await request(v, '/api/runs/proj-alpha/run-named')).text).notices;
+  assert.ok(notice.some(n => n.text === 'The name told the agent which report this is.'));
+  assert.ok(!page.notices.some(n => n.kind === 'name-told'));
+});
+
+test('a report downloads under its neutral name and its bytes are unchanged', async t => {
+  const fx = fixture(t);
+  const v = await startServer(t, fx);
+  const list = JSON.parse((await request(v, '/api/dossiers')).text);
+  for (const d of list) {
+    for (const r of d.reports) {
+      const answer = await request(v, `/api/dossiers/${d.n}/download?name=${encodeURIComponent('report:' + r.sha12)}`);
+      assert.equal(answer.status, 200);
+      assert.match(answer.headers['content-type'], /^text\/markdown/);
+      assert.equal(answer.headers['content-disposition'], `attachment; filename="report-${r.sha12}.md"`);
+      assert.equal(crypto.createHash('sha256').update(answer.bytes).digest('hex').slice(0, 12), r.sha12);
+      assert.equal(answer.bytes.length, r.bytes);
+      for (const [name, text] of Object.entries(bookTexts(d.n).reports)) if (sha256(text).startsWith(r.sha12)) assert.deepEqual(answer.bytes, fs.readFileSync(path.join(fx.dossiers[d.n - 1], name)));
+      assert.doesNotMatch(answer.headers['content-disposition'], /correct|mixed/);
+    }
+    const source = await request(v, `/api/dossiers/${d.n}/download?name=${encodeURIComponent('source:procedure.md')}`);
+    assert.deepEqual(source.bytes, fs.readFileSync(path.join(fx.dossiers[d.n - 1], 'sources/procedure.md')));
+    assert.equal(source.headers['content-disposition'], 'attachment; filename="procedure.md"');
+  }
+  const doc = JSON.parse((await request(v, `/api/dossiers/1/document?name=${encodeURIComponent('report:' + list[0].reports[0].sha12)}`)).text);
+  assert.equal(doc.format, 'markdown');
+  assert.deepEqual([doc.part, doc.parts], [0, 1]);
+});
+
+test('settings come from the environment and a settings file below tmp, and nothing configured shows Not Connected', async t => {
+  const fx = fixture(t);
+  const repo = fs.mkdtempSync(path.join(realTmp, 'pv-repo-'));
+  t.after(() => fs.rmSync(repo, {recursive: true, force: true}));
+  fs.mkdirSync(path.join(repo, 'tmp/process-viewer'), {recursive: true});
+  const file = path.join(repo, 'tmp/process-viewer/settings.json');
+  const none = loadSettings({env: {}, repoRoot: repo});
+  assert.deepEqual(none, {deepProofData: null, dossiers: [], deepProofTmp: null, port: 8790});
+  fs.writeFileSync(file, JSON.stringify({deepProofData: fx.data, dossiers: [fx.dossiers[0]], deepProofTmp: fx.tmp, port: 8791}));
+  assert.deepEqual(loadSettings({env: {}, repoRoot: repo}), {deepProofData: fx.data, dossiers: [fx.dossiers[0]], deepProofTmp: fx.tmp, port: 8791});
+  const env = loadSettings({env: {VIEWER_DEEP_PROOF_DATA: '/x/y', VIEWER_DOSSIERS: ['/a', '/b'].join(path.delimiter), VIEWER_PORT: '0', VIEWER_DEEP_PROOF_TMP: '/z'}, repoRoot: repo});
+  assert.deepEqual(env, {deepProofData: '/x/y', dossiers: ['/a', '/b'], deepProofTmp: '/z', port: 0});
+  for (const bad of [{VIEWER_PORT: '70000'}, {VIEWER_PORT: 'abc'}, {VIEWER_PORT: '1.5'}, {VIEWER_SETTINGS: '/etc/hosts'}, {VIEWER_SETTINGS: path.join(repo, 'tmp/../outside.json')}, {VIEWER_SETTINGS: path.join(repo, 'tmp/process-viewer/missing.json')}]) {
+    assert.throws(() => loadSettings({env: bad, repoRoot: repo}), Error, JSON.stringify(bad));
+  }
+  fs.writeFileSync(file, '{not json');
+  assert.throws(() => loadSettings({env: {}, repoRoot: repo}), /not valid JSON/);
+  // A relative folder is refused by the gate; nothing configured starts a server that shows Not Connected.
+  await assert.rejects(startViewer({settings: {deepProofData: 'relative/path', dossiers: [], port: 0}}), /absolute/);
+  const v = await startServer(t, fx, {settings: {deepProofData: null, dossiers: [], deepProofTmp: fx.tmp, port: 0}});
+  const status = JSON.parse((await request(v, '/api/status')).text);
+  assert.deepEqual([status.connected, status.dossiersConfigured, status.pollMs, status.tmpMatches], [false, 0, 3000, null]);
+  assert.match(status.settingsHint, /"deepProofData": "<absolute path of the Deep Proof data folder>"/);
+  assert.deepEqual(JSON.parse((await request(v, '/api/runs')).text), []);
+  assert.deepEqual(JSON.parse((await request(v, '/api/dossiers')).text), []);
+  assert.equal((await request(v, '/api/runs/proj-alpha/run-analysis-done')).status, 404);
+  // Connected: tmpMatches says whether the work folders of the traces lie in the configured temporary folder.
+  const connected = await startServer(t, fx);
+  const ok = JSON.parse((await request(connected, '/api/status')).text);
+  assert.deepEqual([ok.connected, ok.dossiersConfigured, ok.settingsHint], [true, 6, null]);
+  assert.equal(ok.tmpMatches, true);
+  const other = fs.mkdtempSync(path.join(realTmp, 'pv-other-tmp-'));
+  t.after(() => fs.rmSync(other, {recursive: true, force: true}));
+  const mismatched = await startServer(t, fx, {settings: settingsOf(fx, {deepProofTmp: other})});
+  assert.equal(JSON.parse((await request(mismatched, '/api/status')).text).tmpMatches, false);
+});
+
+test('a 70 MiB trace and a 2 MiB line are read in parts within the memory bound', async t => {
+  const fx = fixture(t);
+  // The 70 MiB trace is written below the fixture folder (the operating system's temporary folder), which the test removes.
+  const dir = path.join(fx.data, 'projects/proj-alpha/traces/run-big');
+  fs.mkdirSync(dir, {recursive: true});
+  const file = path.join(dir, 'trace.jsonl');
+  const fd = fs.openSync(file, 'w');
+  let seq = 0;
+  const put = (type, fields) => fs.writeSync(fd, JSON.stringify({seq: ++seq, at: new Date(Date.now() - 20000 + seq).toISOString(), type, ...fields}) + '\n');
+  put('run-start', runStartFields({runId: 'run-big', createdAt: new Date(Date.now() - 20000).toISOString()}));
+  put('ala-stderr', {turn: '1', text: 'c'.repeat(2 * 1024 * 1024)});
+  while (fs.fstatSync(fd).size < 70 * 1024 * 1024) put('ala-stderr', {turn: '1', text: 'a'.repeat(262144)});
+  put('progress-note', {turn: '1', text: 'Done.', blocks: 1});
+  fs.closeSync(fd);
+  t.after(() => fs.rmSync(file, {force: true}));
+  const size = fs.statSync(file).size;
+  assert.ok(size > 70 * 1024 * 1024, `${size} bytes`);
+  // The server runs as a child process, so that its resident memory can be sampled from outside.
+  const child = spawn(process.execPath, [path.join(tools, 'process-viewer.mjs')], {env: {PATH: process.env.PATH, VIEWER_DEEP_PROOF_DATA: fx.data, VIEWER_DEEP_PROOF_TMP: fx.tmp, VIEWER_PORT: '0'}, stdio: ['ignore', 'pipe', 'pipe']});
+  t.after(() => child.kill('SIGKILL'));
+  const line = await new Promise((resolve, reject) => {
+    let out = '';
+    child.stdout.on('data', c => { out += c; const m = /Process viewer: (http:\/\/127\.0\.0\.1:(\d+)\/#key=([0-9a-f]{32}))/.exec(out); if (m) resolve(m); });
+    child.on('exit', code => reject(new Error(`the viewer exited with ${code}`)));
+    setTimeout(() => reject(new Error('the viewer did not start')), 20000);
+  });
+  const v = {port: Number(line[2]), key: line[3]};
+  const rss = async () => Number((await promisify(execFile)('ps', ['-o', 'rss=', '-p', String(child.pid)])).stdout.trim()) / 1024;
+  const baseline = await rss();
+  let peak = baseline;
+  const sampler = setInterval(() => rss().then(m => { peak = Math.max(peak, m); }, () => {}), 25);
+  try {
+    const runs = JSON.parse((await request(v, '/api/runs')).text);
+    assert.equal(runs.find(r => r.key === 'proj-alpha/run-big').status, 'running');
+    let after = 0, entries = [], rounds = 0;
+    for (;;) {
+      const answer = JSON.parse((await request(v, `/api/runs/proj-alpha/run-big/timeline?after=${after}`)).text);
+      assert.ok(answer.entries.length <= 500, 'a request has a cap');
+      entries.push(...answer.entries);
+      rounds++;
+      if (!answer.more) break;
+      after = answer.next;
+    }
+    assert.ok(entries.length >= 270, `${entries.length} entries`);
+    assert.ok(entries.every((e, i) => e.n === i + 1));
+    // The 2 MiB line is entry 2: eight parts of 262,144 bytes that join into the whole text.
+    const big = JSON.parse((await request(v, '/api/runs/proj-alpha/run-big/timeline/2?part=0')).text);
+    assert.equal(big.parts, 8);
+    let total = 0;
+    for (let k = 0; k < big.parts; k++) total += JSON.parse((await request(v, `/api/runs/proj-alpha/run-big/timeline/2?part=${k}`)).text).text.length;
+    assert.equal(total, 2 * 1024 * 1024);
+    for (const e of entries.slice(2, 30)) assert.equal(JSON.parse((await request(v, `/api/runs/proj-alpha/run-big/timeline/${e.n}?part=0`)).text).parts, 1);
+    assert.equal((await request(v, '/api/runs/proj-alpha/run-big')).status, 200);
+    assert.equal((await request(v, '/api/status')).status, 200);
+    await sleep(100);
+  } finally {
+    clearInterval(sampler);
+  }
+  peak = Math.max(peak, await rss());
+  t.diagnostic(`file ${(size / 1048576).toFixed(1)} MiB; resident memory of the viewer: ${baseline.toFixed(0)} MiB at start, peak ${peak.toFixed(0)} MiB, growth ${(peak - baseline).toFixed(0)} MiB`);
+  assert.ok(peak - baseline < 200, `resident memory grew by ${(peak - baseline).toFixed(0)} MiB`);
+});
+
+test('the read-only check tool reports an unchanged manifest on a fixture and finds a change', async t => {
+  const fx = fixture(t);
+  const repo = fs.mkdtempSync(path.join(realTmp, 'pv-repo-'));
+  t.after(() => fs.rmSync(repo, {recursive: true, force: true}));
+  const run = args => spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs'), ...args], {env: {PATH: process.env.PATH, VIEWER_DEEP_PROOF_DATA: fx.data, VIEWER_DEEP_PROOF_TMP: fx.tmp, VIEWER_DOSSIERS: fx.dossiers.join(path.delimiter)}, encoding: 'utf8', timeout: 60000});
+  const ok = run([]);
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.match(ok.stdout, /Manifest unchanged\./);
+  assert.match(ok.stdout, /second read gives the same answers: yes/);
+  assert.equal(run(['--bogus']).status, 2);
+  // The manifest covers projects/ only: the database files beside it are not part of it.
+  assert.ok(treeManifest(path.join(fx.data, 'projects')).every(line => !line.includes('analyst')));
+  assert.equal(spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs')], {env: {PATH: process.env.PATH, VIEWER_SETTINGS: path.join(repo, 'tmp/none.json')}, encoding: 'utf8'}).status, 2);
 });

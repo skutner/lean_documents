@@ -19,6 +19,8 @@ const JOIN_CHARS = 1000000;
 const SUMMARY_CACHE = 4000;
 const TIMELINE_CACHE = 4;
 const ID = /^[a-zA-Z0-9_-]+$/;
+// One scan buffer for every trace: lines are parsed at once, so the bytes of a chunk are never kept.
+const SCAN = Buffer.allocUnsafe(MAX_LINE + 1);
 
 /** An error with an HTTP status and words fit for the page. Never carries a path. */
 export class ViewerError extends Error {
@@ -61,9 +63,16 @@ export function table(headers, rows) {
 const plain = value => (value === null || ['string', 'number', 'boolean'].includes(typeof value));
 
 /** Splits a text into parts of at most PART_BYTES bytes, never inside a character. Returns null past the last part. */
+let lastText = null;
+let lastBuffer = null;
 export function partOf(text, part = 0) {
   const k = Number.isInteger(part) && part >= 0 ? part : 0;
-  const buffer = Buffer.from(String(text), 'utf8');
+  // The parts of one long text are asked for one after the other: its bytes are made once.
+  if (typeof text !== 'string' || text !== lastText) {
+    lastBuffer = Buffer.from(String(text), 'utf8');
+    lastText = typeof text === 'string' && lastBuffer.length > PART_BYTES ? text : null;
+  }
+  const buffer = lastBuffer;
   if (buffer.length <= PART_BYTES) return k === 0 ? {text: buffer.toString('utf8'), part: 0, parts: 1} : null;
   const bounds = [0];
   while (bounds.at(-1) < buffer.length) {
@@ -273,7 +282,7 @@ function fragment(state, rec, off, len) {
   state.pending ??= {kind, id, turn, at: rec.at, seq: rec.seq ?? null, spans: [], chars: 0, head: ''};
   const q = state.pending;
   q.spans.push(off, len);
-  q.chars += text.length;
+  q.chars += rec.__chars ?? text.length;
   if (q.head.length < 400) q.head += text;
   if (ev.outputComplete || q.chars > JOIN_CHARS || q.spans.length > MAX_FRAGMENTS * 2) flushPending(state);
 }
@@ -315,7 +324,49 @@ function apply(state, rec, off, len) {
 
 const CHEAP = /^\{"seq":(\d+),"at":"([^"]*)","type":"(ala-event|ala-stderr)"/;
 
+// A line this long is not parsed whole for the timeline: engine lines carry their long text in one field, so the
+// fields that decide the entry lie in the first and last bytes. The body is read and parsed in full only when opened.
+const LARGE = 64 * 1024;
+const unquote = chunk => {
+  for (let cut = 0; cut < 8; cut++) {
+    try {
+      return JSON.parse(`"${cut ? chunk.slice(0, -cut) : chunk}"`);
+    } catch {
+      // The cut fell inside an escape sequence: try a shorter piece.
+    }
+  }
+  return null;
+};
+function largeRecord(line) {
+  const head = line.subarray(0, 4096).toString('utf8');
+  const m = /^\{"seq":(\d+),"at":"([^"]*)","type":"(ala-stderr|ala-event)"/.exec(head);
+  if (!m) return null;
+  const turn = /,"turn":"([^"]*)"/.exec(head)?.[1] ?? null;
+  const rec = {seq: Number(m[1]), at: m[2], type: m[3], ...(turn !== null ? {turn} : {})};
+  const lead = (marker, text) => {
+    const i = text.indexOf(marker);
+    return i < 0 ? null : unquote(text.slice(i + marker.length, i + marker.length + 600).split('"')[0].replace(/\\$/, ''));
+  };
+  if (m[3] === 'ala-stderr') {
+    const text = lead('"text":"', head);
+    return text === null ? null : {...rec, text, __chars: line.length};
+  }
+  const ends = head + line.subarray(-768).toString('utf8');
+  const kind = /"event":\{"type":"([a-z-]+)"/.exec(head)?.[1];
+  if (kind !== 'coding-agent-message') return null;
+  const outputKind = /"outputKind":"([a-z]+)"/.exec(ends)?.[1];
+  if (!outputKind) return null;
+  const outputId = /"outputId":"([^"]*)"/.exec(ends)?.[1];
+  const message = lead('"message":"', head);
+  if (message === null) return null;
+  return {...rec, event: {type: kind, outputKind, ...(outputId !== undefined ? {outputId} : {}), outputComplete: /"outputComplete":true/.test(ends), message}, __chars: line.length};
+}
+
 function consume(state, line, off) {
+  if (state.wantEntries && line.length > LARGE) {
+    const rec = largeRecord(line);
+    if (rec) return apply(state, rec, off, line.length);
+  }
   if (!state.wantEntries) {
     const m = CHEAP.exec(line.subarray(0, 200).toString('latin1'));
     if (m) {
@@ -351,7 +402,7 @@ function advance(state, root, gate) {
     let r;
     let last;
     for (;;) {
-      r = gate.read(root, state.rel, {offset: state.offset, length: window, maxBytes: window});
+      r = gate.read(root, state.rel, {offset: state.offset, length: window, maxBytes: window, buffer: SCAN});
       if (!r.ok) return r;
       if (state.ino !== null && (r.ino !== state.ino || r.size < state.offset)) {
         resetState(state);
@@ -411,6 +462,7 @@ const toPublic = e => ({n: e.n, at: e.at, offsetMs: e.offsetMs, kind: e.kind, ti
 
 /** `root` is the data root of the read gate. `gate` is the read gate (a test may pass a wrapper). */
 export function createTraceIndex({root, gate = defaultGate}) {
+  let lastBody = null;
   const summaries = new Map();
   const timelines = new Map();
   const relOf = (pid, rid) => `projects/${pid}/traces/${rid}/trace.jsonl`;
@@ -463,9 +515,11 @@ export function createTraceIndex({root, gate = defaultGate}) {
       if (!s || !Number.isInteger(n) || n < 1 || n > s.entries.length) return null;
       const entry = s.entries[n - 1];
       if (!entry.hasBody) return {format: 'text', text: ''};
+      // The parts of one long body are asked for one after the other: the last body is kept for them.
+      if (lastBody && lastBody.state === s && lastBody.n === n) return lastBody.body;
       const records = [];
       for (let i = 0; i < entry.spans.length; i += 2) {
-        const r = gate.read(root, s.rel, {offset: entry.spans[i], length: entry.spans[i + 1], maxBytes: MAX_LINE});
+        const r = gate.read(root, s.rel, {offset: entry.spans[i], length: entry.spans[i + 1], maxBytes: MAX_LINE, buffer: SCAN});
         if (!r.ok) return {format: 'text', text: 'This step could not be read again. The trace changed or is no longer there.'};
         try {
           const rec = JSON.parse(r.bytes.toString('utf8'));
@@ -477,7 +531,9 @@ export function createTraceIndex({root, gate = defaultGate}) {
       }
       if (!records.length) return {format: 'text', text: ''};
       const body = bodyFrom(entry, records);
-      return body.needsPrompt !== undefined ? {...body, turn: entry.turn, kind: entry.kind} : body;
+      const answer = body.needsPrompt !== undefined ? {...body, turn: entry.turn, kind: entry.kind} : body;
+      lastBody = answer.text && answer.text.length > PART_BYTES ? {state: s, n, body: answer} : null;
+      return answer;
     }
   };
 }

@@ -109,6 +109,15 @@ export function openWorkFolder(roots, absolute) {
 /** Checks the path and each component below the root with lstat. `last` tells what the final component may be. */
 function locate(root, rel, {want = 'any'} = {}) {
   if (!root || typeof root.path !== 'string') return {ok: false, reason: 'refused'};
+  // The root itself (an empty path) can be listed for a dossier or a work folder, never for the data root.
+  if (rel === '' && root.kind !== 'data') {
+    try {
+      const st = lstatSync(root.path);
+      return st.isDirectory() && !st.isSymbolicLink() ? {ok: true, absolute: root.path, stat: st} : {ok: false, reason: 'refused'};
+    } catch {
+      return {ok: false, reason: 'missing'};
+    }
+  }
   const segments = relativeSegments(rel);
   if (!segments) return {ok: false, reason: 'refused'};
   if (root.kind === 'data' && segments[0] !== 'projects') return {ok: false, reason: 'refused'};
@@ -183,8 +192,9 @@ export function list(root, rel) {
 /** Reads a file. Without `length`, the whole file must be at most `maxBytes`. With `length`, the window starting at
  * `offset` is returned (at most `maxBytes`), however large the file is. A file that vanishes, shrinks or grows during
  * a whole-file read gives `{ok: false, reason: 'changed'}`; a window read returns the bytes that were read. Never throws.
- * `afterOpen` is a test hook that runs between the open and the read. */
-export function read(root, rel, {maxBytes = 10000000, offset = 0, length, afterOpen} = {}) {
+ * `afterOpen` is a test hook that runs between the open and the read. `buffer` lends a buffer for the bytes: the answer's
+ * `bytes` then lies in it and is valid only until the next read into it. */
+export function read(root, rel, {maxBytes = 10000000, offset = 0, length, afterOpen, buffer: reuse} = {}) {
   const found = locate(root, rel, {want: 'file'});
   if (!found.ok) return found;
   let fd = null;
@@ -211,7 +221,8 @@ export function read(root, rel, {maxBytes = 10000000, offset = 0, length, afterO
     const start = Math.max(0, Math.floor(Number(offset) || 0));
     const want = windowed ? Math.max(0, Math.min(Math.floor(length), maxBytes, st.size - start)) : st.size;
     if (afterOpen) afterOpen();
-    const buffer = Buffer.allocUnsafe(want);
+    // A caller that consumes the bytes at once may lend a buffer, so that a long trace is read without allocating per chunk.
+    const buffer = reuse && reuse.length >= want ? reuse : Buffer.allocUnsafe(want);
     let got = 0;
     while (got < want) {
       const n = readSync(fd, buffer, got, want - got, start + got);
