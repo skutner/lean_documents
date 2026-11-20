@@ -22,6 +22,8 @@ import {startChrome, makeProfileRoot, removeProfileRoot, chromeBinary, sleep} fr
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WATCHDOG_MS = 8 * 60 * 1000;
+// To see that an assertion has teeth, run the test against a page with a fix taken out: PV_BROWSER_PAGE=<that page file>.
+const PAGE_FILE = process.env.PV_BROWSER_PAGE ? path.resolve(process.env.PV_BROWSER_PAGE) : undefined;
 const WIDTHS = [[1440, 900], [390, 844]];
 const STATUS_WORDS = ['Running', 'Completed', 'Time Limit Reached', 'Failed', 'Interrupted', 'Not Recorded', 'Imported Report'];
 // A path in a page text: a slash followed by the name of a top folder of a unix machine. Built from parts so that this file holds none.
@@ -29,9 +31,11 @@ const PATH_PATTERN = new RegExp(`(^|[\\s"'(=:])/(?:${['Users', 'home', 'private'
 
 const results = [];
 const notes = [];
-const events = {requests: [], exceptions: [], consoleErrors: [], ignored: []};
+const events = {requests: [], exceptions: [], consoleErrors: [], ignored: [], hookErrors: []};
 let browser = null;
 let viewer = null;
+let fetchHook = null;
+const usedKeys = [];
 let fixtureBase = null;
 let profileRoot = null;
 let outDir = null;
@@ -130,7 +134,46 @@ async function screenshot(name) {
   await fs.writeFile(file, Buffer.from(shot.data, 'base64'));
   return file;
 }
+const timings = [];
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+const fmtDuration = ms => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  const pad = n => String(n).padStart(2, '0');
+  return m < 60 ? `${m} min ${pad(s % 60)} s` : `${Math.floor(m / 60)} h ${pad(m % 60)} min`;
+};
+/** Changes the viewer's own answers on their way to the page (or answers in its place). The viewer itself is not touched. */
+async function intercept(patterns, handler) {
+  fetchHook = handler;
+  await browser.page('Fetch.enable', {patterns});
+}
+async function stopIntercept() {
+  await browser.page('Fetch.disable');
+  fetchHook = null;
+}
+const answerJson = (p, status, value) => browser.page('Fetch.fulfillRequest', {
+  requestId: p.requestId, responseCode: status,
+  responseHeaders: [{name: 'Content-Type', value: 'application/json; charset=utf-8'}, {name: 'Cache-Control', value: 'no-store'}],
+  body: Buffer.from(JSON.stringify(value)).toString('base64')
+});
+async function changeAnswer(p, change) {
+  const got = await browser.page('Fetch.getResponseBody', {requestId: p.requestId});
+  const value = JSON.parse(got.base64Encoded ? Buffer.from(got.body, 'base64').toString('utf8') : got.body);
+  change(value, new URL(p.request.url).pathname);
+  return answerJson(p, p.responseStatusCode, value);
+}
+/** One GET of the viewer's own API from this process (not the page), for the numbers the page should show. */
+const apiGet = async route => (await fetch(`http://127.0.0.1:${viewer.port}${route}`, {headers: {'X-Viewer-Key': viewer.key}})).json();
+/** Opens the document of a card and returns the milliseconds until its text is on the page. */
+async function openCardTimed(selector, bodySelector, timeout = 15000) {
+  const began = Date.now();
+  await click(`${selector} summary`);
+  await waitFor(`(() => { const b = document.querySelector(${json(`${selector} .body`)}); return !!b && !b.hasAttribute('aria-busy') && !!b.querySelector(${json(bodySelector)}); })()`, {timeout, label: `${selector} rendered`});
+  return Date.now() - began;
+}
+const MARKUP_ALLOWED = ['WBR', 'P', 'H3', 'H4', 'H5', 'H6', 'EM', 'STRONG', 'CODE', 'BR', 'SPAN', 'DIV', 'PRE', 'BLOCKQUOTE', 'UL', 'OL', 'LI', 'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'HR'];
+const foreignElements = selector => ev(`[...document.querySelectorAll(${json(`${selector} *`)})].map(e => e.tagName).filter(t => !${json(MARKUP_ALLOWED)}.includes(t))`);
 
 // ---------- The checks that look at any page state ----------
 const overflow = () => ev('({scroll: document.documentElement.scrollWidth, inner: window.innerWidth, body: document.body.scrollWidth})');
@@ -179,10 +222,27 @@ try {
   fixtureBase = mkdtempSync(path.join(realpathSync(os.tmpdir()), 'pv-browser-'));
   const fx = buildFixture(fixtureBase);
   const realBase = realpathSync(fixtureBase);
+  // Hostile text in the kept copy of the Check Report, opened by the checks below.
+  const keptNotes = path.join(fx.data, 'projects', fx.pid, 'traces', 'run-check-done', 'workspace', 'notes');
+  const HOSTILE = [
+    '# Hostile text', '',
+    'A [click me](javascript:window.__bad=5) link, an image ![pixel](http://example.invalid/pixel.png) and a <a href="http://example.invalid/x">raw anchor</a>.', '',
+    '<img src="x" onerror="window.__bad=6"> <script>window.__bad=7</script> <iframe src="http://example.invalid/frame"></iframe>', '',
+    'An attribute quote: "><svg onload="window.__bad=8"> and \'><b onmouseover=\'window.__bad=9\'>bold?</b>', '',
+    '[titled](http://example.invalid/page "a title") and <http://example.invalid/auto>.', '',
+    '```html', '<script>window.__bad=10</script>', '```', ''
+  ].join('\n');
+  writeFileSync(path.join(keptNotes, 'hostile.md'), HOSTILE);
+  writeFileSync(path.join(keptNotes, 'quotes.md'), `${'>'.repeat(3000)} deep text\n`);
+  writeFileSync(path.join(keptNotes, 'wide-cell.md'), ['| A | B |', '| --- | --- |', `| ${'x'.repeat(100000)} | y |`, ''].join('\n'));
+  writeFileSync(path.join(keptNotes, 'wide-columns.md'), [`|${Array.from({length: 2000}, (_, i) => ` h${i} `).join('|')}|`, `|${' --- |'.repeat(2000)}`, `|${' c |'.repeat(2000)}`, ''].join('\n'));
+  writeFileSync(path.join(keptNotes, 'nested.md'), [`${Array.from({length: 40}, () => '>').join(' ')} forty quotes deep`, '', ...Array.from({length: 40}, (_, i) => `${'  '.repeat(i)}- level ${i + 1}`), ''].join('\n'));
   // A report of about 320 KB, so that one document is served in two parts of 262,144 bytes (the page offers the second).
   const LONG_PARAGRAPHS = 8000;
   writeFileSync(path.join(fx.data, 'projects', fx.pid, 'analyses', 'run-analysis-done', 'report.md'), Array.from({length: LONG_PARAGRAPHS}, (_, i) => `Paragraph ${i + 1} of the long report, with some words.`).join('\n\n') + '\n');
-  viewer = await startViewer({settings: {deepProofData: fx.data, dossiers: fx.dossiers, deepProofTmp: fx.tmp, port: 0}});
+  const settings = {deepProofData: fx.data, dossiers: fx.dossiers, deepProofTmp: fx.tmp, port: 0};
+  viewer = await startViewer({settings, pageFile: PAGE_FILE});
+  usedKeys.push(viewer.key);
   const origin = `http://127.0.0.1:${viewer.port}`;
   assert.notEqual(viewer.port, 8787);
   assert.notEqual(viewer.port, 8790);
@@ -200,6 +260,10 @@ try {
       case 'Log.entryAdded': if (p.entry.level === 'error') events.consoleErrors.push(`${p.entry.source}: ${p.entry.text} ${p.entry.url ?? ''}`); break;
       case 'Browser.downloadWillBegin': downloads.begun.push({guid: p.guid, name: p.suggestedFilename, url: p.url}); break;
       case 'Browser.downloadProgress': if (p.state === 'completed') downloads.done.push(p.guid); break;
+      case 'Fetch.requestPaused':
+        // A request the test chose to answer itself or to change; any other that arrives while interception is on goes on unchanged.
+        (fetchHook ? fetchHook(p) : browser.page('Fetch.continueRequest', {requestId: p.requestId})).catch(error => events.hookErrors.push(error.message));
+        break;
       default: break;
     }
   });
@@ -286,6 +350,29 @@ try {
     for (const part of ['Completed', 'Analysis', 'codex', 'model-demo', 'Elapsed', 'Attempt 2 of 3', '30 min', 'Recorded']) assert.ok(text.includes(part), `the chips hold "${part}": ${text}`);
   });
 
+  await check('the Elapsed chip of a run that has stopped ends at its end or its last sign of life, and an Imported Report has none (F3)', async () => {
+    const seen = [];
+    try {
+      for (const rid of ['run-interrupted-pid', 'run-interrupted-late', 'run-check-done', 'run-failed']) {
+        const {header} = await apiGet(`/api/runs/proj-alpha/${rid}`);
+        await openRun(rid);
+        await waitFor(`!!document.querySelector('main [data-elapsed]')`, {label: 'the Elapsed chip'});
+        const expected = fmtDuration(Date.parse(header.endedAt ?? header.lastActivityAt) - Date.parse(header.startedAt));
+        const shown = await ev(`document.querySelector('main [data-elapsed]').textContent`);
+        assert.equal(shown, expected, `${rid} (${header.statusLabel}) shows ${shown}, expected ${expected}`);
+        const sinceStart = fmtDuration(Date.now() - Date.parse(header.startedAt));
+        if (header.status === 'interrupted') assert.notEqual(shown, sinceStart, `${rid} must not show the time since its start`);
+        seen.push(`${rid} ${shown}`);
+      }
+      await openRun('run-imported');
+      assert.equal(await ev(`document.querySelectorAll('main [data-elapsed]').length`), 0, 'no Elapsed chip on an Imported Report');
+      assert.ok(!(await ev(`document.querySelector('main .chips').innerText`)).includes('Elapsed'));
+    } finally {
+      await openRun('run-analysis-done');
+    }
+    return seen.join('; ');
+  });
+
   await check('a timeline entry opens in place by click and by the Enter key and stays open, and the page keeps its scroll position, across two polls', async () => {
     await click('[data-entry-n="4"] summary');
     await waitFor(`document.querySelector('[data-entry-n="4"] details').open && document.querySelector('[data-entry-n="4"] .body .md')`, {label: 'entry 4 opened by click'});
@@ -354,6 +441,43 @@ try {
     return `${seen} ms`;
   });
 
+  await check('the Elapsed chip of a running run counts up', async () => {
+    await openRun('run-check-live');
+    const first = await ev(`document.querySelector('main [data-elapsed]').textContent`);
+    await sleep(2300);
+    const second = await ev(`document.querySelector('main [data-elapsed]').textContent`);
+    assert.notEqual(first, second, `${first} then ${second}`);
+    return `${first} then ${second}`;
+  });
+
+  await check('on a running run whose trace grows, an opened entry stays open, keeps its node and its place on the screen while new steps arrive', async () => {
+    const traceFile = path.join(fx.data, 'projects', fx.pid, 'traces', 'run-check-live', 'trace.jsonl');
+    const append = (count, label) => {
+      const last = JSON.parse(readFileSync(traceFile, 'utf8').trim().split('\n').at(-1));
+      appendFileSync(traceFile, Array.from({length: count}, (_, i) => JSON.stringify({seq: last.seq + 1 + i, at: new Date().toISOString(), type: 'progress-note', turn: '1', text: `${label} ${i + 1}`, blocks: 1})).join('\n') + '\n');
+    };
+    append(30, 'Filler note');
+    await waitFor(`document.querySelectorAll('.timeline [data-entry-n]').length >= 34`, {label: 'filler steps listed'});
+    await click('.timeline [data-entry-kind="progress-note"]:nth-child(10) summary');
+    await waitFor(`document.querySelector('.timeline [data-entry-kind="progress-note"]:nth-child(10) details').open && document.querySelector('.timeline [data-entry-kind="progress-note"]:nth-child(10) .body').textContent.length > 5`, {label: 'the entry is open'});
+    const state = await ev(`(() => { const li = document.querySelector('.timeline [data-entry-kind="progress-note"]:nth-child(10)'); li.__mark = 'same node'; li.scrollIntoView({block: 'center'}); window.scrollBy(0, 40); return {n: li.dataset.entryN, top: li.getBoundingClientRect().top, y: window.scrollY, count: document.querySelectorAll('.timeline [data-entry-n]').length, body: li.querySelector('.body').textContent}; })()`);
+    assert.ok(state.y > 400, `the page is scrolled (${state.y})`);
+    const pollsBefore = await polls();
+    for (let i = 1; i <= 7; i++) {
+      append(1, `Arriving note ${i}`);
+      await sleep(1000);
+    }
+    await waitFor(`document.querySelectorAll('.timeline [data-entry-n]').length === ${state.count + 7}`, {timeout: 8000, label: 'the arriving steps'});
+    const after = await ev(`(() => { const li = document.querySelector('.timeline [data-entry-n="${state.n}"]'); return {mark: li.__mark, open: li.querySelector('details').open, top: li.getBoundingClientRect().top, y: window.scrollY, body: li.querySelector('.body').textContent, running: document.querySelector('main [data-chip="status"]').textContent.includes('Running')}; })()`);
+    assert.ok((await polls()) - pollsBefore >= 2, 'at least two polls ran while the steps arrived');
+    assert.equal(after.mark, 'same node', 'the entry was patched, not rebuilt');
+    assert.equal(after.open, true);
+    assert.equal(after.body, state.body, 'its body is unchanged');
+    assert.ok(Math.abs(after.top - state.top) <= 2, `the entry stayed where it was on the screen: ${state.top} -> ${after.top} (scrollY ${state.y} -> ${after.y})`);
+    assert.ok(after.running, 'the run is still shown as running');
+    return `entry ${state.n}: top ${Math.round(state.top)} -> ${Math.round(after.top)}, scrollY ${Math.round(state.y)} -> ${Math.round(after.y)}, ${(await polls()) - pollsBefore} polls`;
+  });
+
   // ----- A Check Report with findings -----
   await check('a finding card shows its verdict, and its challenge and an evidence quote once opened', async () => {
     await openRun('run-check-done');
@@ -379,7 +503,50 @@ try {
     const rows = await ev(`document.querySelectorAll('[data-card-id="register:claims"] .body tbody tr').length`);
     assert.equal(rows, 2);
     assert.equal(await ev(`document.querySelector('details.kept').open`), false, 'the kept files are closed by default');
-    assert.equal(await ev(`document.querySelectorAll('details.kept .cards > *').length`), 8);
+    assert.equal(await ev(`document.querySelectorAll('details.kept .cards > *').length`), 13);
+  });
+
+  await check('hostile Markdown (a javascript: link, an image, raw HTML, an attribute quote) is shown as text: no element, no script run, no request leaving the origin', async () => {
+    await click('details.kept > summary');
+    const requestsBefore = events.requests.length;
+    const ms = await openCardTimed('[data-card-id="kept:notes/hostile.md"]', '.md');
+    const shown = await ev(`({bad: typeof window.__bad, text: document.querySelector('[data-card-id="kept:notes/hostile.md"] .body').textContent})`);
+    assert.equal(shown.bad, 'undefined', 'nothing ran');
+    assert.deepEqual(await foreignElements('[data-card-id="kept:notes/hostile.md"] .md'), [], 'no element other than the renderer\'s own');
+    assert.equal(await ev(`document.querySelectorAll('[data-card-id="kept:notes/hostile.md"] .body a, [data-card-id="kept:notes/hostile.md"] .body img, [data-card-id="kept:notes/hostile.md"] .body script, [data-card-id="kept:notes/hostile.md"] .body iframe, [data-card-id="kept:notes/hostile.md"] .body svg, [data-card-id="kept:notes/hostile.md"] .body b').length`), 0);
+    for (const literal of ['click me', 'javascript:window.__bad=5', 'pixel', 'http://example.invalid/pixel.png', '<a href="http://example.invalid/x">raw anchor</a>', '<img src="x" onerror="window.__bad=6">', '<script>window.__bad=7</script>', '<iframe src="http://example.invalid/frame"></iframe>', '"><svg onload="window.__bad=8">', '<b onmouseover=\'window.__bad=9\'>bold?</b>', 'titled', '<script>window.__bad=10</script>']) {
+      assert.ok(shown.text.includes(literal), `shown as text: ${literal}`);
+    }
+    const sent = events.requests.slice(requestsBefore).filter(r => new URL(r.url).origin !== origin);
+    assert.deepEqual(sent, [], 'no request left the origin');
+    assert.ok(!events.requests.some(r => r.url.includes('example.invalid')));
+    return `${ms} ms`;
+  });
+
+  await check('a line of 3,000 quote marks, forty nested quotes and lists, a table row of 100 KB and a table of 2,000 columns are shown in full and quickly, and the page keeps polling (F2)', async () => {
+    const quote = await openCardTimed('[data-card-id="kept:notes/quotes.md"]', 'blockquote');
+    const shown = await ev(`({text: document.querySelector('[data-card-id="kept:notes/quotes.md"] .body').textContent, busy: document.querySelector('[data-card-id="kept:notes/quotes.md"] .body').hasAttribute('aria-busy'), depth: (() => { let d = 0; let e = document.querySelector('[data-card-id="kept:notes/quotes.md"] .body blockquote'); while (e && e.querySelector(':scope > blockquote')) { e = e.querySelector(':scope > blockquote'); d++; } return d; })()})`);
+    assert.ok(!shown.busy && !/^Loading/.test(shown.text), 'the document is not stuck on Loading');
+    assert.ok(shown.text.includes('deep text'), 'the text after the quote marks is there');
+    assert.ok(shown.depth <= 30, `quotes nest only so deep: ${shown.depth}`);
+    assert.ok(quote < 1000, `quotes: ${quote} ms`);
+    const nested = await openCardTimed('[data-card-id="kept:notes/nested.md"]', 'ul');
+    assert.ok((await ev(`document.querySelector('[data-card-id="kept:notes/nested.md"] .body').textContent`)).includes('forty quotes deep'));
+    assert.ok((await ev(`document.querySelector('[data-card-id="kept:notes/nested.md"] .body').textContent`)).includes('level 40'), 'the deepest list level is shown, as text');
+    assert.ok(nested < 1000, `nesting: ${nested} ms`);
+    const cell = await openCardTimed('[data-card-id="kept:notes/wide-cell.md"]', 'table');
+    const c = await ev(`({cells: document.querySelectorAll('[data-card-id="kept:notes/wide-cell.md"] tbody td').length, len: document.querySelector('[data-card-id="kept:notes/wide-cell.md"] tbody td').textContent.length})`);
+    assert.deepEqual([c.cells, c.len], [2, 100000], 'the long cell is whole');
+    assert.ok(cell < 1000, `wide cell: ${cell} ms`);
+    const columns = await openCardTimed('[data-card-id="kept:notes/wide-columns.md"]', 'table');
+    assert.equal(await ev(`document.querySelectorAll('[data-card-id="kept:notes/wide-columns.md"] tbody td').length`), 2000);
+    assert.ok(columns < 1000, `wide table: ${columns} ms`);
+    for (const id of ['quotes', 'nested', 'wide-cell', 'wide-columns']) assert.deepEqual(await foreignElements(`[data-card-id="kept:notes/${id}.md"] .md`), []);
+    const before = await polls();
+    await waitPolls(1);
+    assert.ok((await polls()) > before, 'the page still polls');
+    timings.push(`3,000 quote marks ${quote} ms; 40 nested quotes and lists ${nested} ms; table row of 100 KB ${cell} ms; table of 2,000 columns ${columns} ms`);
+    return `quotes ${quote} ms, nesting ${nested} ms, wide cell ${cell} ms, 2,000 columns ${columns} ms`;
   });
 
   // ----- Sweep: every run, everything opened -----
@@ -470,6 +637,45 @@ try {
   await check('a linked run opens from the dossier page', async () => {
     await click('main [data-block="linked"] [data-run-key="proj-alpha/run-check-done"]');
     await waitFor(`location.hash === '#/run/proj-alpha/run-check-done' && document.querySelector('main [data-run-key="proj-alpha/run-check-done"]')`, {label: 'the linked run'});
+  });
+
+  await check('a run that was not there can be tried again by clicking it again (F4)', async () => {
+    await showView('welcome');
+    let refused = 0;
+    await intercept([{urlPattern: '*/api/runs/proj-alpha/run-failed', requestStage: 'Request'}], async p => {
+      if (refused < 1) { refused++; return answerJson(p, 404, {error: 'This run does not exist.'}); }
+      return browser.page('Fetch.continueRequest', {requestId: p.requestId});
+    });
+    try {
+      await click('nav [data-run-key="proj-alpha/run-failed"]');
+      await waitFor(`/This run is not there/.test(document.querySelector('main h1')?.textContent ?? '')`, {label: 'the not-there page'});
+      assert.equal(refused, 1);
+      await click('nav [data-run-key="proj-alpha/run-failed"]');
+      await waitFor(`!!document.querySelector('main [data-run-key="proj-alpha/run-failed"]') && document.querySelector('main h1').textContent === 'Evidence Review'`, {timeout: 2500, label: 'the run after the second click'});
+    } finally {
+      await stopIntercept();
+    }
+  });
+
+  await check('a run with no start time shows no date at all, not 1 January 1970', async () => {
+    await showView('welcome');
+    await intercept([{urlPattern: '*/api/runs', requestStage: 'Response'}, {urlPattern: '*/api/runs/proj-alpha/run-empty', requestStage: 'Response'}], p => changeAnswer(p, (value, pathname) => {
+      const none = {startedAt: null, endedAt: null, lastActivityAt: null};
+      if (pathname.endsWith('/api/runs')) {
+        for (const run of value) if (run.key === 'proj-alpha/run-empty') Object.assign(run, none);
+      } else Object.assign(value.header, none);
+    }));
+    try {
+      await waitFor(`(() => { const b = document.querySelector('nav [data-run-key="proj-alpha/run-empty"] .run-when'); return !!b && /^status inferred/.test(b.textContent); })()`, {timeout: 8000, label: 'the run without a start shows no time, only the inferred note'});
+      await ev(`location.hash = '#/run/proj-alpha/run-empty'`);
+      await waitFor(`document.querySelector('main [data-run-key="proj-alpha/run-empty"]') && document.querySelector('main h1').textContent === 'run-empty'`, {label: 'the run page'});
+      const text = await ev(`document.body.innerText`);
+      assert.ok(!/1970|1 Jan\b/.test(text), 'no 1970 anywhere');
+      assert.equal(await ev(`document.querySelectorAll('main [data-elapsed]').length`), 0, 'no Elapsed chip without a start');
+    } finally {
+      await stopIntercept();
+    }
+    return 'sidebar time empty, no Elapsed chip';
   });
 
   // ----- Settings -----
@@ -602,6 +808,28 @@ try {
     return `${expected} entries`;
   });
 
+  await check('when the viewer restarts with another key, the page goes to the key screen, closes the settings panel and takes the new key', async () => {
+    await showView('run-analysis-done');
+    await click('#settings-open');
+    await waitFor(`!document.getElementById('settings-panel').hidden && document.querySelector('#settings-panel dl')`, {label: 'settings open'});
+    const port = viewer.port;
+    const newKey = crypto.randomBytes(16).toString('hex');
+    await viewer.close();
+    viewer = await startViewer({settings: {...settings, port}, key: newKey, pageFile: PAGE_FILE});
+    usedKeys.push(newKey);
+    assert.equal(viewer.port, port);
+    await waitFor(`!!document.querySelector('[data-key-form]')`, {timeout: 15000, label: 'the key screen'});
+    assert.equal(await ev(`document.getElementById('settings-panel').hidden`), true, 'the settings panel is closed');
+    assert.equal(await ev(`document.getElementById('settings-open').getAttribute('aria-expanded')`), 'false');
+    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), null);
+    assert.match(await ev(`document.getElementById('key-error').textContent`), /refused/);
+    assert.equal(await ev(`document.querySelectorAll('nav [data-run-key]').length`), 0, 'no data left on the page');
+    await click('#key-input');
+    await browser.page('Input.insertText', {text: newKey});
+    await pressEnter('#key-input');
+    await waitFor(`document.querySelectorAll('nav [data-run-key]').length > 0 && !!document.querySelector('main [data-run-key="proj-alpha/run-analysis-done"]')`, {timeout: 10000, label: 'the page after the new key'});
+  });
+
   // ----- The key screen -----
   await check('without a key the page asks for one; a wrong key is refused in words; the right key opens the lists', async () => {
     await ev(`sessionStorage.clear(); true`);
@@ -621,13 +849,51 @@ try {
     assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), viewer.key);
   });
 
+  // ----- Hostile text that the page's old patterns could not survive -----
+  await check('text that made the old patterns run for seconds or hours is shown in full in well under a second: a heading followed by 50,000 spaces, 100 KB of "[a](", long runs of * _ and backticks (F1)', async () => {
+    const reports = path.join(fx.data, 'projects', fx.pid, 'analyses');
+    const symbols = ['x' + '*'.repeat(60000), 'x' + '_'.repeat(60000), 'x' + '`'.repeat(60000), '*a'.repeat(6000), '_a'.repeat(6000), '`a'.repeat(6000), '``a`'.repeat(3000), 'a *b _c `d '.repeat(1000)].join('\n\n');
+    assert.ok(Buffer.byteLength(symbols) < 262144, 'one part');
+    writeFileSync(path.join(reports, 'run-untraced-done', 'report.md'), `# Title${' '.repeat(50000)}Page 3\n\nAfter the heading.\n`);
+    writeFileSync(path.join(reports, 'run-untraced-pasted', 'report.md'), '[a]('.repeat(25000) + '\n');
+    writeFileSync(path.join(reports, 'run-untraced-check', 'report.md'), `${symbols}\n`);
+    const done = [];
+    // Each document is opened after the previous one has been shown, so that a stuck page shows as a failure of the first.
+    await openRun('run-untraced-done');
+    const heading = await openCardTimed('[data-card-id="report"]', 'h3');
+    const h = await ev(`({text: document.querySelector('[data-card-id="report"] .md h3').textContent, after: document.querySelector('[data-card-id="report"] .md').textContent.includes('After the heading.')})`);
+    assert.ok(h.text.startsWith('Title') && h.text.trim().endsWith('Page 3') && h.after, `heading: ${json(h.text.slice(0, 20))}`);
+    assert.deepEqual(await foreignElements('[data-card-id="report"] .md'), []);
+    assert.ok(heading < 1000, `heading: ${heading} ms`);
+    done.push(`heading ${heading} ms`);
+    await openRun('run-untraced-pasted');
+    const links = await openCardTimed('[data-card-id="report"]', 'p');
+    const l = await ev(`document.querySelector('[data-card-id="report"] .md').textContent`);
+    assert.ok(l.startsWith('[a]([a]([a](') && l.length >= 100000, `the text of the links stays text (${l.length} characters)`);
+    assert.deepEqual(await foreignElements('[data-card-id="report"] .md'), []);
+    assert.ok(links < 1000, `links: ${links} ms`);
+    done.push(`links ${links} ms`);
+    await openRun('run-untraced-check');
+    const marks = await openCardTimed('[data-card-id="report"]', 'p');
+    const m = await ev(`({paragraphs: document.querySelectorAll('[data-card-id="report"] .md p').length, text: document.querySelector('[data-card-id="report"] .md').textContent.length, scripts: document.querySelectorAll('[data-card-id="report"] .md script').length})`);
+    assert.ok(m.paragraphs >= 8 && m.text > 100000 && m.scripts === 0, json(m));
+    assert.deepEqual(await foreignElements('[data-card-id="report"] .md'), []);
+    assert.ok(marks < 1000, `marks: ${marks} ms`);
+    done.push(`* _ \` ${marks} ms`);
+    timings.push(`heading plus 50,000 spaces ${heading} ms; 100 KB of "[a](" ${links} ms; runs of * _ and backticks (${Math.round(Buffer.byteLength(symbols) / 1000)} KB) ${marks} ms`);
+    const before = await polls();
+    await waitPolls(1);
+    assert.ok((await polls()) > before, 'the page still polls');
+    return done.join(', ');
+  });
+
   // ----- Whole session -----
   await check('no request other than GET was sent, every request went to the viewer, and every request carried no key in its address', async () => {
     const wrong = events.requests.filter(r => r.method !== 'GET');
     assert.deepEqual(wrong, []);
     const foreign = events.requests.filter(r => new URL(r.url).origin !== origin && !r.url.startsWith('about:') && !r.url.startsWith('blob:'));
     assert.deepEqual(foreign, []);
-    assert.ok(events.requests.every(r => !r.url.includes(viewer.key)));
+    assert.ok(events.requests.every(r => usedKeys.every(key => !r.url.includes(key))));
     assert.ok(events.requests.length > 100, `${events.requests.length} requests were seen`);
     return `${events.requests.length} requests, all GET`;
   });
@@ -635,16 +901,22 @@ try {
   await check('no page exception and no console error, and no request for a file that is not served', async () => {
     // Chrome asks every page for /favicon.ico; the viewer serves two routes and answers 404 in JSON. That one request is recorded, not counted.
     // Chrome also logs the deliberate 401 of the wrong key in the key-screen check, once, on /api/status.
-    const isRefusal = e => /\(Unauthorized\)/.test(e) && /\/api\/status/.test(e);
+    // Also expected: the 401 of the restart with another key (the next poll, the same step as the page's first refused request),
+    // and the one 404 the test itself made the viewer's answer for a run in the check of the second click.
+    const isRefusal = e => /\(Unauthorized\)/.test(e) && /\/api\//.test(e);
+    const isMade404 = e => /\(Not Found\)/.test(e) && /\/api\/runs\/proj-alpha\/run-failed/.test(e);
     const refusals = events.consoleErrors.filter(isRefusal);
-    assert.ok(refusals.length <= 1, `at most the one deliberate 401: ${json(refusals)}`);
-    const real = events.consoleErrors.filter(e => !/favicon\.ico/.test(e) && !isRefusal(e));
-    for (const e of events.consoleErrors) if (/favicon\.ico/.test(e) || isRefusal(e)) events.ignored.push(e);
+    assert.ok(refusals.length <= 3, `only the deliberate 401s (wrong key, restart, and requests in flight): ${json(refusals)}`);
+    assert.ok(events.consoleErrors.filter(isMade404).length <= 1);
+    const expected = e => /favicon\.ico/.test(e) || isRefusal(e) || isMade404(e);
+    const real = events.consoleErrors.filter(e => !expected(e));
+    for (const e of events.consoleErrors) if (expected(e)) events.ignored.push(e);
+    assert.deepEqual(events.hookErrors, [], 'the test\'s own interception worked');
     assert.deepEqual(events.exceptions, []);
     assert.deepEqual(real, []);
     const other = events.requests.filter(r => !/\/api\//.test(r.url) && !/favicon\.ico$/.test(r.url) && new URL(r.url).pathname !== '/');
     assert.deepEqual(other, []);
-    return events.ignored.length ? `${events.ignored.length} expected console message(s) set aside (favicon 404, the deliberate 401)` : '';
+    return events.ignored.length ? `${events.ignored.length} expected console message(s) set aside (favicon 404, the deliberate 401s, the 404 the test made)` : '';
   });
 } catch (error) {
   failedSetup = error;
@@ -663,7 +935,7 @@ const lines = [
   '# Process viewer browser test', '',
   `Command: \`CHROME=<Chrome binary> node tools/test-process-viewer-browser.mjs\``,
   `Result: **${failed.length ? 'FAIL' : 'PASS'}**, ${results.length - failed.length} of ${results.length} assertions passed.`, '',
-  ...notes.map(n => `- ${n}`), '',
+  ...notes.map(n => `- ${n}`), ...timings.map(t => `- Time in Chrome, from the click to the text on the page, including the request: ${t}.`), '',
   '| Assertion | Result | Detail |', '| --- | --- | --- |',
   ...results.map(r => `| ${r.name.replace(/\|/g, '/')} | ${r.ok ? 'PASS' : 'FAIL'} | ${String(r.detail).replace(/\|/g, '/').replace(/\n/g, ' ')} |`), '',
   '## Screenshots', '', ...['run-1440', 'run-390', 'dossier-1440', 'dossier-390'].map(n => `- ${n}.png`), '',

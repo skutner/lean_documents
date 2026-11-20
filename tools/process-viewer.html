@@ -183,12 +183,17 @@ details[open] > summary .entry-summary { display: block; -webkit-line-clamp: uns
 .md h3 { font-size: 1.3rem; } .md h4 { font-size: 1.15rem; } .md h5 { font-size: 1.02rem; } .md h6 { font-size: .95rem; color: var(--muted); }
 .md ul, .md ol { margin: 0 0 12px; padding-left: 1.5rem; }
 .md li { margin: 4px 0; }
+.md li > ul, .md li > ol { padding-left: 1.1rem; }
+.md li li li li > ul, .md li li li li > ol { padding-left: 0; }
 .md li > p { margin: 0 0 6px; }
 .md blockquote { margin: 10px 0 14px; padding: 8px 16px; border-left: 4px solid var(--accent, #64748b); background: #f6f8fb; border-radius: 0 10px 10px 0; color: #1f2937; }
 .md blockquote > :last-child { margin-bottom: 0; }
+.md blockquote blockquote { padding: 4px 0 4px 10px; }
+.md blockquote blockquote blockquote blockquote { padding-left: 0; border-left: 0; }
 .md code { font: .88em ui-monospace, Menlo, Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 5px; }
 .md hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
 .md .url { color: var(--muted); }
+.md p.deep { white-space: pre-wrap; }
 .code-wrap, .table-wrap { overflow-x: auto; margin: 0 0 14px; max-width: 100%; }
 .md pre { margin: 0; padding: 12px 14px; background: #f6f8fb; border: 1px solid var(--line); border-radius: 10px; white-space: pre; font: .86rem/1.5 ui-monospace, Menlo, Consolas, monospace; }
 .md pre code { background: none; padding: 0; font: inherit; }
@@ -357,6 +362,36 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     });
   }
 
+  // A run of 200 or more characters without a space gives the line breaker nothing to use but the "anywhere" rule, which Chrome
+  // pays for at about a second per 100,000 characters. A break opportunity every 100 characters of such a run costs nothing.
+  var LONG_RUN = /\S{200,}/g;
+  function escLong(text) {
+    if (text.length < 200) return esc(text);
+    var out = '', at = 0, m;
+    LONG_RUN.lastIndex = 0;
+    while ((m = LONG_RUN.exec(text)) !== null) {
+      out += esc(text.slice(at, m.index));
+      for (var i = 0; i < m[0].length; i += 100) out += (i ? '<wbr>' : '') + esc(m[0].slice(i, i + 100));
+      at = m.index + m[0].length;
+    }
+    return out + esc(text.slice(at));
+  }
+  /** Plain text in an element, with the same break opportunities as escLong, built as text nodes and never as HTML. */
+  function setPlain(el, text) {
+    if (text.length < 200) { el.textContent = text; return; }
+    el.textContent = '';
+    var at = 0, m;
+    LONG_RUN.lastIndex = 0;
+    while ((m = LONG_RUN.exec(text)) !== null) {
+      el.appendChild(document.createTextNode(text.slice(at, m.index)));
+      for (var i = 0; i < m[0].length; i += 100) {
+        if (i) el.appendChild(document.createElement('wbr'));
+        el.appendChild(document.createTextNode(m[0].slice(i, i + 100)));
+      }
+      at = m.index + m[0].length;
+    }
+    el.appendChild(document.createTextNode(text.slice(at)));
+  }
   /** Builds an element. Text is always set as text, attributes through setAttribute. */
   function h(tag, attrs) {
     var el = document.createElement(tag);
@@ -412,13 +447,19 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     var s = Math.max(0, Math.round(ms / 1000)), m = Math.floor(s / 60);
     return '+' + (m >= 60 ? Math.floor(m / 60) + ':' + pad(m % 60) : m) + ':' + pad(s % 60);
   }
-  function fmtClock(iso) {
+  function validDate(iso) {
+    // A missing time is null, and new Date(null) is the first of January 1970: only a text that names a time counts.
+    if (typeof iso !== 'string' || !iso) return null;
     var d = new Date(iso);
-    return isNaN(d) ? '' : pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    return isNaN(d) ? null : d;
+  }
+  function fmtClock(iso) {
+    var d = validDate(iso);
+    return !d ? '' : pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
   function fmtStamp(iso) {
-    var d = new Date(iso);
-    if (isNaN(d)) return '';
+    var d = validDate(iso);
+    if (!d) return '';
     var now = new Date();
     var time = pad(d.getHours()) + ':' + pad(d.getMinutes());
     if (d.toDateString() === now.toDateString()) return 'Today, ' + time;
@@ -549,35 +590,111 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   }
 
   // ---------- Text: a small Markdown renderer (every text escaped; links shown as text) ----------
-  function inlineMd(text) {
-    var re = /(`+)([\s\S]*?)\1|!?\[([^\]\n]*)\]\(([^)\s]*)(?:\s+"[^"]*")?\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\s][^*\n]*?)\*|\b_([^_\n]+)_\b/g;
-    var out = '', at = 0, m;
-    while ((m = re.exec(text)) !== null) {
-      out += esc(text.slice(at, m.index));
-      at = m.index + m[0].length;
-      if (m[1]) out += '<code>' + esc(m[2]) + '</code>';
-      else if (m[4] !== undefined) {
-        var label = m[3] || m[4];
-        out += esc(label);
-        if (m[3] && /^([a-z][a-z0-9+.\-]*:|\/\/)/i.test(m[4])) out += ' <span class="url">(' + esc(m[4]) + ')</span>';
-      } else if (m[5] || m[6]) out += '<strong>' + inlineMd(m[5] || m[6]) + '</strong>';
-      else out += '<em>' + inlineMd(m[7] || m[8]) + '</em>';
+  /** Splits text at its code spans: a run of backticks closes at the next run of the same length. Linear: every run is found
+   * once, and a cursor per run length only moves forward. Returns null when there is no backtick. */
+  function codeSpans(text) {
+    var at = text.indexOf('`');
+    if (at < 0) return null;
+    var runs = {}, order = [], n = text.length;
+    while (at >= 0) {
+      var end = at;
+      while (end < n && text.charCodeAt(end) === 96) end++;
+      (runs[end - at] || (runs[end - at] = [])).push(at);
+      order.push([at, end - at]);
+      at = text.indexOf('`', end);
     }
-    return (out + esc(text.slice(at))).replace(/ {2,}\n/g, '<br>');
+    var parts = [], from = 0, cursor = {}, k = 0;
+    while (k < order.length) {
+      var start = order[k][0], len = order[k][1], list = runs[len], p = cursor[len] || 0;
+      while (p < list.length && list[p] <= start) p++;
+      cursor[len] = p;
+      if (p < list.length) {
+        parts.push({text: text.slice(from, start)}, {code: text.slice(start + len, list[p])});
+        from = list[p] + len;
+        while (k < order.length && order[k][0] < from) k++;
+      } else k++;
+    }
+    parts.push({text: text.slice(from)});
+    return parts;
+  }
+  /** Two spaces before a line break make a break. Written without a pattern: a long run of spaces would cost quadratic time. */
+  function hardBreaks(html) {
+    var pieces = html.split('\n'), out = pieces[0];
+    for (var i = 1; i < pieces.length; i++) {
+      var end = out.length;
+      while (end > 0 && out.charCodeAt(end - 1) === 32) end--;
+      out = out.length - end >= 2 ? out.slice(0, end) + '<br>' + pieces[i] : out + '\n' + pieces[i];
+    }
+    return out;
+  }
+  // Every quantifier that runs over text of unknown length is bounded or stops at a character the pattern also needs, so
+  // that no input makes the matcher scan the rest of the text again from each start.
+  var INLINE = /!?\[([^\]\n]{0,500})\]\(([^)\s]{0,500})(?:\s+"[^"\n]{0,500}")?\)|\*\*([^*\n]+)\*\*|(?<![A-Za-z0-9_.])__([^_\s][^_\n]*?)__(?![A-Za-z0-9_])|\*([^*\s][^*\n]*?)\*|(?<![A-Za-z0-9_.])_([^_\s][^_\n]*?)_(?![A-Za-z0-9_])/g;
+  function inlineText(text) {
+    var re = new RegExp(INLINE.source, 'g'), out = '', at = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      out += escLong(text.slice(at, m.index));
+      at = m.index + m[0].length;
+      if (m[2] !== undefined) {
+        out += esc(m[1] || m[2]);
+        if (m[1] && /^([a-z][a-z0-9+.\-]*:|\/\/)/i.test(m[2])) out += ' <span class="url">(' + esc(m[2]) + ')</span>';
+      } else if (m[3] || m[4]) out += '<strong>' + inlineText(m[3] || m[4]) + '</strong>';
+      else out += '<em>' + inlineText(m[5] || m[6]) + '</em>';
+    }
+    return out + escLong(text.slice(at));
+  }
+  function inlineMd(text) {
+    var parts = codeSpans(text);
+    if (!parts) return hardBreaks(inlineText(text));
+    return hardBreaks(parts.map(function (part) { return part.code !== undefined ? '<code>' + escLong(part.code) + '</code>' : inlineText(part.text); }).join(''));
   }
   var LIST_LINE = /^(\s*)([-+*]|\d{1,9}[.)])\s+(.*)$/;
   var RULE_LINE = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
   function isBlank(line) { return !line.trim(); }
   function leading(line) { return line.length - line.replace(/^\s+/, '').length; }
-  function isDivider(line) { return typeof line === 'string' && line.indexOf('|') >= 0 && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(line); }
+  /** A table divider row such as `| --- | :---: |`: every cell is dashes with an optional colon at each end. No nested patterns. */
+  function isDivider(line) {
+    if (typeof line !== 'string' || line.indexOf('|') < 0) return false;
+    var t = line.trim();
+    if (t.charAt(0) === '|') t = t.slice(1);
+    if (t.charAt(t.length - 1) === '|') t = t.slice(0, -1);
+    var cells = t.split('|');
+    for (var i = 0; i < cells.length; i++) if (!/^:?-{3,}:?$/.test(cells[i].trim())) return false;
+    return true;
+  }
+  var SPACE = /\s/;
+  /** An ATX heading: up to three spaces, one to six `#`, a space, the text, an optional closing run of `#`. Plain string steps. */
+  function parseHeading(line) {
+    var n = line.length, i = 0;
+    while (i < n && i < 4 && SPACE.test(line.charAt(i))) i++;
+    if (i > 3) return null;
+    var first = i;
+    while (i < n && line.charAt(i) === '#') i++;
+    var level = i - first;
+    if (level < 1 || level > 6 || i >= n || !SPACE.test(line.charAt(i))) return null;
+    var end = n;
+    while (end > i && SPACE.test(line.charAt(end - 1))) end--;
+    var close = end;
+    while (close > i && line.charAt(close - 1) === '#') close--;
+    if (close < end && (close === i || SPACE.test(line.charAt(close - 1)))) {
+      end = close;
+      while (end > i && SPACE.test(line.charAt(end - 1))) end--;
+    }
+    while (i < end && SPACE.test(line.charAt(i))) i++;
+    return {level: level, text: line.slice(i, end)};
+  }
   function splitRow(line) {
     return line.trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map(function (c) { return c.trim().replace(/\\\|/g, '|'); });
   }
   function startsBlock(line, next) {
     return /^\s*(`{3,}|~{3,})/.test(line) || /^\s{0,3}#{1,6}\s/.test(line) || /^\s*>/.test(line) || RULE_LINE.test(line) || LIST_LINE.test(line) || (line.indexOf('|') >= 0 && isDivider(next));
   }
-  function mdBlocks(src, tight) {
-    var lines = src.replace(/\r\n?/g, '\n').split('\n'), i = 0, out = '', m;
+  var MAX_DEPTH = 24;
+  function mdBlocks(src, tight, depth) {
+    depth = depth || 0;
+    // Quotes and lists nest by recursion. Deeper than this the rest is shown as plain text, so that no text can exhaust the stack.
+    if (depth > MAX_DEPTH) return '<p class="deep">' + escLong(src) + '</p>';
+    var lines = src.replace(/\r\n?/g, '\n').split('\n'), i = 0, out = '', m, heading;
     while (i < lines.length) {
       var line = lines[i];
       if (isBlank(line)) { i++; continue; }
@@ -587,9 +704,9 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
         while (i < lines.length && !(lines[i].trim().indexOf(fence) === 0 && /^[`~]+$/.test(lines[i].trim()))) chunk.push(lines[i++]);
         i++;
         out += '<div class="code-wrap"><pre><code>' + esc(chunk.join('\n')) + '</code></pre></div>';
-      } else if ((m = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line))) {
-        var level = Math.min(6, m[1].length + 2);
-        out += '<h' + level + '>' + inlineMd(m[2]) + '</h' + level + '>';
+      } else if ((heading = parseHeading(line))) {
+        var level = Math.min(6, heading.level + 2);
+        out += '<h' + level + '>' + inlineMd(heading.text) + '</h' + level + '>';
         i++;
       } else if (RULE_LINE.test(line)) {
         out += '<hr>';
@@ -597,7 +714,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
       } else if (/^\s*>/.test(line)) {
         var quote = [];
         while (i < lines.length && /^\s*>/.test(lines[i])) quote.push(lines[i++].replace(/^\s*> ?/, ''));
-        out += '<blockquote>' + mdBlocks(quote.join('\n')) + '</blockquote>';
+        out += '<blockquote>' + mdBlocks(quote.join('\n'), false, depth + 1) + '</blockquote>';
       } else if (line.indexOf('|') >= 0 && isDivider(lines[i + 1])) {
         var head = splitRow(line);
         i += 2;
@@ -634,7 +751,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
         }
         var tag = ordered ? 'ol' : 'ul';
         out += '<' + tag + (ordered && start !== 1 ? ' start="' + start + '"' : '') + '>' + items.map(function (body) {
-          return '<li>' + mdBlocks(body.join('\n'), !body.some(isBlank)) + '</li>';
+          return '<li>' + mdBlocks(body.join('\n'), !body.some(isBlank), depth + 1) + '</li>';
         }).join('') + '</' + tag + '>';
       } else {
         var para = [line];
@@ -652,15 +769,25 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   function renderDocument(box, first, text) {
     var key = first.format + '\u0000' + text + '\u0000' + (first.notice || '') + '\u0000' + (first.note || '') + '\u0000' + box._loaded + '/' + first.parts;
     if (box._sig === key) return;
-    box._sig = key;
     var kids = [];
     if (first.notice) kids.push(h('div', {class: 'callout warn'}, icon('info'), h('p', {text: first.notice})));
     if (!text) kids.push(h('p', {class: 'muted', text: 'This document is empty.'}));
     else if (first.format === 'markdown') {
       var md = h('div', {class: 'md'});
-      md.innerHTML = mdBlocks(text);
-      kids.push(md);
-    } else kids.push(h('pre', {class: 'plain', text: text}));
+      try {
+        md.innerHTML = mdBlocks(text);
+        kids.push(md);
+      } catch (error) {
+        // The renderer failed on this text: show the text itself, escaped, rather than a page that never finishes loading.
+        var fallback = h('pre', {class: 'plain'});
+        setPlain(fallback, text);
+        kids.push(h('div', {class: 'callout'}, icon('info'), h('p', {text: 'This document could not be formatted, so it is shown as plain text.'})), fallback);
+      }
+    } else {
+      var plain = h('pre', {class: 'plain'});
+      setPlain(plain, text);
+      kids.push(plain);
+    }
     if (first.note) kids.push(h('p', {class: 'note', text: first.note}));
     if (box._loaded < first.parts) {
       var more = h('button', {type: 'button', class: 'more', text: 'Show the next part (' + (box._loaded + 1) + ' of ' + first.parts + ')'});
@@ -668,6 +795,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
       kids.push(more);
     }
     fill(box, kids);
+    box._sig = key; // only after the document is on the page: a failed render must not look like a finished one
   }
 
   function loadBody(details, refresh) {
@@ -694,11 +822,11 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
       box.removeAttribute('aria-busy');
       box._loaded = Math.min(box._loaded, first.parts);
       renderDocument(box, first, texts.join(''));
-    }, function (error) {
+    }).catch(function (error) {
       if (token !== box._token) return;
       box.removeAttribute('aria-busy');
       box._sig = null;
-      fill(box, h('p', {class: 'muted', text: error.message || 'This document could not be read.'}));
+      fill(box, h('p', {class: 'muted', text: (error && error.message) || 'This document could not be read.'}));
     });
   }
   document.addEventListener('toggle', function (event) {
@@ -731,7 +859,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
       statusMark(st),
       h('span', {class: 'st-word', text: run.statusLabel || st.word}),
       h('span', {class: 'run-title'}, icon(kind.icon), h('span', {text: run.title || run.key})),
-      h('span', {class: 'run-when', text: fmtStamp(run.startedAt) + (run.statusSource === 'inferred' && run.status !== 'imported' ? ' · status inferred from files' : '')})
+      h('span', {class: 'run-when', text: [fmtStamp(run.startedAt), run.statusSource === 'inferred' && run.status !== 'imported' ? 'status inferred from files' : ''].filter(Boolean).join(' · ')})
     );
     btn._run = run;
   }
@@ -772,7 +900,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     var items = section.querySelector('.items');
     reconcile(items, g.runs, function (r) { return r.key; }, function (run) {
       var btn = h('button', {type: 'button'});
-      btn.addEventListener('click', function () { location.hash = '#/run/' + enc(run.key.split('/')[0]) + '/' + enc(run.key.split('/').slice(1).join('/')); });
+      btn.addEventListener('click', function () { go('#/run/' + enc(run.key.split('/')[0]) + '/' + enc(run.key.split('/').slice(1).join('/'))); });
       fillRunButton(btn, run);
       return btn;
     }, function (btn, run) { if (sig(btn._run) !== sig(run)) fillRunButton(btn, run); });
@@ -788,7 +916,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     var list = $('dossier-list');
     reconcile(list, S.dossiers, function (d) { return d.n; }, function (d) {
       var btn = h('button', {type: 'button', class: 'dossier-btn', 'data-dossier': d.n});
-      btn.addEventListener('click', function () { location.hash = '#/dossier/' + d.n; });
+      btn.addEventListener('click', function () { go('#/dossier/' + d.n); });
       fillDossierButton(btn, d);
       return btn;
     }, function (btn, d) { if (sig(btn._d) !== sig(d)) fillDossierButton(btn, d); });
@@ -823,6 +951,10 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     var d = /^#\/dossier\/(\d{1,6})$/.exec(location.hash);
     if (d) return {type: 'dossier', n: Number(d[1])};
     return {type: 'welcome'};
+  }
+  /** Goes to an address. Setting the same hash again fires no event, so it is routed by hand: a run that was not there can be tried again. */
+  function go(hash) {
+    if (location.hash === hash) route(); else location.hash = hash;
   }
   function setNavState(open) {
     document.body.classList.toggle('nav-open', open);
@@ -950,8 +1082,9 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     v.root.setAttribute('data-kind', hd.kind);
     v.root.className = 'run-view tone-' + st.tone + ' st-' + String(hd.status).replace(/[^a-z-]/g, '');
     v.started = hd.startedAt;
-    v.ended = hd.endedAt;
     v.running = hd.status === 'running';
+    // A run that is not running has stopped at its end, else at its last sign of life; never "now".
+    v.ended = v.running ? null : (hd.endedAt || hd.lastActivityAt || null);
     var chips = [];
     chips.push(h('span', {class: 'chip status st-' + String(hd.status).replace(/[^a-z-]/g, ''), 'data-chip': 'status'},
       h('span', {class: 'st-icon'}, icon(st.icon)), h('span', {class: 'st-word', text: hd.statusLabel || st.word}),
@@ -961,7 +1094,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     if (hd.agent) chips.push(chip('Agent', hd.agent, 'bot'));
     if (hd.model) chips.push(chip('Model', hd.model, 'cpu'));
     if (hd.effort) chips.push(chip('Effort', pretty(hd.effort), 'cpu'));
-    if (hd.startedAt) {
+    if (validDate(hd.startedAt) && hd.status !== 'imported' && hd.kind !== 'imported') {
       var elapsed = h('span', {class: 'v', 'data-elapsed': ''});
       v.elapsedNode = elapsed;
       chips.push(h('span', {class: 'chip'}, icon('clock'), h('span', {class: 'k', text: 'Elapsed'}), elapsed));
@@ -989,7 +1122,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   }
   function tickElapsed(v) {
     if (!v || !v.elapsedNode || !v.started) return;
-    var start = Date.parse(v.started), end = v.ended ? Date.parse(v.ended) : Date.now();
+    var start = Date.parse(v.started), end = v.running ? Date.now() : Date.parse(v.ended);
     if (isNaN(start) || isNaN(end)) { v.elapsedNode.textContent = 'Not recorded'; return; }
     v.elapsedNode.textContent = fmtDuration(end - start);
   }
@@ -1204,7 +1337,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     }, function (wrap, r) { fillReport(wrap.querySelector('details'), r); });
     reconcile(v.runs, d.runs, function (r) { return r.key; }, function (r) {
       var btn = h('button', {type: 'button', class: 'link-btn', 'data-run-key': r.key});
-      btn.addEventListener('click', function () { location.hash = '#/run/' + enc(r.key.split('/')[0]) + '/' + enc(r.key.split('/').slice(1).join('/')); });
+      btn.addEventListener('click', function () { go('#/run/' + enc(r.key.split('/')[0]) + '/' + enc(r.key.split('/').slice(1).join('/'))); });
       fillLinked(btn, r);
       return btn;
     }, function (btn, r) { fillLinked(btn, r); });
@@ -1261,15 +1394,16 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
       close.focus();
     }, function (error) { fill(panel, h('h2', {id: 'settings-heading'}, 'Settings'), h('p', {text: error.message}), closeButton()); });
   }
-  function closeSettings() {
+  function closeSettings(keepFocus) {
     $('settings-panel').hidden = true;
     $('settings-open').setAttribute('aria-expanded', 'false');
-    $('settings-open').focus();
+    if (keepFocus !== false) $('settings-open').focus();
   }
 
   // ---------- The key screen ----------
   function showKeyScreen(message) {
     S.view = null;
+    closeSettings(false);
     clearTimeout(S.timer);
     S.gen += 1;
     var input = h('input', {id: 'key-input', type: 'text', autocomplete: 'off', spellcheck: 'false', 'aria-describedby': 'key-help'});
