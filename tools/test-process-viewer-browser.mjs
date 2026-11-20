@@ -891,6 +891,58 @@ try {
     assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), viewer.key);
   });
 
+  await check('a key that reaches the address after the page has loaded (hash change, no reload) is taken, kept for the tab and cleared from the address at once, from the key screen, from a wrong-key state and while a view is shown; view addresses still route', async () => {
+    const takeKey = key => ev(`location.hash = ${json(`#key=${key}`)}; true`);
+    const connected = `document.querySelectorAll('nav [data-run-key]').length === 19 && !document.querySelector('[data-key-form]')`;
+    const stays = async label => {
+      assert.equal(await ev('window.__sameDocument'), 1, `${label}: the page was not loaded again`);
+      assert.equal(await ev('location.hash'), '', `${label}: the key is gone from the address`);
+      assert.ok(!(await ev('location.href')).includes(viewer.key), `${label}: no key in the address`);
+    };
+    // 1. From the key screen.
+    await ev(`sessionStorage.clear(); true`);
+    await browser.page('Page.navigate', {url: `${origin}/`});
+    await waitFor(`document.querySelector('[data-key-form] input') && document.querySelectorAll('nav [data-run-key]').length === 0`, {label: 'the key screen'});
+    await ev(`window.__sameDocument = 1; true`);
+    await takeKey(viewer.key);
+    await waitFor(connected, {label: 'the run list after the key in the address'});
+    await stays('from the key screen');
+    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), viewer.key, 'the key is kept for the tab');
+    // 2. From a wrong-key state: a wrong key in the address is refused, then the right one is taken.
+    await takeKey('0'.repeat(32));
+    await waitFor(`document.querySelector('[data-key-form]') && /refused/.test(document.getElementById('key-error').textContent)`, {label: 'the refusal of a wrong key from the address'});
+    await stays('after a wrong key');
+    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), null, 'the refused key is not kept');
+    await takeKey(viewer.key);
+    await waitFor(connected, {label: 'the run list after the right key'});
+    await stays('from a wrong-key state');
+    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), viewer.key);
+    // 3. While a run is shown: the key replaces the old one, the page loads its data again and may fall back to the start page.
+    await openRun('run-failed');
+    await ev(`window.__sameDocument = 1; true`);
+    await takeKey(viewer.key);
+    await waitFor(`!!document.querySelector('main .welcome') && ${connected}`, {label: 'the start page after the key, while a run was shown'});
+    await stays('while a run was shown');
+    
+    const before = await polls();
+    await waitPolls(1);
+    assert.ok((await polls()) > before, 'the page polls with the new key');
+    // 3b. While a dossier is shown, a wrong key replaces the right one and is refused.
+    await openDossier(1);
+    await takeKey('1'.repeat(32));
+    await waitFor(`document.querySelector('[data-key-form]') && /refused/.test(document.getElementById('key-error').textContent)`, {label: 'the refusal while a dossier was shown'});
+    await stays('while a dossier was shown');
+    await takeKey(viewer.key);
+    await waitFor(connected, {label: 'the run list again'});
+    // 4. A hash that is a view address still routes, and a key is never put into a URL the page builds.
+    await showView('run-analysis-done');
+    assert.equal(await ev('location.hash'), '#/run/proj-alpha/run-analysis-done');
+    await showView('dossier:2');
+    assert.equal(await ev('location.hash'), '#/dossier/2');
+    assert.ok(events.requests.every(r => !r.url.includes(viewer.key) && !r.url.includes('0'.repeat(32)) && !r.url.includes('1'.repeat(32))), 'no request carries a key in its address');
+    assert.deepEqual(events.requests.filter(r => new URL(r.url).origin !== origin && !r.url.startsWith('about:') && !r.url.startsWith('blob:')), []);
+  });
+
   // ----- Hostile text that the page's old patterns could not survive -----
   await check('text that made the old patterns run for seconds or hours is shown in full in well under a second: a heading followed by 50,000 spaces, 100 KB of "[a](", long runs of * _ and backticks (F1)', async () => {
     const reports = path.join(fx.data, 'projects', fx.pid, 'analyses');
@@ -964,7 +1016,7 @@ try {
     const isRefusal = e => /\(Unauthorized\)/.test(e) && /\/api\//.test(e);
     const isMade404 = e => /\(Not Found\)/.test(e) && /\/api\/runs\/proj-alpha\/run-failed/.test(e);
     const refusals = events.consoleErrors.filter(isRefusal);
-    assert.ok(refusals.length <= 3, `only the deliberate 401s (wrong key, restart, and requests in flight): ${json(refusals)}`);
+    assert.ok(refusals.length <= 6, `only the deliberate 401s (wrong keys, the restart, and requests in flight): ${json(refusals)}`);
     assert.ok(events.consoleErrors.filter(isMade404).length <= 1);
     const expected = e => /favicon\.ico/.test(e) || isRefusal(e) || isMade404(e);
     const real = events.consoleErrors.filter(e => !expected(e));

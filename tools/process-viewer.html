@@ -1584,7 +1584,18 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   $('settings-open').addEventListener('click', function () { if ($('settings-panel').hidden) openSettings(); else closeSettings(); });
   $('nav-toggle').addEventListener('click', function () { setNavState(!document.body.classList.contains('nav-open')); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('settings-panel').hidden) closeSettings(); });
-  window.addEventListener('hashchange', route);
+  /** The address can gain a key after the page has loaded (typed or pasted into this tab, or a link to it clicked): only the hash
+   * changes then and the page is not loaded again. Such a key is taken exactly as at load: kept for the tab, cleared from the address
+   * at once, and the page connects with it, whatever it showed before. Any other hash is a view address. */
+  function onHashChange() {
+    if (!/(^#|&)key=[0-9a-f]+/.test(location.hash)) { route(); return; }
+    clearTimeout(S.timer);
+    S.pollId = (S.pollId || 0) + 1;
+    S.gen += 1;
+    takeKeyFromAddress();
+    start();
+  }
+  window.addEventListener('hashchange', onHashChange);
 
   takeKeyFromAddress();
   setNavState(true);
