@@ -5,28 +5,1415 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Deep Proof Process Viewer</title>
 <style>
-body{font:14px/1.5 system-ui;margin:0;padding:24px;color:#26354b;background:#f4f6f9}
-main{max-width:46rem}
-code{background:#e6ebf2;padding:1px 4px;border-radius:3px}
+:root {
+  --bg: #f4f6f9; --surface: #ffffff; --text: #1f2937; --muted: #4b5563; --line: #dde3ec; --soft: #eef1f6;
+  --inputs: #1d5fa8; --inputs-tint: #edf4fc;
+  --process: #6d3fb5; --process-tint: #f4effb;
+  --results: #0f766e; --results-tint: #e9f6f3;
+  --ok: #166534; --ok-tint: #e6f4ea;
+  --bad: #b42318; --bad-tint: #fdecea;
+  --warn: #8a4a00; --warn-tint: #fff1dc;
+  --run: #1d4ed8; --run-tint: #e8efff;
+  --neutral: #475569; --neutral-tint: #eceff4;
+  --focus: #1d4ed8;
+  --radius: 14px;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow-wrap: anywhere;
+}
+button { font: inherit; color: inherit; cursor: pointer; }
+button:disabled { cursor: default; opacity: .6; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; border-radius: 6px; }
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; padding: 0; }
+.muted { color: var(--muted); }
+.icon { width: 1.25em; height: 1.25em; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.skip { position: absolute; left: 8px; top: -60px; z-index: 30; background: var(--surface); border: 2px solid var(--focus); border-radius: 8px; padding: 8px 14px; }
+.skip:focus { top: 8px; }
+
+/* Layout */
+.layout { display: grid; grid-template-columns: 330px minmax(0, 1fr); min-height: 100vh; }
+#side { position: sticky; top: 0; height: 100vh; overflow-y: auto; background: var(--surface); border-right: 1px solid var(--line); padding: 20px 16px 28px; }
+.side-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 18px; }
+.brand { display: flex; align-items: center; gap: 10px; margin: 0; font-weight: 700; font-size: 1.02rem; line-height: 1.25; }
+.brand .icon { width: 1.8em; height: 1.8em; color: var(--process); }
+.ghost { display: inline-flex; align-items: center; gap: 8px; background: transparent; border: 1px solid var(--line); border-radius: 10px; padding: 7px 12px; color: var(--muted); font-size: .9rem; }
+.ghost:hover { background: var(--soft); color: var(--text); }
+.narrow-only { display: none; }
+main { min-width: 0; padding: 36px clamp(16px, 4vw, 52px) 80px; max-width: 1120px; width: 100%; margin: 0 auto; }
+main:focus { outline: none; }
+.side-section { margin-bottom: 26px; }
+.side-section h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; font-size: 1.05rem; }
+.side-section h2 .icon { color: var(--muted); }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.filters button { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 4px 12px; font-size: .85rem; color: var(--muted); }
+.filters button[aria-pressed="true"] { background: var(--text); border-color: var(--text); color: #fff; }
+.group { margin-bottom: 14px; }
+.group h3 { margin: 6px 4px 6px; font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+.run-btn, .dossier-btn { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 12px; align-items: start; width: 100%; text-align: left; background: var(--surface); border: 1px solid transparent; border-radius: 12px; padding: 10px 12px; margin-bottom: 2px; }
+.run-btn:hover, .dossier-btn:hover { background: var(--soft); }
+.run-btn[aria-current="page"], .dossier-btn[aria-current="page"] { background: var(--soft); border-color: var(--line); box-shadow: inset 4px 0 0 var(--process); }
+.run-btn[hidden] { display: none; }
+.run-btn .st-icon { grid-row: 1 / span 3; margin-top: 2px; }
+.run-btn .st-icon .icon { width: 1.5em; height: 1.5em; }
+.run-btn .st-word { font-weight: 700; font-size: .92rem; line-height: 1.3; }
+.run-btn .st-word small { font-weight: 400; color: var(--muted); }
+.run-btn .run-title { display: flex; gap: 6px; align-items: baseline; font-size: .95rem; line-height: 1.35; }
+.run-btn .run-title .icon { width: 1em; height: 1em; color: var(--muted); align-self: center; }
+.run-btn .run-when { color: var(--muted); font-size: .82rem; }
+.dossier-btn .icon { width: 1.5em; height: 1.5em; color: var(--results); grid-row: 1 / span 2; }
+.dossier-btn .d-name { font-weight: 700; }
+.dossier-btn .d-meta { color: var(--muted); font-size: .85rem; }
+.empty-note { color: var(--muted); font-size: .92rem; margin: 6px 4px; }
+
+/* Tones, used for status and for steps */
+.tone-running { --tone: var(--run); --tone-tint: var(--run-tint); }
+.tone-ok { --tone: var(--ok); --tone-tint: var(--ok-tint); }
+.tone-bad { --tone: var(--bad); --tone-tint: var(--bad-tint); }
+.tone-warn { --tone: var(--warn); --tone-tint: var(--warn-tint); }
+.tone-neutral { --tone: var(--neutral); --tone-tint: var(--neutral-tint); }
+.st-icon, .st-word { color: var(--tone, var(--neutral)); }
+.st-running .st-icon .icon { animation: spin 1.3s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .st-running .st-icon .icon { animation: none; } * { scroll-behavior: auto !important; transition: none !important; } }
+
+/* Run header */
+.run-head { margin-bottom: 8px; }
+.run-head h1 { margin: 0 0 4px; font-size: clamp(1.5rem, 3.6vw, 2.1rem); line-height: 1.2; }
+.run-head .sub { margin: 0 0 16px; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 5px 12px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-size: .9rem; line-height: 1.35; }
+.chip .k { color: var(--muted); }
+.chip .v { font-weight: 600; }
+.chip .icon { color: var(--muted); }
+.chip.status { background: var(--tone-tint); border-color: transparent; color: var(--tone); font-weight: 700; font-size: .95rem; }
+.chip.status .icon { color: var(--tone); }
+.chip.status .sub { font-weight: 400; }
+.status-line { margin: 12px 0 0; color: var(--muted); }
+.callouts { display: grid; gap: 10px; margin: 16px 0 0; }
+.callout { display: flex; gap: 12px; align-items: flex-start; background: var(--soft); border-radius: 12px; padding: 12px 16px; }
+.callout .icon { margin-top: 3px; color: var(--neutral); }
+.callout.warn { background: var(--warn-tint); }
+.callout.warn .icon { color: var(--warn); }
+.callout p { margin: 0; }
+.callout ul { margin: 6px 0 0; padding-left: 1.2rem; }
+
+/* The three blocks */
+.block { --accent: var(--inputs); --tint: var(--inputs-tint); background: var(--surface); border: 1px solid var(--line); border-left: 8px solid var(--accent); border-radius: var(--radius); padding: 22px clamp(14px, 3vw, 28px) 26px; margin: 28px 0 0; }
+.block[data-block="process"], .block[data-block="linked"] { --accent: var(--process); --tint: var(--process-tint); }
+.block[data-block="results"], .block[data-block="reports"] { --accent: var(--results); --tint: var(--results-tint); }
+.block-head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.block-badge { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 14px; background: var(--tint); color: var(--accent); flex: none; }
+.block-badge .icon { width: 26px; height: 26px; }
+.block-head h2 { margin: 0; font-size: 1.4rem; line-height: 1.2; color: var(--accent); }
+.block-head p { margin: 2px 0 0; color: var(--muted); font-size: .92rem; }
+.block .empty { color: var(--muted); margin: 6px 0; }
+
+/* Cards */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 270px), 1fr)); gap: 12px; }
+.card { background: var(--tint); border: 1px solid transparent; border-radius: 12px; min-width: 0; }
+.card.static .card-head { cursor: default; }
+.stack { display: grid; gap: 14px; }
+.stack .card { background: var(--tint); }
+details.card[open] { grid-column: 1 / -1; background: var(--surface); border-color: var(--accent); }
+.card-head { display: flex; align-items: flex-start; gap: 12px; padding: 12px 16px; list-style: none; cursor: pointer; border-radius: 12px; }
+.card-head::-webkit-details-marker { display: none; }
+.card-head .kind-icon { color: var(--accent); margin-top: 2px; }
+.card-main { min-width: 0; flex: 1; }
+.card-title { font-weight: 650; line-height: 1.35; }
+.card-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 2px; color: var(--muted); font-size: .86rem; }
+.card-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.mini { display: inline-flex; gap: 4px; padding: 1px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-size: .8rem; color: var(--muted); }
+.mini b { color: var(--text); font-weight: 600; }
+.badge-draft { background: var(--warn-tint); color: var(--warn); border-color: transparent; font-weight: 600; }
+.chev { margin-left: auto; color: var(--muted); transition: transform .15s; margin-top: 3px; }
+details[open] > summary .chev { transform: rotate(90deg); }
+.body { border-top: 1px solid var(--line); padding: 16px clamp(12px, 2.5vw, 22px) 18px; min-width: 0; }
+.body[aria-busy="true"] { opacity: .75; }
+.body .more { margin-top: 10px; background: var(--soft); border: 1px solid var(--line); border-radius: 10px; padding: 6px 14px; }
+.body .note { color: var(--muted); font-size: .88rem; margin: 10px 0 0; }
+.body .callout { margin-bottom: 12px; }
+.groups { display: grid; gap: 24px; }
+.group-title { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 1rem; color: var(--text); }
+.group-title .count { color: var(--muted); font-weight: 400; }
+details.kept > summary { display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 650; padding: 8px 0; list-style: none; }
+details.kept > summary::-webkit-details-marker { display: none; }
+details.kept > p { margin: 4px 0 12px; color: var(--muted); font-size: .92rem; }
+.verdict { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; color: var(--tone); background: var(--tone-tint); padding: 2px 12px 2px 8px; border-radius: 999px; font-size: .88rem; }
+
+/* Process timeline */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+.toolbar .total { margin-left: auto; color: var(--muted); font-size: .9rem; }
+.toolbar button { background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 5px 14px; font-size: .88rem; color: var(--muted); }
+.toolbar button[aria-pressed="true"] { background: var(--process); border-color: var(--process); color: #fff; }
+.timeline { list-style: none; margin: 0; padding: 0; }
+.entry { position: relative; display: grid; grid-template-columns: 82px 34px minmax(0, 1fr); column-gap: 14px; padding-bottom: 14px; }
+.entry::before { content: ""; position: absolute; left: calc(82px + 14px + 16px); top: 34px; bottom: 0; width: 2px; background: var(--line); }
+.entry:last-child::before { display: none; }
+.entry-time { grid-column: 1; text-align: right; padding-top: 6px; font-size: .85rem; color: var(--muted); line-height: 1.3; font-variant-numeric: tabular-nums; }
+.entry-time .off { display: block; }
+.entry-dot { grid-column: 2; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--tone-tint); color: var(--tone); border: 2px solid var(--tone); }
+.entry-dot .icon { width: 18px; height: 18px; }
+.entry-main { grid-column: 3; min-width: 0; }
+.entry-details { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.entry-details[open] { border-color: var(--process); }
+.entry-head { display: block; padding: 8px 14px; border: 1px solid transparent; }
+summary.entry-head { display: flex; align-items: flex-start; gap: 10px; list-style: none; cursor: pointer; border-radius: 12px; }
+summary.entry-head::-webkit-details-marker { display: none; }
+.entry-text { min-width: 0; flex: 1; }
+.entry-title { font-weight: 650; line-height: 1.35; }
+.entry-summary { color: var(--muted); font-size: .92rem; line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+details[open] > summary .entry-summary { display: block; -webkit-line-clamp: unset; }
+.entry.tone-bad .entry-title { color: var(--bad); }
+.timeline[data-filter="messages"] .entry:not([data-group="messages"]),
+.timeline[data-filter="command"] .entry:not([data-group="command"]),
+.timeline[data-filter="host"] .entry:not([data-group="host"]),
+.timeline[data-filter="diag"] .entry:not([data-group="diag"]) { display: none; }
+
+/* Rendered text */
+.md { line-height: 1.65; min-width: 0; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 12px; }
+.md h3, .md h4, .md h5, .md h6 { margin: 22px 0 8px; line-height: 1.3; }
+.md h3 { font-size: 1.3rem; } .md h4 { font-size: 1.15rem; } .md h5 { font-size: 1.02rem; } .md h6 { font-size: .95rem; color: var(--muted); }
+.md ul, .md ol { margin: 0 0 12px; padding-left: 1.5rem; }
+.md li { margin: 4px 0; }
+.md li > p { margin: 0 0 6px; }
+.md blockquote { margin: 10px 0 14px; padding: 8px 16px; border-left: 4px solid var(--accent, #64748b); background: #f6f8fb; border-radius: 0 10px 10px 0; color: #1f2937; }
+.md blockquote > :last-child { margin-bottom: 0; }
+.md code { font: .88em ui-monospace, Menlo, Consolas, monospace; background: var(--soft); padding: 1px 5px; border-radius: 5px; }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
+.md .url { color: var(--muted); }
+.code-wrap, .table-wrap { overflow-x: auto; margin: 0 0 14px; max-width: 100%; }
+.md pre { margin: 0; padding: 12px 14px; background: #f6f8fb; border: 1px solid var(--line); border-radius: 10px; white-space: pre; font: .86rem/1.5 ui-monospace, Menlo, Consolas, monospace; }
+.md pre code { background: none; padding: 0; font: inherit; }
+.md table { border-collapse: collapse; min-width: 100%; font-size: .92rem; }
+.md th, .md td { text-align: left; vertical-align: top; padding: 8px 12px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; min-width: 7rem; }
+.md th { background: var(--soft); font-weight: 650; position: sticky; top: 0; }
+pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88rem/1.55 ui-monospace, Menlo, Consolas, monospace; background: #f6f8fb; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; max-height: 34rem; overflow: auto; }
+
+/* Dossier page */
+.warning { display: flex; gap: 12px; background: var(--warn-tint); border-radius: 12px; padding: 14px 18px; margin: 18px 0 0; color: #3d2400; }
+.warning .icon { color: var(--warn); margin-top: 3px; }
+.warning p { margin: 0; }
+.dl-btn { display: inline-flex; align-items: center; gap: 8px; margin-top: 10px; background: var(--results); color: #fff; border: 0; border-radius: 10px; padding: 8px 16px; font-weight: 600; }
+.dl-btn:hover { background: #0b5e57; }
+.report-block { display: grid; gap: 4px; justify-items: start; }
+.report-block > details { width: 100%; }
+.link-list { display: grid; gap: 8px; }
+.link-btn { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; text-align: left; background: var(--results-tint); border: 1px solid transparent; border-radius: 12px; padding: 10px 14px; }
+.link-btn:hover { border-color: var(--results); }
+.link-btn .match { color: var(--muted); font-size: .88rem; }
+
+/* Welcome, key, settings, alerts */
+.welcome h1 { margin: 0 0 8px; font-size: clamp(1.6rem, 4vw, 2.3rem); }
+.legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 14px; margin: 26px 0; }
+.legend > div { background: var(--surface); border: 1px solid var(--line); border-left: 8px solid var(--accent); border-radius: var(--radius); padding: 16px 18px; }
+.legend .l-inputs { --accent: var(--inputs); } .legend .l-process { --accent: var(--process); } .legend .l-results { --accent: var(--results); }
+.legend h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; font-size: 1.15rem; color: var(--accent); }
+.legend p { margin: 0; color: var(--muted); }
+.key-box { max-width: 34rem; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; }
+.key-box h1 { margin: 0 0 8px; font-size: 1.5rem; }
+.key-box label { display: block; font-weight: 600; margin: 16px 0 6px; }
+.key-box input { width: 100%; font: 1rem ui-monospace, Menlo, Consolas, monospace; padding: 10px 12px; border: 1px solid #94a3b8; border-radius: 10px; }
+.key-box .go { margin-top: 14px; background: var(--process); color: #fff; border: 0; border-radius: 10px; padding: 9px 20px; font-weight: 600; }
+.key-error { color: var(--bad); margin: 10px 0 0; font-weight: 600; }
+#settings-panel { position: fixed; z-index: 20; top: 16px; right: 16px; width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(15, 23, 42, .22); padding: 20px 22px; }
+#settings-panel[hidden] { display: none; }
+#settings-panel h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; font-size: 1.2rem; }
+#settings-panel dl { margin: 0; }
+#settings-panel dt { font-weight: 650; margin-top: 12px; }
+#settings-panel dd { margin: 2px 0 0; color: var(--muted); }
+#settings-panel pre { margin: 6px 0 0; padding: 10px 12px; background: #f6f8fb; border: 1px solid var(--line); border-radius: 10px; font: .82rem/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+#settings-panel .close { float: right; }
+#alert { position: fixed; z-index: 25; left: 50%; bottom: 18px; transform: translateX(-50%); max-width: calc(100vw - 32px); background: #1f2937; color: #fff; padding: 10px 18px; border-radius: 12px; box-shadow: 0 8px 24px rgba(15, 23, 42, .3); }
+#alert[hidden] { display: none; }
+
+/* Narrow screens */
+@media (max-width: 860px) {
+  .layout { display: block; }
+  #side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px 14px 16px; }
+  .side-top { margin-bottom: 0; }
+  .narrow-only { display: inline-flex; }
+  .side-top .ghost-settings .label { display: none; }
+  body.view-open:not(.nav-open) #side-body { display: none; }
+  body:not(.view-open) .narrow-only { display: none; }
+  #side-body { margin-top: 16px; }
+  main { padding: 22px 14px 64px; }
+  .block { padding: 18px 12px 20px; border-left-width: 6px; }
+  .block-head { gap: 10px; }
+  .block-badge { width: 40px; height: 40px; }
+  .entry { grid-template-columns: 34px minmax(0, 1fr); grid-template-areas: "dot time" "dot main"; column-gap: 12px; }
+  .entry::before { left: 16px; }
+  .entry-time { grid-area: time; text-align: left; padding-top: 0; margin-bottom: 4px; }
+  .entry-time .off { display: inline; margin-left: 8px; }
+  .entry-dot { grid-area: dot; }
+  .entry-main { grid-area: main; }
+  .cards { grid-template-columns: minmax(0, 1fr); }
+  .legend { margin: 18px 0; }
+  .md th, .md td { min-width: 6rem; padding: 6px 8px; }
+  #settings-panel { top: 8px; right: 8px; width: calc(100vw - 16px); }
+}
 </style>
 </head>
 <body>
-<main>
-<h1>Deep Proof Process Viewer</h1>
-<p id="note">This is a placeholder page. The viewer's server is running; the page that shows runs, steps and results replaces this file.</p>
-<p id="key-state"></p>
-</main>
+<svg class="sprite" width="0" height="0" aria-hidden="true" focusable="false">
+<symbol id="i-brand" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
+<symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+<symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+<symbol id="i-running" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"/></symbol>
+<symbol id="i-done" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8 5.2-5.6"/></symbol>
+<symbol id="i-limit" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/></symbol>
+<symbol id="i-failed" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></symbol>
+<symbol id="i-broken" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" stroke-dasharray="11.31 2.83"/></symbol>
+<symbol id="i-unknown" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.6 2.2c-.8.5-1.2 1-1.2 1.9"/><path d="M12 16.7v.1"/></symbol>
+<symbol id="i-import" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M12 11v6M9.4 14.6L12 17.2l2.6-2.6"/></symbol>
+<symbol id="i-doc" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M9.5 12h5M9.5 15.5h5"/></symbol>
+<symbol id="i-analysis" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.5 5.5"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><rect x="5.5" y="4.5" width="13" height="16.5" rx="2"/><path d="M9 4.5V3.5h6v1"/><path d="M9 13.2l2.2 2.2 3.9-4"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5z"/><path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3"/><path d="M9 7.5h6"/></symbol>
+<symbol id="i-inputs" viewBox="0 0 24 24"><path d="M12 3v10M8 9.5l4 4 4-4"/><path d="M4 14v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"/></symbol>
+<symbol id="i-process" viewBox="0 0 24 24"><circle cx="6" cy="5" r="1.8"/><circle cx="6" cy="12" r="1.8"/><circle cx="6" cy="19" r="1.8"/><path d="M6 6.8v3.4M6 13.8v3.4M11 5h9M11 12h9M11 19h9"/></symbol>
+<symbol id="i-results" viewBox="0 0 24 24"><path d="M5 21V4"/><path d="M5 4h12l-2.2 4 2.2 4H5"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3L10 14"/><path d="M21 3l-7 18-4-7-7-4z"/></symbol>
+<symbol id="i-repair" viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 15"/><path d="M4 20v-5h5"/></symbol>
+<symbol id="i-chat" viewBox="0 0 24 24"><path d="M5 4h14a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-4 4v-4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"/></symbol>
+<symbol id="i-note" viewBox="0 0 24 24"><path d="M5 4h14v12l-4 4H5z"/><path d="M15 20v-4h4"/><path d="M8 9h8M8 12.5h5"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 21h4"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><rect x="9" y="9" width="6" height="6" rx="1"/></symbol>
+<symbol id="i-shield-ok" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6z"/><path d="M8.6 12.2l2.4 2.4 4.4-4.6"/></symbol>
+<symbol id="i-shield-x" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.2 7.8-8 9-4.8-1.2-8-4.5-8-9V6z"/><path d="M9.6 9.6l4.8 4.8M14.4 9.6l-4.8 4.8"/></symbol>
+<symbol id="i-forward" viewBox="0 0 24 24"><path d="M5 12h13M13 6.5l5.5 5.5-5.5 5.5"/></symbol>
+<symbol id="i-box" viewBox="0 0 24 24"><path d="M4 8l8-4 8 4v9l-8 4-8-4z"/><path d="M4 8l8 4 8-4M12 12v9"/></symbol>
+<symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7.5 8.5L12 4l4.5 4.5"/><path d="M5 20h14"/></symbol>
+<symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+<symbol id="i-start" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 8.5l5 3.5-5 3.5z"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a1 1 0 0 1 1-1h5l2 2h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></symbol>
+<symbol id="i-bot" viewBox="0 0 24 24"><rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 8V5"/><path d="M9.5 13v.1M14.5 13v.1"/><path d="M9.5 16.2h5"/></symbol>
+<symbol id="i-hand" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v6"/><path d="M12 16.6v.1"/></symbol>
+<symbol id="i-dots" viewBox="0 0 24 24"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="3.4"/></symbol>
+<symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2z"/></symbol>
+<symbol id="i-options" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><path d="M15 5v4M9 15v4"/></symbol>
+<symbol id="i-rules" viewBox="0 0 24 24"><path d="M10 6h10M10 12h10M10 18h10"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></symbol>
+<symbol id="i-layout" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16M9 9v11"/></symbol>
+<symbol id="i-table" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M3 15h18M9 5v14"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5L21.5 20h-19z"/><path d="M12 10v4.5"/><path d="M12 17.4v.1"/></symbol>
+<symbol id="i-flag" viewBox="0 0 24 24"><path d="M6 21V4"/><path d="M6 5h11l-2 3.5L17 12H6"/></symbol>
+<symbol id="i-narrow" viewBox="0 0 24 24"><path d="M4 5h16l-6 7v6l-4 2v-8z"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7.6v.1"/></symbol>
+<symbol id="i-reject" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></symbol>
+<symbol id="i-outside" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" stroke-dasharray="3 3"/><path d="M9 12h6"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 11L12 15.5l4.5-4.5"/><path d="M5 20h14"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/></symbol>
+<symbol id="i-cpu" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M9.5 3v4M14.5 3v4M9.5 17v4M14.5 17v4M3 9.5h4M3 14.5h4M17 9.5h4M17 14.5h4"/></symbol>
+<symbol id="i-record" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.4"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3A4 4 0 0 0 11 18.7l1-1"/></symbol>
+</svg>
+<button class="skip" id="skip" type="button">Skip to the main content</button>
+<div class="layout">
+<nav id="side" aria-label="Runs and dossiers">
+  <div class="side-top">
+    <p class="brand"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><use href="#i-brand"/></svg><span>Deep Proof<br>Process Viewer</span></p>
+    <button class="ghost ghost-settings" id="settings-open" type="button" aria-label="Settings" aria-controls="settings-panel" aria-expanded="false"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><use href="#i-gear"/></svg><span class="label">Settings</span></button>
+    <button class="ghost narrow-only" id="nav-toggle" type="button" aria-controls="side-body" aria-expanded="true"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><use href="#i-menu"/></svg><span>Runs and dossiers</span></button>
+  </div>
+  <div id="side-body">
+    <section class="side-section" data-list="runs" aria-labelledby="runs-heading">
+      <h2 id="runs-heading"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><use href="#i-process"/></svg>Deep Proof Runs</h2>
+      <div class="filters" id="run-filters" role="group" aria-label="Show runs"></div>
+      <div id="runs-list"></div>
+    </section>
+    <section class="side-section" data-list="dossiers" aria-labelledby="dossiers-heading">
+      <h2 id="dossiers-heading"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><use href="#i-book"/></svg>Benchmark Dossiers</h2>
+      <div id="dossier-list"></div>
+    </section>
+  </div>
+</nav>
+<main id="main" tabindex="-1"></main>
+</div>
+<div id="settings-panel" role="region" aria-labelledby="settings-heading" hidden></div>
+<div id="live" class="sr-only" aria-live="polite"></div>
+<div id="alert" role="alert" hidden></div>
 <script>
-// Placeholder: takes the access key from the address into sessionStorage and clears it from the address. No data.
 (function () {
-  var match = /[#&]key=([0-9a-f]+)/.exec(location.hash);
-  if (match) {
-    try { sessionStorage.setItem('viewer-key', match[1]); } catch (e) { /* storage may be blocked */ }
-    history.replaceState(null, '', location.pathname + location.search);
+  'use strict';
+
+  // ---------- Small helpers ----------
+  var SVGNS = 'http://www.w3.org/2000/svg';
+  var $ = function (id) { return document.getElementById(id); };
+  var main = $('main');
+  var KNOWN = new Set(Array.prototype.map.call(document.querySelectorAll('symbol'), function (s) { return s.id.slice(2); }));
+
+  /** Every text that comes from a file, a trace or an answer goes through this before it is joined into HTML. */
+  function esc(value) {
+    return String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g, function (c) {
+      return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+    });
   }
-  var stored = null;
-  try { stored = sessionStorage.getItem('viewer-key'); } catch (e) { stored = null; }
-  document.getElementById('key-state').textContent = stored ? 'An access key is held for this tab.' : 'No access key: open the address the viewer printed in its terminal.';
+
+  /** Builds an element. Text is always set as text, attributes through setAttribute. */
+  function h(tag, attrs) {
+    var el = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) {
+        var v = attrs[k];
+        if (v === null || v === undefined || v === false) return;
+        if (k === 'class') el.className = v;
+        else if (k === 'text') el.textContent = v;
+        else el.setAttribute(k, v === true ? '' : String(v));
+      });
+    }
+    for (var i = 2; i < arguments.length; i++) append(el, arguments[i]);
+    return el;
+  }
+  function append(el, kid) {
+    if (kid === null || kid === undefined || kid === false) return;
+    if (Array.isArray(kid)) { kid.forEach(function (k) { append(el, k); }); return; }
+    el.appendChild(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  /** Empties an element and fills it with new children (null and false are skipped, arrays are flattened). */
+  function fill(el) {
+    el.textContent = '';
+    for (var i = 1; i < arguments.length; i++) append(el, arguments[i]);
+  }
+  function icon(name, extra) {
+    var svg = document.createElementNS(SVGNS, 'svg');
+    svg.setAttribute('class', 'icon' + (extra ? ' ' + extra : ''));
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    var use = document.createElementNS(SVGNS, 'use');
+    use.setAttribute('href', '#i-' + (KNOWN.has(name) ? name : 'dots'));
+    svg.appendChild(use);
+    return svg;
+  }
+  function enc(v) { return encodeURIComponent(v); }
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+  function sig(v) { return JSON.stringify(v); }
+  function fmtBytes(n) {
+    if (typeof n !== 'number') return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+  }
+  function fmtDuration(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return s + ' s';
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + ' min ' + pad(s % 60) + ' s';
+    return Math.floor(m / 60) + ' h ' + pad(m % 60) + ' min';
+  }
+  function fmtOffset(ms) {
+    var s = Math.max(0, Math.round(ms / 1000)), m = Math.floor(s / 60);
+    return '+' + (m >= 60 ? Math.floor(m / 60) + ':' + pad(m % 60) : m) + ':' + pad(s % 60);
+  }
+  function fmtClock(iso) {
+    var d = new Date(iso);
+    return isNaN(d) ? '' : pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+  function fmtStamp(iso) {
+    var d = new Date(iso);
+    if (isNaN(d)) return '';
+    var now = new Date();
+    var time = pad(d.getHours()) + ':' + pad(d.getMinutes());
+    if (d.toDateString() === now.toDateString()) return 'Today, ' + time;
+    return d.toLocaleDateString([], {day: 'numeric', month: 'short'}) + ', ' + time;
+  }
+  function pretty(id) {
+    var t = String(id || '').replace(/[-_]+/g, ' ').trim();
+    return t ? t.charAt(0).toUpperCase() + t.slice(1) : '';
+  }
+
+  // ---------- Vocabulary: status, kind, steps, verdicts (looked up in tables, never built from answers) ----------
+  var STATUS = {
+    running: {icon: 'running', tone: 'running', word: 'Running'},
+    completed: {icon: 'done', tone: 'ok', word: 'Completed'},
+    'time-limit': {icon: 'limit', tone: 'warn', word: 'Time Limit Reached'},
+    failed: {icon: 'failed', tone: 'bad', word: 'Failed'},
+    interrupted: {icon: 'broken', tone: 'neutral', word: 'Interrupted'},
+    'not-recorded': {icon: 'unknown', tone: 'neutral', word: 'Not Recorded'},
+    imported: {icon: 'import', tone: 'neutral', word: 'Imported Report'}
+  };
+  var UNKNOWN_STATUS = STATUS['not-recorded'];
+  var KIND = {
+    analysis: {icon: 'analysis', word: 'Analysis'},
+    quality: {icon: 'check', word: 'Check Report'},
+    imported: {icon: 'import', word: 'Imported Report'},
+    unknown: {icon: 'unknown', word: 'Unknown Kind'}
+  };
+  var FILTERS = [
+    ['all', 'All', null],
+    ['running', 'Running', ['running']],
+    ['finished', 'Finished', ['completed', 'time-limit', 'imported']],
+    ['problems', 'Problems', ['failed', 'interrupted', 'time-limit']]
+  ];
+  var STEP = {
+    'run-started': ['start', 'host', 'neutral'], workspace: ['folder', 'host', 'neutral'],
+    'prompt-sent': ['send', 'messages', 'neutral'], 'repair-prompt': ['repair', 'messages', 'warn'],
+    'agent-selected': ['bot', 'host', 'neutral'], 'agent-message': ['chat', 'messages', 'neutral'],
+    'command-output': ['terminal', 'command', 'neutral'], 'final-message': ['chat', 'messages', 'ok'],
+    'agent-request': ['hand', 'host', 'warn'], 'progress-note': ['note', 'messages', 'neutral'],
+    reminder: ['bell', 'host', 'neutral'], 'turn-ended': ['stop', 'host', 'neutral'],
+    'validation-passed': ['shield-ok', 'host', 'ok'], 'validation-failed': ['shield-x', 'host', 'bad'],
+    continuation: ['forward', 'host', 'warn'], 'time-limit': ['limit', 'host', 'warn'],
+    'wrap-up': ['box', 'host', 'warn'], published: ['upload', 'host', 'ok'], diagnostic: ['pulse', 'diag', 'warn'],
+    'trace-limit': ['pulse', 'diag', 'warn'], 'run-ended': ['done', 'host', 'ok'], other: ['dots', 'host', 'neutral']
+  };
+  var INPUT_ICON = {'report-under-review': 'import', document: 'doc', skill: 'spark', options: 'options', criteria: 'rules', playbook: 'rules', template: 'layout'};
+  var RESULT_ICON = {report: 'doc', register: 'table', progress: 'note', transcript: 'chat', 'kept-file': 'doc'};
+  var VERDICT = {
+    confirmed: {icon: 'flag', tone: 'bad'}, narrowed: {icon: 'narrow', tone: 'warn'}, clarification: {icon: 'info', tone: 'running'},
+    rejected: {icon: 'reject', tone: 'neutral'}, 'out-of-scope': {icon: 'outside', tone: 'neutral'}, out_of_scope: {icon: 'outside', tone: 'neutral'}
+  };
+  var UNKNOWN_VERDICT = {icon: 'info', tone: 'neutral'};
+  var DOSSIER_MATCH = {full: 'All documents match', partial: 'Some documents match', report: 'The report matches'};
+  var RESULT_GROUPS = [
+    ['report', 'Report', 'doc'], ['finding', 'Findings', 'flag'], ['register', 'Registers and Checks', 'table'],
+    ['notes', 'Notes and Transcript', 'note'], ['kept', 'Kept Work Folder Files', 'folder']
+  ];
+  var GROUP_OF = {report: 'report', finding: 'finding', register: 'register', progress: 'notes', transcript: 'notes', 'kept-file': 'kept'};
+
+  function statusOf(code) { return STATUS[code] || UNKNOWN_STATUS; }
+  function keptTitle(name) {
+    var m;
+    if ((m = /^task-([A-Za-z0-9]+)\.txt$/.exec(name))) return m[1] === 'wrapup' ? 'Prompt (wrap-up)' : 'Prompt (attempt ' + m[1] + ')';
+    if ((m = /^response-([A-Za-z0-9]+)\.txt$/.exec(name))) return m[1] === 'wrapup' ? 'Response (wrap-up)' : 'Response (attempt ' + m[1] + ')';
+    if (name === 'progress.md') return 'Progress notes';
+    if (name === 'report.md') return 'Draft report';
+    return name;
+  }
+
+  // ---------- State ----------
+  var S = {
+    key: null, status: null, pollMs: 3000, runs: [], runsSig: '', dossiers: [], dossiersSig: '', filter: 'all',
+    view: null, gen: 0, polls: 0, timer: null, queue: Promise.resolve(), known: {}, firstRuns: true
+  };
+
+  // ---------- The access key ----------
+  function keepKey(value) {
+    S.key = value;
+    try { sessionStorage.setItem('viewer-key', value); } catch (e) { /* storage may be blocked: the key stays in memory */ }
+  }
+  function dropKey() {
+    S.key = null;
+    try { sessionStorage.removeItem('viewer-key'); } catch (e) { /* nothing stored */ }
+  }
+  function takeKeyFromAddress() {
+    var m = /(^#|&)key=([0-9a-f]+)/.exec(location.hash);
+    if (m) {
+      keepKey(m[2]);
+      var rest = location.hash.replace(/(^#|&)key=[0-9a-f]+/, function (all, lead) { return lead === '&' ? '' : '#'; });
+      if (rest === '#' || rest === '#&') rest = '';
+      history.replaceState(null, '', location.pathname + location.search + rest);
+    } else {
+      try { S.key = sessionStorage.getItem('viewer-key') || null; } catch (e) { S.key = null; }
+    }
+  }
+
+  // ---------- Talking to the viewer (GET only) ----------
+  function ApiError(status, message) { this.status = status; this.message = message; }
+  function api(path) {
+    if (!S.key) return Promise.reject(new ApiError(401, 'No access key.'));
+    return fetch(path, {method: 'GET', headers: {'X-Viewer-Key': S.key}, cache: 'no-store'}).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        if (res.status === 401) { onKeyRefused(); throw new ApiError(401, body.error || 'The access key was refused.'); }
+        if (!res.ok) throw new ApiError(res.status, body.error || 'The viewer could not answer this request.');
+        return body;
+      });
+    }, function () { throw new ApiError(0, 'The viewer cannot be reached. Trying again.'); });
+  }
+  function showAlert(text) {
+    var a = $('alert');
+    if (text) { a.textContent = text; a.hidden = false; } else { a.hidden = true; a.textContent = ''; }
+  }
+
+  // ---------- Keeping a list in step with its data without rebuilding it ----------
+  function reconcile(parent, items, keyOf, make, patch) {
+    var nodes = parent._nodes || (parent._nodes = new Map());
+    var seen = new Set(), prev = null;
+    items.forEach(function (item) {
+      var k = keyOf(item);
+      seen.add(k);
+      var node = nodes.get(k);
+      if (!node) { node = make(item); nodes.set(k, node); } else patch(node, item);
+      var want = prev ? prev.nextSibling : parent.firstChild;
+      if (node !== want) parent.insertBefore(node, want);
+      prev = node;
+    });
+    nodes.forEach(function (node, k) { if (!seen.has(k)) { node.remove(); nodes.delete(k); } });
+  }
+
+  // ---------- Text: a small Markdown renderer (every text escaped; links shown as text) ----------
+  function inlineMd(text) {
+    var re = /(`+)([\s\S]*?)\1|!?\[([^\]\n]*)\]\(([^)\s]*)(?:\s+"[^"]*")?\)|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\s][^*\n]*?)\*|\b_([^_\n]+)_\b/g;
+    var out = '', at = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      out += esc(text.slice(at, m.index));
+      at = m.index + m[0].length;
+      if (m[1]) out += '<code>' + esc(m[2]) + '</code>';
+      else if (m[4] !== undefined) {
+        var label = m[3] || m[4];
+        out += esc(label);
+        if (m[3] && /^([a-z][a-z0-9+.\-]*:|\/\/)/i.test(m[4])) out += ' <span class="url">(' + esc(m[4]) + ')</span>';
+      } else if (m[5] || m[6]) out += '<strong>' + inlineMd(m[5] || m[6]) + '</strong>';
+      else out += '<em>' + inlineMd(m[7] || m[8]) + '</em>';
+    }
+    return (out + esc(text.slice(at))).replace(/ {2,}\n/g, '<br>');
+  }
+  var LIST_LINE = /^(\s*)([-+*]|\d{1,9}[.)])\s+(.*)$/;
+  var RULE_LINE = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
+  function isBlank(line) { return !line.trim(); }
+  function leading(line) { return line.length - line.replace(/^\s+/, '').length; }
+  function isDivider(line) { return typeof line === 'string' && line.indexOf('|') >= 0 && /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(line); }
+  function splitRow(line) {
+    return line.trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map(function (c) { return c.trim().replace(/\\\|/g, '|'); });
+  }
+  function startsBlock(line, next) {
+    return /^\s*(`{3,}|~{3,})/.test(line) || /^\s{0,3}#{1,6}\s/.test(line) || /^\s*>/.test(line) || RULE_LINE.test(line) || LIST_LINE.test(line) || (line.indexOf('|') >= 0 && isDivider(next));
+  }
+  function mdBlocks(src, tight) {
+    var lines = src.replace(/\r\n?/g, '\n').split('\n'), i = 0, out = '', m;
+    while (i < lines.length) {
+      var line = lines[i];
+      if (isBlank(line)) { i++; continue; }
+      if ((m = /^\s*(`{3,}|~{3,})/.exec(line))) {
+        var fence = m[1], chunk = [];
+        i++;
+        while (i < lines.length && !(lines[i].trim().indexOf(fence) === 0 && /^[`~]+$/.test(lines[i].trim()))) chunk.push(lines[i++]);
+        i++;
+        out += '<div class="code-wrap"><pre><code>' + esc(chunk.join('\n')) + '</code></pre></div>';
+      } else if ((m = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line))) {
+        var level = Math.min(6, m[1].length + 2);
+        out += '<h' + level + '>' + inlineMd(m[2]) + '</h' + level + '>';
+        i++;
+      } else if (RULE_LINE.test(line)) {
+        out += '<hr>';
+        i++;
+      } else if (/^\s*>/.test(line)) {
+        var quote = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) quote.push(lines[i++].replace(/^\s*> ?/, ''));
+        out += '<blockquote>' + mdBlocks(quote.join('\n')) + '</blockquote>';
+      } else if (line.indexOf('|') >= 0 && isDivider(lines[i + 1])) {
+        var head = splitRow(line);
+        i += 2;
+        out += '<div class="table-wrap"><table><thead><tr>' + head.map(function (c) { return '<th>' + inlineMd(c) + '</th>'; }).join('') + '</tr></thead><tbody>';
+        while (i < lines.length && !isBlank(lines[i]) && lines[i].indexOf('|') >= 0) {
+          out += '<tr>' + splitRow(lines[i++]).map(function (c) { return '<td>' + (c === 'Not recorded' ? '<span class="muted">Not recorded</span>' : inlineMd(c)) + '</td>'; }).join('') + '</tr>';
+        }
+        out += '</tbody></table></div>';
+      } else if ((m = LIST_LINE.exec(line))) {
+        var indent = m[1].length, ordered = /\d/.test(m[2]), start = ordered ? parseInt(m[2], 10) : 1, items = [];
+        while (i < lines.length) {
+          var item = LIST_LINE.exec(lines[i]);
+          if (!item || item[1].length !== indent || /\d/.test(item[2]) !== ordered) break;
+          var body = [item[3]];
+          i++;
+          while (i < lines.length) {
+            var next = lines[i];
+            if (isBlank(next)) {
+              var j = i;
+              while (j < lines.length && isBlank(lines[j])) j++;
+              if (j < lines.length && leading(lines[j]) > indent) { for (var k = i; k < j; k++) body.push(''); i = j; continue; }
+              break;
+            }
+            if (leading(next) > indent) { body.push(next.slice(Math.min(leading(next), indent + 2))); i++; continue; }
+            break;
+          }
+          items.push(body);
+          var peek = i;
+          while (peek < lines.length && isBlank(lines[peek])) peek++;
+          if (peek > i && peek < lines.length) {
+            var more = LIST_LINE.exec(lines[peek]);
+            if (more && more[1].length === indent && /\d/.test(more[2]) === ordered) i = peek;
+          }
+        }
+        var tag = ordered ? 'ol' : 'ul';
+        out += '<' + tag + (ordered && start !== 1 ? ' start="' + start + '"' : '') + '>' + items.map(function (body) {
+          return '<li>' + mdBlocks(body.join('\n'), !body.some(isBlank)) + '</li>';
+        }).join('') + '</' + tag + '>';
+      } else {
+        var para = [line];
+        i++;
+        while (i < lines.length && !isBlank(lines[i]) && !startsBlock(lines[i], lines[i + 1])) para.push(lines[i++]);
+        out += tight ? inlineMd(para.join('\n')) : '<p>' + inlineMd(para.join('\n')) + '</p>';
+      }
+    }
+    return out;
+  }
+
+  // ---------- Documents that open in place ----------
+  function withPart(url, part) { return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'part=' + part; }
+
+  function renderDocument(box, first, text) {
+    var key = first.format + '\u0000' + text + '\u0000' + (first.notice || '') + '\u0000' + (first.note || '') + '\u0000' + box._loaded + '/' + first.parts;
+    if (box._sig === key) return;
+    box._sig = key;
+    var kids = [];
+    if (first.notice) kids.push(h('div', {class: 'callout warn'}, icon('info'), h('p', {text: first.notice})));
+    if (!text) kids.push(h('p', {class: 'muted', text: 'This document is empty.'}));
+    else if (first.format === 'markdown') {
+      var md = h('div', {class: 'md'});
+      md.innerHTML = mdBlocks(text);
+      kids.push(md);
+    } else kids.push(h('pre', {class: 'plain', text: text}));
+    if (first.note) kids.push(h('p', {class: 'note', text: first.note}));
+    if (box._loaded < first.parts) {
+      var more = h('button', {type: 'button', class: 'more', text: 'Show the next part (' + (box._loaded + 1) + ' of ' + first.parts + ')'});
+      more.addEventListener('click', function () { box._loaded += 1; box._sig = null; loadBody(box.parentNode, true); });
+      kids.push(more);
+    }
+    fill(box, kids);
+  }
+
+  function loadBody(details, refresh) {
+    var box = details.querySelector(':scope > .body'), src = details._src;
+    if (!box || !src) return;
+    var token = box._token = (box._token || 0) + 1;
+    box._loaded = box._loaded || 1;
+    if (!refresh || !box._sig) {
+      box.setAttribute('aria-busy', 'true');
+      if (!box.firstChild) box.append(h('p', {class: 'muted', text: 'Loading…'}));
+    }
+    var texts = [], first = null;
+    function step(k) {
+      return api(withPart(src.url, k)).then(function (answer) {
+        if (token !== box._token) return null;
+        if (k === 0) first = answer;
+        texts.push(answer.text);
+        if (k + 1 < box._loaded && k + 1 < answer.parts) return step(k + 1);
+        return answer;
+      });
+    }
+    step(0).then(function (last) {
+      if (!last || token !== box._token) return;
+      box.removeAttribute('aria-busy');
+      box._loaded = Math.min(box._loaded, first.parts);
+      renderDocument(box, first, texts.join(''));
+    }, function (error) {
+      if (token !== box._token) return;
+      box.removeAttribute('aria-busy');
+      box._sig = null;
+      fill(box, h('p', {class: 'muted', text: error.message || 'This document could not be read.'}));
+    });
+  }
+  document.addEventListener('toggle', function (event) {
+    var d = event.target;
+    if (d && d.tagName === 'DETAILS' && d._src && d.open) loadBody(d, Boolean(d.querySelector(':scope > .body')._sig));
+  }, true);
+
+  function refreshOpenBodies(live) {
+    Array.prototype.forEach.call(main.querySelectorAll('details'), function (d) {
+      if (!d._src || !d.open) return;
+      if (live || d._dirty) { d._dirty = false; loadBody(d, true); }
+    });
+  }
+
+  // ---------- Left bar ----------
+  function runPasses(run) {
+    var f = FILTERS.filter(function (x) { return x[0] === S.filter; })[0];
+    return !f || !f[2] || f[2].indexOf(run.status) >= 0;
+  }
+  function statusMark(st, code) {
+    return h('span', {class: 'st-icon'}, icon(st.icon));
+  }
+  function fillRunButton(btn, run) {
+    var st = statusOf(run.status), kind = KIND[run.kind] || KIND.unknown;
+    btn.className = 'run-btn tone-' + st.tone + ' st-' + run.status.replace(/[^a-z-]/g, '');
+    btn.setAttribute('data-run-key', run.key);
+    btn.setAttribute('data-status', run.status);
+    btn.setAttribute('data-kind', run.kind);
+    fill(btn, 
+      statusMark(st),
+      h('span', {class: 'st-word', text: run.statusLabel || st.word}),
+      h('span', {class: 'run-title'}, icon(kind.icon), h('span', {text: run.title || run.key})),
+      h('span', {class: 'run-when', text: fmtStamp(run.startedAt) + (run.statusSource === 'inferred' && run.status !== 'imported' ? ' · status inferred from files' : '')})
+    );
+    btn._run = run;
+  }
+  function renderFilters() {
+    var box = $('run-filters');
+    reconcile(box, FILTERS, function (f) { return f[0]; }, function (f) {
+      var b = h('button', {type: 'button', 'data-filter': f[0]});
+      b.addEventListener('click', function () { S.filter = f[0]; renderRuns(); });
+      return b;
+    }, function () {});
+    FILTERS.forEach(function (f) {
+      var b = box._nodes.get(f[0]);
+      var count = S.runs.filter(function (r) { return !f[2] || f[2].indexOf(r.status) >= 0; }).length;
+      b.textContent = f[1] + ' (' + count + ')';
+      b.setAttribute('aria-pressed', String(S.filter === f[0]));
+    });
+  }
+  function renderRuns() {
+    renderFilters();
+    var list = $('runs-list'), groups = [], byName = {};
+    S.runs.forEach(function (run) {
+      var name = run.projectName || 'Project';
+      if (!byName.hasOwnProperty(name)) { byName[name] = {name: name, runs: []}; groups.push(byName[name]); }
+      byName[name].runs.push(run);
+    });
+    reconcile(list, groups, function (g) { return g.name; }, function (g) {
+      var section = h('div', {class: 'group', 'data-project': g.name}, h('h3', {text: g.name}), h('div', {class: 'items'}));
+      patchGroup(section, g);
+      return section;
+    }, patchGroup);
+    if (!S.runs.length) {
+      if (!list._empty) { list._empty = h('p', {class: 'empty-note', text: 'No runs found yet.'}); }
+      if (!list._empty.parentNode) list.appendChild(list._empty);
+    } else if (list._empty && list._empty.parentNode) list._empty.remove();
+    markSelected();
+  }
+  function patchGroup(section, g) {
+    var items = section.querySelector('.items');
+    reconcile(items, g.runs, function (r) { return r.key; }, function (run) {
+      var btn = h('button', {type: 'button'});
+      btn.addEventListener('click', function () { location.hash = '#/run/' + enc(run.key.split('/')[0]) + '/' + enc(run.key.split('/').slice(1).join('/')); });
+      fillRunButton(btn, run);
+      return btn;
+    }, function (btn, run) { if (sig(btn._run) !== sig(run)) fillRunButton(btn, run); });
+    var visible = 0;
+    g.runs.forEach(function (run) {
+      var btn = items._nodes.get(run.key);
+      btn.hidden = !runPasses(run);
+      if (!btn.hidden) visible++;
+    });
+    section.hidden = visible === 0;
+  }
+  function renderDossierList() {
+    var list = $('dossier-list');
+    reconcile(list, S.dossiers, function (d) { return d.n; }, function (d) {
+      var btn = h('button', {type: 'button', class: 'dossier-btn', 'data-dossier': d.n});
+      btn.addEventListener('click', function () { location.hash = '#/dossier/' + d.n; });
+      fillDossierButton(btn, d);
+      return btn;
+    }, function (btn, d) { if (sig(btn._d) !== sig(d)) fillDossierButton(btn, d); });
+    if (!S.dossiers.length) {
+      if (!list._empty) list._empty = h('p', {class: 'empty-note', text: 'No dossier folder is set. Settings shows how.'});
+      if (!list._empty.parentNode) list.appendChild(list._empty);
+    } else if (list._empty && list._empty.parentNode) list._empty.remove();
+    markSelected();
+  }
+  function fillDossierButton(btn, d) {
+    btn._d = d;
+    var linked = d.runs.length;
+    fill(btn, icon('book'), h('span', {class: 'd-name', text: pretty(d.id)}),
+      h('span', {class: 'd-meta', text: d.sources.length + ' sources, ' + d.reports.length + ' reports' + (linked ? ', ' + linked + (linked === 1 ? ' run' : ' runs') : '')}));
+  }
+  function markSelected() {
+    var v = S.view;
+    Array.prototype.forEach.call(document.querySelectorAll('.run-btn'), function (b) {
+      if (v && v.type === 'run' && b.getAttribute('data-run-key') === v.key) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('.dossier-btn'), function (b) {
+      if (v && v.type === 'dossier' && b.getAttribute('data-dossier') === String(v.n)) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
+    });
+  }
+
+  // ---------- Views ----------
+  function parseRoute() {
+    var m = /^#\/run\/([^/]+)\/([^/]+)$/.exec(location.hash);
+    try {
+      if (m) return {type: 'run', pid: decodeURIComponent(m[1]), rid: decodeURIComponent(m[2])};
+    } catch (e) { return {type: 'welcome'}; }
+    var d = /^#\/dossier\/(\d{1,6})$/.exec(location.hash);
+    if (d) return {type: 'dossier', n: Number(d[1])};
+    return {type: 'welcome'};
+  }
+  function setNavState(open) {
+    document.body.classList.toggle('nav-open', open);
+    $('nav-toggle').setAttribute('aria-expanded', String(open));
+  }
+  function route() {
+    if (!S.key) return;
+    var r = parseRoute();
+    var v = S.view;
+    if (v && v.type === r.type && ((r.type === 'run' && v.pid === r.pid && v.rid === r.rid) || (r.type === 'dossier' && v.n === r.n) || r.type === 'welcome')) return;
+    S.gen += 1;
+    clearTimeout(S.tick);
+    S.view = r.type === 'welcome' ? {type: 'welcome', gen: S.gen} : Object.assign({gen: S.gen}, r, r.type === 'run' ? {key: r.pid + '/' + r.rid} : {});
+    document.body.classList.toggle('view-open', r.type !== 'welcome');
+    setNavState(r.type === 'welcome');
+    markSelected();
+    if (r.type === 'run') buildRunView(S.view);
+    else if (r.type === 'dossier') buildDossierView(S.view);
+    else renderWelcome();
+    main.scrollTop = 0;
+    window.scrollTo(0, 0);
+    enqueue(refreshView);
+  }
+  function enqueue(task) {
+    S.queue = S.queue.then(task).catch(function (error) { handleError(error); });
+    return S.queue;
+  }
+
+  function renderWelcome() {
+    var running = S.runs.filter(function (r) { return r.status === 'running'; }).length;
+    var connected = S.status ? S.status.connected : true;
+    var kids = [
+      h('h1', {text: 'Deep Proof Process Viewer'}),
+      h('p', {class: 'muted', text: connected
+        ? 'Choose a run or a dossier on the left. Each run is shown in three parts, so that you can tell at a glance what went in, what happened and what came out.'
+        : 'No Deep Proof data folder is connected. Open Settings to see how to connect one.'}),
+      h('div', {class: 'legend'},
+        h('div', {class: 'l-inputs'}, h('h2', null, icon('inputs'), 'Inputs'), h('p', {text: 'The documents, the skill and the options the agent was given.'})),
+        h('div', {class: 'l-process'}, h('h2', null, icon('process'), 'Process'), h('p', {text: 'What happened, step by step: prompts, messages, checks and the time limit.'})),
+        h('div', {class: 'l-results'}, h('h2', null, icon('results'), 'Results'), h('p', {text: 'The report or the draft, the findings and the records behind them.'})))
+    ];
+    if (connected) kids.push(h('p', {class: 'muted', text: S.runs.length + (S.runs.length === 1 ? ' run' : ' runs') + ' found' + (running ? ', ' + running + ' running now.' : '.')}));
+    else if (S.status && S.status.settingsHint) kids.push(h('pre', {class: 'plain', text: S.status.settingsHint}));
+    fill(main, h('div', {class: 'welcome'}, kids));
+    main._welcomeSig = sig([S.runs.length, running, connected]);
+  }
+
+  function block(kind, word, lead, iconName) {
+    var body = h('div', {class: 'block-body'});
+    var section = h('section', {class: 'block', 'data-block': kind, 'aria-labelledby': 'block-' + kind},
+      h('div', {class: 'block-head'}, h('span', {class: 'block-badge'}, icon(iconName)), h('div', null, h('h2', {id: 'block-' + kind, text: word}), h('p', {text: lead}))), body);
+    return {section: section, body: body};
+  }
+
+  // ---------- The run page ----------
+  function buildRunView(v) {
+    var inputs = block('inputs', 'Inputs', 'What the agent was given.', 'inputs');
+    var process = block('process', 'Process', 'What happened, step by step.', 'process');
+    var results = block('results', 'Results', 'What came out.', 'results');
+    v.head = h('header', {class: 'run-head'});
+    v.title = h('h1', {text: 'Loading the run…'});
+    v.sub = h('p', {class: 'sub'});
+    v.chips = h('div', {class: 'chips'});
+    v.callouts = h('div', {class: 'callouts'});
+    v.head.append(v.title, v.sub, v.chips, v.callouts);
+    v.inputCards = h('div', {class: 'cards'});
+    v.inputEmpty = h('p', {class: 'empty', text: 'No inputs are recorded for this run.', hidden: true});
+    inputs.body.append(v.inputCards, v.inputEmpty);
+    v.filters = h('div', {class: 'toolbar', role: 'group', 'aria-label': 'Show steps'});
+    var steps = [['all', 'All steps'], ['messages', 'Messages'], ['command', 'Command Output'], ['host', 'Host Steps'], ['diag', 'Diagnostics']];
+    v.stepFilter = 'all';
+    steps.forEach(function (s) {
+      var b = h('button', {type: 'button', 'data-step-filter': s[0], text: s[1], 'aria-pressed': String(s[0] === 'all')});
+      b.addEventListener('click', function () {
+        v.stepFilter = s[0];
+        v.list.setAttribute('data-filter', s[0]);
+        Array.prototype.forEach.call(v.filters.querySelectorAll('button'), function (x) { x.setAttribute('aria-pressed', String(x === b)); });
+      });
+      v.filters.appendChild(b);
+    });
+    v.total = h('span', {class: 'total'});
+    v.filters.appendChild(v.total);
+    v.banner = h('div', {class: 'callouts'});
+    v.list = h('ol', {class: 'timeline', 'data-filter': 'all'});
+    v.processEmpty = h('p', {class: 'empty', text: 'No steps are recorded yet.', hidden: true});
+    process.body.append(v.filters, v.banner, v.list, v.processEmpty);
+    v.groups = h('div', {class: 'groups'});
+    v.resultEmpty = h('p', {class: 'empty', text: 'Nothing has come out of this run yet.', hidden: true});
+    results.body.append(v.groups, v.resultEmpty);
+    v.groupNodes = {};
+    RESULT_GROUPS.forEach(function (g) {
+      var cards = h('div', {class: 'cards'});
+      var count = h('span', {class: 'count'});
+      var node;
+      if (g[0] === 'kept') {
+        node = h('details', {class: 'kept', hidden: true}, h('summary', null, icon(g[2]), h('span', {text: g[1]}), count, icon('chevron', 'chev')),
+          h('p', {text: 'Files the agent left in its work folder. Deep Proof kept a copy when the run ended.'}), cards);
+      } else node = h('section', {class: 'group', 'data-group': g[0], hidden: true}, h('h3', {class: 'group-title'}, icon(g[2]), h('span', {text: g[1]}), count), cards);
+      v.groups.appendChild(node);
+      v.groupNodes[g[0]] = {node: node, cards: cards, count: count};
+    });
+    var root = h('div', {class: 'run-view', 'data-run-key': v.key}, v.head, inputs.section, process.section, results.section);
+    v.root = root;
+    fill(main, root);
+    v.runSig = '';
+    v.mode = undefined;
+    v.entries = [];
+    v.next = 0;
+  }
+
+  function chip(label, value, iconName, extra) {
+    return h('span', {class: 'chip' + (extra ? ' ' + extra : '')}, iconName ? icon(iconName) : null, label ? h('span', {class: 'k', text: label}) : null, h('span', {class: 'v', text: value}));
+  }
+  function attemptText(header) {
+    if (header.attempt === null || header.attempt === undefined) return null;
+    if (header.attempt === 'wrapup') return 'Wrap-Up';
+    if (typeof header.attempt === 'number') return 'Attempt ' + header.attempt + (header.maxAttempts ? ' of ' + header.maxAttempts : '');
+    return String(header.attempt);
+  }
+  function renderHeader(v, data, listed) {
+    var hd = data.header, st = statusOf(hd.status), kind = KIND[hd.kind] || KIND.unknown;
+    v.title.textContent = hd.title || 'Run';
+    v.sub.textContent = hd.projectName || '';
+    v.root.setAttribute('data-status', hd.status);
+    v.root.setAttribute('data-kind', hd.kind);
+    v.root.className = 'run-view tone-' + st.tone + ' st-' + String(hd.status).replace(/[^a-z-]/g, '');
+    v.started = hd.startedAt;
+    v.ended = hd.endedAt;
+    v.running = hd.status === 'running';
+    var chips = [];
+    chips.push(h('span', {class: 'chip status st-' + String(hd.status).replace(/[^a-z-]/g, ''), 'data-chip': 'status'},
+      h('span', {class: 'st-icon'}, icon(st.icon)), h('span', {class: 'st-word', text: hd.statusLabel || st.word}),
+      hd.statusDetail ? h('span', {class: 'sub', text: '· ' + hd.statusDetail}) : null,
+      hd.statusSource === 'inferred' && hd.status !== 'imported' ? h('span', {class: 'sub', text: '· inferred from files'}) : null));
+    chips.push(chip('Kind', hd.kindLabel || kind.word, kind.icon));
+    if (hd.agent) chips.push(chip('Agent', hd.agent, 'bot'));
+    if (hd.model) chips.push(chip('Model', hd.model, 'cpu'));
+    if (hd.effort) chips.push(chip('Effort', pretty(hd.effort), 'cpu'));
+    if (hd.startedAt) {
+      var elapsed = h('span', {class: 'v', 'data-elapsed': ''});
+      v.elapsedNode = elapsed;
+      chips.push(h('span', {class: 'chip'}, icon('clock'), h('span', {class: 'k', text: 'Elapsed'}), elapsed));
+    } else v.elapsedNode = null;
+    var attempt = attemptText(hd);
+    if (attempt) chips.push(chip('', attempt, 'repair'));
+    if (hd.timeLimitMinutes) chips.push(chip('Time limit', hd.timeLimitMinutes + ' min', 'limit'));
+    chips.push(chip('Trace', hd.trace || (hd.traced ? 'Recorded' : 'Not Recorded'), 'record'));
+    if (listed && listed.dossier) {
+      var match = DOSSIER_MATCH[listed.dossier.match] || 'Matches';
+      chips.push(chip('Dossier', pretty(listed.dossier.id) + ': ' + match.toLowerCase() + (listed.dossier.trimmed ? ' after trimming' : ''), 'book'));
+    }
+    fill(v.chips, chips);
+    var callouts = [];
+    if (hd.statusDetail && hd.status === 'not-recorded') callouts.push(h('div', {class: 'callout'}, icon('info'), h('p', {text: hd.statusDetail})));
+    data.notices.forEach(function (n) {
+      callouts.push(h('div', {class: 'callout' + (n.kind === 'name-told' ? ' warn' : ''), 'data-notice': n.kind}, icon(n.kind === 'name-told' ? 'alert' : 'info'), h('p', {text: n.text})));
+    });
+    if (data.missing && data.missing.length) {
+      callouts.push(h('div', {class: 'callout'}, icon('info'), h('div', null, h('p', {text: 'This run did not record:'}), h('ul', null, data.missing.map(function (m) { return h('li', {text: m}); })))));
+    }
+    fill(v.callouts, callouts);
+    tickElapsed(v);
+    document.title = (hd.title ? hd.title + ' – ' : '') + 'Deep Proof Process Viewer';
+  }
+  function tickElapsed(v) {
+    if (!v || !v.elapsedNode || !v.started) return;
+    var start = Date.parse(v.started), end = v.ended ? Date.parse(v.ended) : Date.now();
+    if (isNaN(start) || isNaN(end)) { v.elapsedNode.textContent = 'Not recorded'; return; }
+    v.elapsedNode.textContent = fmtDuration(end - start);
+  }
+  setInterval(function () { if (S.view && S.view.type === 'run' && S.view.running) tickElapsed(S.view); }, 1000);
+
+  // Cards
+  function cardIcon(c, inputs) {
+    return (inputs ? INPUT_ICON : RESULT_ICON)[c.kind] || 'doc';
+  }
+  function cardTitle(c) { return c.kind === 'kept-file' ? keptTitle(c.title || '') : (c.title || 'Untitled'); }
+  function cardHead(c, inputs) {
+    var meta = [];
+    if (typeof c.bytes === 'number') meta.push(h('span', {text: fmtBytes(c.bytes)}));
+    if (typeof c.count === 'number') meta.push(h('span', {text: c.count + (c.count === 1 ? ' entry' : ' entries')}));
+    if (c.note) meta.push(h('span', {text: c.note}));
+    var chips = (c.chips || []).filter(function (x) { return c.kind !== 'finding' || x.label !== 'Verdict'; }).map(function (x) {
+      return h('span', {class: 'mini'}, x.label + ':', h('b', {text: x.value}));
+    });
+    if (c.draft) chips.unshift(h('span', {class: 'mini badge-draft', text: c.kind === 'report' ? 'Draft: not validated' : 'Draft'}));
+    var lead;
+    if (c.kind === 'finding') {
+      var vd = VERDICT[c.verdict] || UNKNOWN_VERDICT;
+      lead = h('span', {class: 'verdict tone-' + vd.tone, 'data-verdict': c.verdict || ''}, icon(vd.icon), c.verdictLabel || pretty(c.verdict) || 'Verdict');
+    } else lead = null;
+    return [
+      c.kind === 'finding' ? null : h('span', {class: 'kind-icon'}, icon(cardIcon(c, inputs))),
+      h('span', {class: 'card-main'}, lead, h('div', {class: 'card-title', text: cardTitle(c)}), meta.length ? h('div', {class: 'card-meta'}, meta) : null, chips.length ? h('div', {class: 'card-chips'}, chips) : null)
+    ];
+  }
+  function fillCard(node, c, inputs) {
+    node._card = c;
+    node.setAttribute('data-card-id', c.id);
+    node.setAttribute('data-card-kind', c.kind);
+    if (c.kind === 'finding') node.setAttribute('data-verdict', c.verdict || '');
+    if (c.doc) {
+      var head = node.querySelector(':scope > summary');
+      fill(head, cardHead(c, inputs).concat([icon('chevron', 'chev')]));
+    } else {
+      fill(node, h('div', {class: 'card-head'}, cardHead(c, inputs)));
+    }
+  }
+  function makeCard(c, inputs, v) {
+    var node;
+    if (c.doc) {
+      node = h('details', {class: 'card'}, h('summary', {class: 'card-head'}), h('div', {class: 'body'}));
+      node._src = {url: '/api/runs/' + enc(v.pid) + '/' + enc(v.rid) + '/document?name=' + enc(c.doc)};
+    } else node = h('div', {class: 'card static'});
+    fillCard(node, c, inputs);
+    return node;
+  }
+  function patchCard(node, c, inputs) {
+    if (sig(node._card) !== sig(c)) {
+      fillCard(node, c, inputs);
+      if (node.open) node._dirty = true;
+    }
+  }
+
+  function patchRun(v, data, listed) {
+    var runSig = sig([data.header, data.notices, data.missing, listed && listed.dossier]);
+    if (runSig !== v.runSig) { v.runSig = runSig; renderHeader(v, data, listed); }
+    var inputs = data.inputs || [];
+    reconcile(v.inputCards, inputs, function (c) { return c.id; }, function (c) { return makeCard(c, true, v); }, function (n, c) { patchCard(n, c, true); });
+    v.inputEmpty.hidden = inputs.length > 0;
+    var any = false;
+    RESULT_GROUPS.forEach(function (g) {
+      var cards = (data.results || []).filter(function (c) { return (GROUP_OF[c.kind] || 'notes') === g[0]; });
+      var node = v.groupNodes[g[0]];
+      reconcile(node.cards, cards, function (c) { return c.id; }, function (c) { return makeCard(c, false, v); }, function (n, c) { patchCard(n, c, false); });
+      node.node.hidden = cards.length === 0;
+      node.count.textContent = cards.length > 1 || g[0] === 'finding' || g[0] === 'kept' ? ' (' + cards.length + ')' : '';
+      if (cards.length) any = true;
+    });
+    v.resultEmpty.hidden = any;
+  }
+
+  // The timeline
+  function makeEntry(e, v) {
+    var li = h('li', {class: 'entry'});
+    li._v = v;
+    fillEntry(li, e);
+    return li;
+  }
+  function fillEntry(li, e) {
+    var step = STEP[e.kind] || STEP.other;
+    var tone = step[2];
+    var iconName = step[0];
+    if (e.kind === 'run-ended') { var bad = /failed/i.test(e.title || ''); iconName = bad ? 'failed' : 'done'; tone = bad ? 'bad' : 'ok'; }
+    li._entry = e;
+    li.className = 'entry tone-' + tone;
+    li.setAttribute('data-entry-n', e.n);
+    li.setAttribute('data-entry-kind', STEP[e.kind] ? e.kind : 'other');
+    li.setAttribute('data-group', step[1]);
+    var time = h('div', {class: 'entry-time'}, h('time', {datetime: e.at, text: fmtClock(e.at)}), h('span', {class: 'off', text: fmtOffset(e.offsetMs || 0)}));
+    var dot = h('span', {class: 'entry-dot'}, icon(iconName));
+    var text = h('span', {class: 'entry-text'}, h('div', {class: 'entry-title', text: e.title}), e.summary ? h('div', {class: 'entry-summary', text: e.summary}) : null);
+    var main;
+    if (e.hasBody) {
+      var details = li.querySelector(':scope > .entry-main > details');
+      if (!details) {
+        details = h('details', {class: 'entry-details'}, h('summary', {class: 'entry-head'}), h('div', {class: 'body'}));
+        details._src = {url: '/api/runs/' + enc(li._v.pid) + '/' + enc(li._v.rid) + '/timeline/' + e.n};
+      } else if (details.open) details._dirty = true;
+      var summary = details.querySelector(':scope > summary');
+      fill(summary, text, icon('chevron', 'chev'));
+      main = details;
+    } else main = h('div', {class: 'entry-details'}, h('div', {class: 'entry-head'}, text));
+    fill(li, time, dot, h('div', {class: 'entry-main'}, main));
+  }
+  function patchEntry(li, e) {
+    if (sig(li._entry) !== sig(e)) fillEntry(li, e);
+  }
+
+  function loadTimeline(v) {
+    var gen = v.gen;
+    var restart = false;
+    var collected = [];
+    function page(after) {
+      return api('/api/runs/' + enc(v.pid) + '/' + enc(v.rid) + '/timeline?after=' + after).then(function (a) {
+        if (gen !== S.gen) return null;
+        if (v.mode !== undefined && v.mode !== a.traced && !restart) {
+          // The run gained or lost its trace: start the list again from the top.
+          v.mode = a.traced; v.entries = []; v.next = 0; restart = true; collected = [];
+          return page(0);
+        }
+        v.mode = a.traced;
+        if (a.traced) {
+          var fresh = a.entries.filter(function (e) { return !v.entries.length || e.n > v.entries[v.entries.length - 1].n; });
+          v.entries = v.entries.concat(fresh);
+          v.next = a.next;
+        } else collected = collected.concat(a.entries);
+        fill(v.banner, a.banner ? [bannerNode(a.banner)] : []);
+        v.bannerSig = sig(a.banner);
+        if (a.more) return page(a.next);
+        return a;
+      });
+    }
+    var start = v.mode === false || v.mode === undefined ? 0 : v.next;
+    return page(start).then(function (last) {
+      if (!last || gen !== S.gen) return;
+      if (!last.traced) v.entries = collected;
+      reconcile(v.list, v.entries, function (e) { return e.n; }, function (e) { return makeEntry(e, v); }, patchEntry);
+      v.total.textContent = v.entries.length + (v.entries.length === 1 ? ' step' : ' steps');
+      v.processEmpty.hidden = v.entries.length > 0;
+    });
+  }
+  function bannerNode(b) {
+    return h('div', {class: 'callout'}, icon('info'), h('div', null, h('p', {text: b.text}),
+      b.missing && b.missing.length ? h('ul', null, b.missing.map(function (m) { return h('li', {text: m}); })) : null));
+  }
+
+  // ---------- The dossier page ----------
+  function buildDossierView(v) {
+    v.head = h('header', {class: 'run-head'}, v.title = h('h1', {text: 'Loading the dossier…'}), v.sub = h('p', {class: 'sub'}));
+    v.warning = h('div', {class: 'warning', role: 'note'}, icon('alert'),
+      h('p', {text: 'Deep Proof gives the reviewing agent the file name and the title of an imported report. Import the neutral download and keep its name; rename nothing to “correct” or “mixed”.'}));
+    v.sources = h('div', {class: 'cards'});
+    v.reports = h('div', {class: 'stack'});
+    v.runs = h('div', {class: 'link-list'});
+    var s = block('inputs', 'Sources', 'The documents of this book.', 'book');
+    var r = block('results', 'Reports to check', 'Two reports under neutral names. Download one and import it into Deep Proof.', 'import');
+    var l = block('process', 'Linked runs', 'Runs in Deep Proof that were given these documents or this report.', 'link');
+    s.section.setAttribute('data-block', 'sources'); r.section.setAttribute('data-block', 'reports'); l.section.setAttribute('data-block', 'linked');
+    s.body.appendChild(v.sources);
+    r.body.appendChild(v.reports);
+    v.linkedEmpty = h('p', {class: 'empty', text: 'No run in the Deep Proof folder matches this dossier yet.', hidden: true});
+    l.body.append(v.runs, v.linkedEmpty);
+    v.dsig = '';
+    v.root = h('div', {class: 'dossier-view', 'data-dossier': v.n}, v.head, v.warning, s.section, r.section, l.section);
+    fill(main, v.root);
+  }
+  function downloadReport(n, report, button) {
+    button.disabled = true;
+    // The key travels in a header, so a plain link cannot fetch the file: read it, then save it under its neutral name.
+    return fetch('/api/dossiers/' + n + '/download?name=' + enc('report:' + report.sha12), {method: 'GET', headers: {'X-Viewer-Key': S.key}, cache: 'no-store'}).then(function (res) {
+      if (!res.ok) throw new ApiError(res.status, 'The report could not be downloaded.');
+      return res.blob();
+    }).then(function (blob) {
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement('a');
+      link.href = url;
+      link.download = report.neutralName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+    }).catch(function (e) { showAlert(e.message || 'The report could not be downloaded.'); setTimeout(function () { showAlert(''); }, 5000); })
+      .then(function () { button.disabled = false; });
+  }
+  function patchDossier(v, d) {
+    var dsig = sig(d);
+    if (dsig === v.dsig) return;
+    v.dsig = dsig;
+    v.title.textContent = pretty(d.id);
+    v.sub.textContent = d.sources.length + ' source documents and ' + d.reports.length + ' reports, read where they are kept.';
+    document.title = pretty(d.id) + ' – Deep Proof Process Viewer';
+    reconcile(v.sources, d.sources, function (s) { return s.name; }, function (s) {
+      var node = h('details', {class: 'card'}, h('summary', {class: 'card-head'}), h('div', {class: 'body'}));
+      node._src = {url: '/api/dossiers/' + d.n + '/document?name=' + enc('source:' + s.name)};
+      node._s = null;
+      fillSource(node, s);
+      return node;
+    }, function (node, s) { if (sig(node._s) !== sig(s)) fillSource(node, s); });
+    reconcile(v.reports, d.reports, function (r) { return r.sha12; }, function (r) {
+      var node = h('details', {class: 'card'}, h('summary', {class: 'card-head'}), h('div', {class: 'body'}));
+      node._src = {url: '/api/dossiers/' + d.n + '/document?name=' + enc('report:' + r.sha12)};
+      var wrap = h('div', {class: 'report-block'});
+      var button = h('button', {type: 'button', class: 'dl-btn', 'data-download': r.sha12}, icon('download'), 'Download With A Neutral Name');
+      button.addEventListener('click', function () { downloadReport(d.n, r, button); });
+      wrap.append(node, button);
+      fillReport(node, r);
+      return wrap;
+    }, function (wrap, r) { fillReport(wrap.querySelector('details'), r); });
+    reconcile(v.runs, d.runs, function (r) { return r.key; }, function (r) {
+      var btn = h('button', {type: 'button', class: 'link-btn', 'data-run-key': r.key});
+      btn.addEventListener('click', function () { location.hash = '#/run/' + enc(r.key.split('/')[0]) + '/' + enc(r.key.split('/').slice(1).join('/')); });
+      fillLinked(btn, r);
+      return btn;
+    }, function (btn, r) { fillLinked(btn, r); });
+    v.linkedEmpty.hidden = d.runs.length > 0;
+  }
+  function fillSource(node, s) {
+    node._s = s;
+    var head = node.querySelector(':scope > summary');
+    fill(head, h('span', {class: 'kind-icon'}, icon('doc')), h('span', {class: 'card-main'}, h('div', {class: 'card-title', text: s.name}), h('div', {class: 'card-meta'}, h('span', {text: fmtBytes(s.bytes)}))), icon('chevron', 'chev'));
+  }
+  function fillReport(node, r) {
+    var head = node.querySelector(':scope > summary');
+    fill(head, h('span', {class: 'kind-icon'}, icon('import')), h('span', {class: 'card-main'}, h('div', {class: 'card-title', text: r.neutralName}), h('div', {class: 'card-meta'}, h('span', {text: fmtBytes(r.bytes)}))), icon('chevron', 'chev'));
+  }
+  function fillLinked(btn, r) {
+    var st = null;
+    for (var i = 0; i < S.runs.length; i++) if (S.runs[i].key === r.key) st = S.runs[i];
+    var status = st ? statusOf(st.status) : UNKNOWN_STATUS;
+    var words = DOSSIER_MATCH[r.match] || 'Matches';
+    if (r.trimmed) words += ' after trimming';
+    if (r.report) words += ': report-' + r.report + '.md';
+    btn.className = 'link-btn tone-' + status.tone;
+    fill(btn, h('span', {class: 'st-icon'}, icon(status.icon)), h('span', {class: 'st-word', text: st ? (st.statusLabel || status.word) : 'Run'}),
+      h('strong', {text: st ? (st.title || r.key) : r.key}), h('span', {class: 'match', text: words}));
+  }
+
+  // ---------- Settings (the only place that shows folders) ----------
+  function closeButton() {
+    var b = h('button', {type: 'button', class: 'ghost close', text: 'Close'});
+    b.addEventListener('click', closeSettings);
+    return b;
+  }
+  function openSettings() {
+    var panel = $('settings-panel');
+    panel.hidden = false;
+    $('settings-open').setAttribute('aria-expanded', 'true');
+    fill(panel, h('p', {class: 'muted', text: 'Loading…'}));
+    api('/api/status').then(function (st) {
+      S.status = st;
+      var close = closeButton();
+      var tmpText = st.tmpMatches === true ? 'Work folders of running checks are found.' : st.tmpMatches === false
+        ? 'The Deep Proof server uses another temporary folder than the one set here. Live drafts of running checks cannot be shown. Set the temporary folder in the settings file.'
+        : 'No running check has reported a work folder yet.';
+      var dl = h('dl', null,
+        h('dt', {text: 'Connection'}), h('dd', {text: st.connected ? 'Connected to a Deep Proof data folder.' : 'No Deep Proof data folder is connected.'}),
+        h('dt', {text: 'Deep Proof data folder'}), h('dd', {text: st.folders.data || 'Not set'}),
+        h('dt', {text: 'Temporary folder of Deep Proof'}), h('dd', {text: st.folders.tmp || 'Not set'}),
+        h('dd', {text: tmpText}),
+        h('dt', {text: 'Dossier folders (' + st.folders.dossiers.length + ')'}),
+        st.folders.dossiers.length ? st.folders.dossiers.map(function (p) { return h('dd', {text: p}); }) : h('dd', {text: 'None set'}));
+      fill(panel, close, h('h2', {id: 'settings-heading'}, icon('gear'), 'Settings'),
+        h('p', {class: 'muted', text: 'The viewer reads these folders and never writes to them. It takes them from its environment and a settings file; this page cannot change them.'}), dl,
+        st.settingsHint ? h('div', null, h('p', {class: 'muted', text: 'Settings file, for example:'}), h('pre', {text: st.settingsHint})) : null);
+      close.focus();
+    }, function (error) { fill(panel, h('h2', {id: 'settings-heading'}, 'Settings'), h('p', {text: error.message}), closeButton()); });
+  }
+  function closeSettings() {
+    $('settings-panel').hidden = true;
+    $('settings-open').setAttribute('aria-expanded', 'false');
+    $('settings-open').focus();
+  }
+
+  // ---------- The key screen ----------
+  function showKeyScreen(message) {
+    S.view = null;
+    clearTimeout(S.timer);
+    S.gen += 1;
+    var input = h('input', {id: 'key-input', type: 'text', autocomplete: 'off', spellcheck: 'false', 'aria-describedby': 'key-help'});
+    var error = h('p', {class: 'key-error', id: 'key-error', role: 'alert', text: message || ''});
+    var go = h('button', {type: 'button', class: 'go', 'data-key-go': '', text: 'Connect'});
+    function submit() {
+      var m = /([0-9a-f]{32})/i.exec(input.value.trim());
+      var typed = input.value.trim();
+      if (!m && /^[0-9a-f]+$/i.test(typed)) m = [typed, typed];
+      if (!m) { error.textContent = 'This is not an access key. Paste the key from the address the viewer printed.'; return; }
+      keepKey(m[1].toLowerCase());
+      start();
+    }
+    go.addEventListener('click', submit);
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+    document.body.classList.remove('view-open');
+    fill($('runs-list'));
+    fill($('dossier-list'));
+    $('runs-list')._nodes = null; $('dossier-list')._nodes = null; $('run-filters')._nodes = null; fill($('run-filters'));
+    fill(main, h('div', {class: 'key-box', 'data-key-form': ''},
+      h('h1', {text: 'Open the viewer with its access key'}),
+      h('p', {id: 'key-help', class: 'muted', text: 'The viewer printed an address in its terminal. Open that address, or paste its key here: the long code after “#key=”.'}),
+      h('label', {for: 'key-input', text: 'Access key'}), input, go, error));
+    input.focus();
+  }
+  function onKeyRefused() {
+    var had = S.key;
+    dropKey();
+    if (had) showKeyScreen('The viewer refused this key. It makes a new one every time it starts.');
+  }
+
+  // ---------- Polling ----------
+  function handleError(error) {
+    if (error && error.status === 401) return;
+    showAlert(error && error.message ? error.message : 'Something went wrong. Trying again.');
+  }
+  function announce(list) {
+    var changes = [];
+    list.forEach(function (r) {
+      var before = S.known[r.key];
+      if (before !== undefined && before !== r.status && !S.firstRuns) changes.push((r.title || r.key) + ': ' + (r.statusLabel || statusOf(r.status).word));
+      S.known[r.key] = r.status;
+    });
+    S.firstRuns = false;
+    if (changes.length) $('live').textContent = changes.join('. ');
+  }
+  function refreshRuns() {
+    return api('/api/runs').then(function (list) {
+      var changed = sig(list) !== S.runsSig;
+      if (changed) {
+        announce(list);
+        S.runs = list;
+        S.runsSig = sig(list);
+        renderRuns();
+        if (S.view && S.view.type === 'welcome' && main._welcomeSig !== sig([list.length, list.filter(function (r) { return r.status === 'running'; }).length, S.status ? S.status.connected : true])) renderWelcome();
+      }
+      return changed;
+    });
+  }
+  function refreshDossiers(force) {
+    if (!force && !(S.view && S.view.type === 'dossier') && S.dossiers.length) return Promise.resolve();
+    return api('/api/dossiers').then(function (list) {
+      if (sig(list) !== S.dossiersSig) { S.dossiers = list; S.dossiersSig = sig(list); renderDossierList(); }
+    });
+  }
+  function refreshView() {
+    var v = S.view;
+    if (!v) return Promise.resolve();
+    if (v.type === 'run') {
+      var gen = v.gen;
+      return api('/api/runs/' + enc(v.pid) + '/' + enc(v.rid)).then(function (data) {
+        if (gen !== S.gen) return null;
+        var listed = null;
+        for (var i = 0; i < S.runs.length; i++) if (S.runs[i].key === v.key) listed = S.runs[i];
+        patchRun(v, data, listed);
+        return loadTimeline(v).then(function () { if (gen === S.gen) refreshOpenBodies(v.running); });
+      }, function (error) {
+        if (gen !== S.gen) return null;
+        if (error.status === 404) {
+          fill(main, h('div', {class: 'key-box'}, h('h1', {text: 'This run is not there'}), h('p', {class: 'muted', text: error.message}), h('p', {class: 'muted', text: 'Choose another run on the left.'})));
+          S.view = {type: 'gone', gen: S.gen};
+          return null;
+        }
+        throw error;
+      });
+    }
+    if (v.type === 'dossier') {
+      return refreshDossiers(true).then(function () {
+        if (v.gen !== S.gen) return;
+        var d = null;
+        for (var i = 0; i < S.dossiers.length; i++) if (S.dossiers[i].n === v.n) d = S.dossiers[i];
+        if (!d) {
+          fill(main, h('div', {class: 'key-box'}, h('h1', {text: 'This dossier is not there'}), h('p', {class: 'muted', text: 'Choose another dossier on the left.'})));
+          S.view = {type: 'gone', gen: S.gen};
+          return;
+        }
+        patchDossier(v, d);
+      });
+    }
+    return Promise.resolve();
+  }
+  function poll() {
+    clearTimeout(S.timer);
+    if (!S.key) return;
+    var id = S.pollId = (S.pollId || 0) + 1;
+    enqueue(function () {
+      return refreshRuns().then(function (changed) { return changed ? refreshDossiers(true) : refreshDossiers(false); }).then(refreshView).then(function () {
+        showAlert('');
+        S.polls += 1;
+        document.body.setAttribute('data-poll-count', String(S.polls));
+      });
+    }).then(function () {
+      if (S.key && id === S.pollId) S.timer = setTimeout(poll, S.pollMs);
+    });
+  }
+
+  function start() {
+    api('/api/status').then(function (st) {
+      S.status = st;
+      S.pollMs = st.pollMs > 500 ? st.pollMs : 3000;
+      S.view = null;
+      S.known = {}; S.firstRuns = true; S.runsSig = ''; S.dossiersSig = '';
+      return refreshRuns().then(function () { return refreshDossiers(true); });
+    }).then(function () {
+      if (!S.key) return;
+      var r = parseRoute();
+      S.view = null;
+      if (r.type === 'welcome') { S.view = {type: 'welcome', gen: ++S.gen}; document.body.classList.remove('view-open'); setNavState(true); renderWelcome(); }
+      else route();
+      poll();
+    }).catch(function (error) { if (error.status !== 401) { showAlert(error.message); S.timer = setTimeout(start, 3000); } });
+  }
+
+  // ---------- Wiring ----------
+  $('skip').addEventListener('click', function () { main.focus(); });
+  $('settings-open').addEventListener('click', function () { if ($('settings-panel').hidden) openSettings(); else closeSettings(); });
+  $('nav-toggle').addEventListener('click', function () { setNavState(!document.body.classList.contains('nav-open')); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('settings-panel').hidden) closeSettings(); });
+  window.addEventListener('hashchange', route);
+
+  takeKeyFromAddress();
+  setNavState(true);
+  if (S.key) start(); else showKeyScreen('');
 })();
 </script>
 </body>
