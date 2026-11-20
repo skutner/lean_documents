@@ -240,7 +240,6 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   #side { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 14px 14px 16px; }
   .side-top { margin-bottom: 0; }
   .narrow-only { display: inline-flex; }
-  .side-top .ghost-settings .label { display: none; }
   body.view-open:not(.nav-open) #side-body { display: none; }
   body:not(.view-open) .narrow-only { display: none; }
   #side-body { margin-top: 16px; }
@@ -1145,7 +1144,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   function buildDossierView(v) {
     v.head = h('header', {class: 'run-head'}, v.title = h('h1', {text: 'Loading the dossier…'}), v.sub = h('p', {class: 'sub'}));
     v.warning = h('div', {class: 'warning', role: 'note'}, icon('alert'),
-      h('p', {text: 'Deep Proof gives the reviewing agent the file name and the title of an imported report. Import the neutral download and keep its name; rename nothing to “correct” or “mixed”.'}));
+      h('p', {text: "Deep Proof gives the reviewing agent the file name and the title of an imported report. Import the neutral download and keep its name; rename nothing to 'correct' or 'mixed'."}));
     v.sources = h('div', {class: 'cards'});
     v.reports = h('div', {class: 'stack'});
     v.runs = h('div', {class: 'link-list'});

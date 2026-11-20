@@ -10,7 +10,7 @@
  * Output: tmp/process-viewer-browser-<stamp>/ with result.md (every assertion as pass or fail) and the screenshots of a run
  * page and of a dossier page at 1440 and 390 pixels wide. The exit code is 0 only when every assertion passed. */
 import fs from 'node:fs/promises';
-import {existsSync, appendFileSync, readFileSync, realpathSync, mkdtempSync} from 'node:fs';
+import {existsSync, appendFileSync, readFileSync, realpathSync, mkdtempSync, writeFileSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -110,6 +110,14 @@ const openDossier = async n => {
   await ev(`location.hash = '#/dossier/${n}'`);
   await waitFor(`!!document.querySelector('main [data-dossier="${n}"]') && document.querySelector('main h1').textContent !== 'Loading the dossier…'`, {label: `dossier ${n} shown`});
 };
+/** Shows the welcome page, a run page or a dossier page and waits until it is there. */
+async function showView(view) {
+  if (view === 'welcome') {
+    await ev(`location.hash = ''`);
+    await waitFor(`!!document.querySelector('main .welcome')`, {label: 'the welcome page'});
+  } else if (view.startsWith('dossier:')) await openDossier(view.slice(8));
+  else await openRun(view);
+}
 /** Opens every details element in the main area, then waits until every body is loaded. Returns the texts of failed bodies. */
 async function openEverything() {
   await ev(`(() => { for (const d of document.querySelectorAll('main details')) d.open = true; return true; })()`);
@@ -171,6 +179,9 @@ try {
   fixtureBase = mkdtempSync(path.join(realpathSync(os.tmpdir()), 'pv-browser-'));
   const fx = buildFixture(fixtureBase);
   const realBase = realpathSync(fixtureBase);
+  // A report of about 320 KB, so that one document is served in two parts of 262,144 bytes (the page offers the second).
+  const LONG_PARAGRAPHS = 8000;
+  writeFileSync(path.join(fx.data, 'projects', fx.pid, 'analyses', 'run-analysis-done', 'report.md'), Array.from({length: LONG_PARAGRAPHS}, (_, i) => `Paragraph ${i + 1} of the long report, with some words.`).join('\n\n') + '\n');
   viewer = await startViewer({settings: {deepProofData: fx.data, dossiers: fx.dossiers, deepProofTmp: fx.tmp, port: 0}});
   const origin = `http://127.0.0.1:${viewer.port}`;
   assert.notEqual(viewer.port, 8787);
@@ -385,6 +396,8 @@ try {
       const side = await ev(`document.querySelector('nav').innerText`);
       opened += await ev(`document.querySelectorAll('main details[open]').length`);
       for (const [where, t] of [['main', text], ['nav', side]]) {
+        const stray = t.match(/(^|[\s(])(null|undefined|NaN)([\s).,:]|$)|\[object /);
+        if (stray) problems.push(`${rid} ${where}: stray word ${json(stray[0])}`);
         if (PATH_PATTERN.test(t)) problems.push(`${rid} ${where}: absolute path ${t.match(PATH_PATTERN)[0]}`);
         for (const needle of [fx.base, realBase, path.basename(fixtureBase), 'trace.jsonl', '"seq":', '"type":"', fx.sentinel]) if (t.includes(needle)) problems.push(`${rid} ${where}: contains ${needle}`);
       }
@@ -398,6 +411,22 @@ try {
     notes.push(`Opened ${opened} entries and cards on ${keys.length} runs; bodies that could not be read: ${failedBodies.length ? json(failedBodies) : 'none'}; ${fixtureAnswers} prompt bodies answered "The prompt file is not available any more." because the fixture wrote no prompt file for that run.`);
     assert.deepEqual(failedBodies, [], 'a body that cannot be read is a defect of the page or of the fixture');
     return `${keys.length} runs, ${opened} opened`;
+  });
+
+  await check('a document of about 320 KB is served in two parts: the page offers the second and then shows every paragraph once', async () => {
+    await openRun('run-analysis-done');
+    await click('[data-card-id="report"] summary');
+    await waitFor(`document.querySelector('[data-card-id="report"] .body .md')`, {label: 'the first part'});
+    const first = await ev(`({paragraphs: document.querySelectorAll('[data-card-id="report"] .body .md p').length, more: document.querySelector('[data-card-id="report"] .body .more')?.textContent ?? null})`);
+    assert.equal(first.more, 'Show the next part (2 of 2)');
+    assert.ok(first.paragraphs > 0 && first.paragraphs < LONG_PARAGRAPHS, `part one holds ${first.paragraphs} paragraphs`);
+    await click('[data-card-id="report"] .body .more');
+    await waitFor(`document.querySelectorAll('[data-card-id="report"] .body .md p').length === ${LONG_PARAGRAPHS}`, {label: 'every paragraph after the second part'});
+    const all = await ev(`[...document.querySelectorAll('[data-card-id="report"] .body .md p')].map(p => p.textContent)`);
+    assert.equal(all.length, LONG_PARAGRAPHS);
+    assert.ok(all.every((text, i) => text === `Paragraph ${i + 1} of the long report, with some words.`), 'paragraphs in order, none cut, none repeated');
+    assert.equal(await ev(`document.querySelector('[data-card-id="report"] .body .more')`), null, 'no button once everything is loaded');
+    return `part one ${first.paragraphs} paragraphs, then all ${LONG_PARAGRAPHS}`;
   });
 
   // ----- Dossier page -----
@@ -477,9 +506,8 @@ try {
   });
 
   await check('no horizontal overflow at 1440 pixels on the welcome page, a run page with everything open and a dossier page', async () => {
-    for (const [name, hash] of [['welcome', ''], ['run', '#/run/proj-alpha/run-check-done'], ['dossier', '#/dossier/2']]) {
-      await ev(`location.hash = ${json(hash)}`);
-      await sleep(900);
+    for (const [name, view] of [['welcome', 'welcome'], ['run', 'run-check-done'], ['dossier', 'dossier:2']]) {
+      await showView(view);
       if (name === 'run') await openEverything();
       const o = await overflow();
       assert.ok(o.scroll <= viewportWidth && o.body <= viewportWidth, `${name}: scrollWidth ${o.scroll}, body ${o.body}, viewport ${viewportWidth}`);
@@ -504,8 +532,7 @@ try {
   // ----- 390 pixels wide -----
   await setViewport(...WIDTHS[1]);
   await check('at 390 pixels the left bar opens from its button and picks a run, and closes after the pick', async () => {
-    await ev(`location.hash = ''`);
-    await sleep(500);
+    await showView('welcome');
     await ev('window.scrollTo(0, 0)');
     assert.ok(await ev(`getComputedStyle(document.getElementById('side-body')).display !== 'none'`), 'the lists show on the welcome page');
     await click('nav [data-run-key="proj-alpha/run-failed"]');
@@ -520,9 +547,8 @@ try {
 
   await check('no horizontal overflow at 390 pixels on the welcome page, run pages with everything open (tables, findings, entries), a dossier page and the settings panel', async () => {
     const problems = [];
-    for (const [name, hash] of [['welcome', ''], ['analysis', '#/run/proj-alpha/run-analysis-done'], ['check', '#/run/proj-alpha/run-check-done'], ['live', '#/run/proj-alpha/run-check-live'], ['untraced', '#/run/proj-alpha/run-untraced-done'], ['dossier', '#/dossier/1']]) {
-      await ev(`location.hash = ${json(hash)}`);
-      await sleep(900);
+    for (const [name, view] of [['welcome', 'welcome'], ['analysis', 'run-analysis-done'], ['check', 'run-check-done'], ['live', 'run-check-live'], ['untraced', 'run-untraced-done'], ['dossier', 'dossier:1']]) {
+      await showView(view);
       if (name !== 'welcome') await openEverything();
       const o = await overflow();
       if (!(o.scroll <= viewportWidth && o.body <= viewportWidth)) problems.push(`${name}: scrollWidth ${o.scroll}, body ${o.body}, viewport ${viewportWidth}`);
@@ -559,6 +585,23 @@ try {
     await setViewport(...WIDTHS[0]);
   });
 
+  await check('a trace with 1,100 more steps (three requests of at most 500) is listed whole: unique, contiguous step numbers and the total shown', async () => {
+    await openRun('run-check-live');
+    const traceFile = path.join(fx.data, 'projects', fx.pid, 'traces', 'run-check-live', 'trace.jsonl');
+    const last = JSON.parse(readFileSync(traceFile, 'utf8').trim().split('\n').at(-1));
+    const before = await ev(`document.querySelectorAll('.timeline [data-entry-n]').length`);
+    const MORE = 1100;
+    const at = Date.now();
+    appendFileSync(traceFile, Array.from({length: MORE}, (_, i) => JSON.stringify({seq: last.seq + 1 + i, at: new Date(at + i).toISOString(), type: 'progress-note', turn: '1', text: `Bulk note ${i + 1}`, blocks: 1})).join('\n') + '\n');
+    const expected = before + MORE;
+    await waitFor(`document.querySelectorAll('.timeline [data-entry-n]').length === ${expected}`, {timeout: 30000, label: `${expected} entries`});
+    const numbers = await ev(`[...document.querySelectorAll('.timeline [data-entry-n]')].map(e => Number(e.dataset.entryN))`);
+    assert.deepEqual(numbers, Array.from({length: expected}, (_, i) => i + 1), 'step numbers are unique and contiguous, in order');
+    assert.equal(await ev(`document.querySelector('[data-block="process"] .total').textContent`), `${expected} steps`);
+    assert.equal(await ev(`document.querySelector('.timeline [data-entry-n="${expected}"] .entry-summary').textContent`), `Bulk note ${MORE}`);
+    return `${expected} entries`;
+  });
+
   // ----- The key screen -----
   await check('without a key the page asks for one; a wrong key is refused in words; the right key opens the lists', async () => {
     await ev(`sessionStorage.clear(); true`);
@@ -567,14 +610,8 @@ try {
     assert.ok(!(await ev(`document.body.innerText`)).includes('Alpha Project'), 'no data without a key');
     await click('#key-input');
     await browser.page('Input.insertText', {text: '0'.repeat(32)});
-    const mark = events.consoleErrors.length;
     await click('[data-key-go]');
     await waitFor(`document.querySelector('[data-key-form]') && /refused/.test(document.getElementById('key-error').textContent)`, {label: 'the refusal'});
-    // Chrome logs the deliberate 401 of the wrong key as a network error; it is expected here and counted apart.
-    await sleep(400);
-    const refused = events.consoleErrors.splice(mark);
-    assert.ok(refused.every(e => /401/.test(e) && /\/api\/status/.test(e)), `only the refusal is logged: ${json(refused)}`);
-    events.ignored.push(...refused);
     assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), null, 'the refused key is not kept');
     await click('#key-input');
     await ev(`document.getElementById('key-input').value = ''; true`);
@@ -597,13 +634,17 @@ try {
 
   await check('no page exception and no console error, and no request for a file that is not served', async () => {
     // Chrome asks every page for /favicon.ico; the viewer serves two routes and answers 404 in JSON. That one request is recorded, not counted.
-    const real = events.consoleErrors.filter(e => !/favicon\.ico/.test(e));
-    for (const e of events.consoleErrors) if (/favicon\.ico/.test(e)) events.ignored.push(e);
+    // Chrome also logs the deliberate 401 of the wrong key in the key-screen check, once, on /api/status.
+    const isRefusal = e => /\(Unauthorized\)/.test(e) && /\/api\/status/.test(e);
+    const refusals = events.consoleErrors.filter(isRefusal);
+    assert.ok(refusals.length <= 1, `at most the one deliberate 401: ${json(refusals)}`);
+    const real = events.consoleErrors.filter(e => !/favicon\.ico/.test(e) && !isRefusal(e));
+    for (const e of events.consoleErrors) if (/favicon\.ico/.test(e) || isRefusal(e)) events.ignored.push(e);
     assert.deepEqual(events.exceptions, []);
     assert.deepEqual(real, []);
     const other = events.requests.filter(r => !/\/api\//.test(r.url) && !/favicon\.ico$/.test(r.url) && new URL(r.url).pathname !== '/');
     assert.deepEqual(other, []);
-    return events.ignored.length ? `${events.ignored.length} favicon 404 message(s) set aside` : '';
+    return events.ignored.length ? `${events.ignored.length} expected console message(s) set aside (favicon 404, the deliberate 401)` : '';
   });
 } catch (error) {
   failedSetup = error;
