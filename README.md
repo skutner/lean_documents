@@ -2,14 +2,24 @@
 
 Check claims in a supplied report against its source documents. Explain what is supported, what is contradicted, and what cannot be established from the available evidence. Audit the report's reasoning separately from its conclusions; use actual Lean proofs where justified and available.
 
+## Deep Proof process viewer
+
+The process viewer shows what a Deep Proof analysis or report check did, step by step, during the run and afterwards. It attaches read-only to a Deep Proof data folder on the same machine, and to benchmark dossier folders where they are kept. Each run is shown in three parts: Inputs (what the agent was given), Process (a timeline of prompts, messages, command output, validation errors, the time limit and the published result) and Results (the report or draft, findings, registers and the kept work folder). It never writes to a Deep Proof folder, never starts a model run, and does not audit or score Deep Proof's output.
+
+```sh
+npm run start
+```
+
+`npm run start` runs `node tools/process-viewer.mjs`, which prints `Process viewer: http://127.0.0.1:8790/#key=<key>`. Open that address; the page keeps the key for the tab and removes it from the address bar. Name the Deep Proof data folder and the dossier folders once, in the environment or in `tmp/process-viewer/settings.json`; the page's Settings panel shows what is set and an example. The steps of a run are recorded only when Deep Proof was started with `DEEP_PROOF_TRACE=1`; without it the viewer shows a status worked out from the run's files and says so. See [the process viewer section of the tools documentation](tools/README.md#deep-proof-process-viewer) for the settings, the key and the limits.
+
 ## Current readable-document pilot
 
 ```sh
 npm install
-npm run start
+npm run pilot
 ```
 
-`npm install` fetches the one dependency, [ALA](tools/README.md#coding-agents-through-ala), at the commit pinned in `package.json`; the tools themselves use only built-in Node.js modules. `npm run start` runs `node tools/pilot.mjs`.
+`npm install` fetches the one dependency, [ALA](tools/README.md#coding-agents-through-ala), at the commit pinned in `package.json`; the tools themselves use only built-in Node.js modules. `npm run pilot` runs `node tools/pilot.mjs`; before the process viewer existed this was `npm run start`.
 
 The tools run on Linux and macOS. Open the address the server prints: `http://127.0.0.1:8787` unless `PORT` is set; `http://localhost:8787` redirects there. The Node.js server displays the investment approval case in English and Romanian, plus acquisition financing, project funding, operating budgets, research funding and three literary-analysis dossiers, each in English and Romanian. All navigation is in the left tree: examples, input files and reports, findings, evidence and Lean sources. The selected document opens directly in the right pane, without popup readers or secondary navigation bars. Each report retains only its current verification. Finding nodes show a status icon and label; unfinished audits remain explicitly pending.
 

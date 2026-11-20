@@ -1,15 +1,50 @@
 # Local report review workspace
 
-The tools run on Linux and macOS. Install ALA once, then start the Node.js server in a terminal:
+The tools run on Linux and macOS. `npm run start` opens the [Deep Proof process viewer](#deep-proof-process-viewer). To work with the audit pilot, install ALA once, then start its Node.js server in a terminal:
 
 ```sh
 npm install
-npm run start
+npm run pilot
 ```
 
-The root `package.json` names three commands and one dependency. `npm run start` is `node tools/pilot.mjs`, `npm test` is `node tools/verify.mjs` and `npm run set-home` is `node tools/set-home.mjs` (see [Agent home](#agent-home)); either form works. `npm install` fetches ALA from GitHub at the pinned commit into `node_modules/advanced-language-agent`; see [Coding agents through ALA](#coding-agents-through-ala). The server itself uses only built-in Node.js modules, so it starts without the install, but then finds ALA only through `ALA_CLI`, a checkout beside or inside the repository, or `PATH`. npm prints `skipping integrity check for git dependency` during the install; the pin is the commit.
+The root `package.json` names four commands and one dependency. `npm run start` is `node tools/process-viewer.mjs`, `npm run pilot` is `node tools/pilot.mjs`, `npm test` is `node tools/verify.mjs` and `npm run set-home` is `node tools/set-home.mjs` (see [Agent home](#agent-home)); either form works. `npm install` fetches ALA from GitHub at the pinned commit into `node_modules/advanced-language-agent`; see [Coding agents through ALA](#coding-agents-through-ala). The server itself uses only built-in Node.js modules, so it starts without the install, but then finds ALA only through `ALA_CLI`, a checkout beside or inside the repository, or `PATH`. npm prints `skipping integrity check for git dependency` during the install; the pin is the commit.
 
-The server prints `Audit laboratory: http://127.0.0.1:8787`. Open that address; see [The address](#the-address). The current examples are in `examples/pilot/`; execution artifacts are retained under `tmp/readable-pilot/`. The server uses built-in Node.js modules. Real writing and auditing run through [ALA (Advanced Language Agent)](https://github.com/AssistOS-AI/AdvancedLanguageAgent) with an installed coding agent that is signed in, plus Python 3.12 or later and the repository-local Lean toolchain. See [Platforms and toolchain](#platforms-and-toolchain), [Coding agents through ALA](#coding-agents-through-ala) and [Agent home](#agent-home).
+The pilot server prints `Audit laboratory: http://127.0.0.1:8787`. Open that address; see [The address](#the-address). The current examples are in `examples/pilot/`; execution artifacts are retained under `tmp/readable-pilot/`. The server uses built-in Node.js modules. Real writing and auditing run through [ALA (Advanced Language Agent)](https://github.com/AssistOS-AI/AdvancedLanguageAgent) with an installed coding agent that is signed in, plus Python 3.12 or later and the repository-local Lean toolchain. See [Platforms and toolchain](#platforms-and-toolchain), [Coding agents through ALA](#coding-agents-through-ala) and [Agent home](#agent-home).
+
+## Deep Proof process viewer
+
+`node tools/process-viewer.mjs` (or `npm run start`) starts a read-only viewer for the recorded process of Deep Proof analyses and report checks. It is a separate server from the pilot: it shares no state with it, serves one page, `tools/process-viewer.html`, and uses only built-in Node.js modules.
+
+**Settings.** The viewer reads these once at start and never writes them. The environment wins over the settings file, which is `tmp/process-viewer/settings.json` unless `VIEWER_SETTINGS` names another file below `tmp/`:
+
+| Environment variable | Settings file key | Meaning |
+| --- | --- | --- |
+| `VIEWER_DEEP_PROOF_DATA` | `deepProofData` | Absolute path of the Deep Proof data folder. Only its `projects/` folder is read. |
+| `VIEWER_DOSSIERS` | `dossiers` | Benchmark dossier folders, absolute paths (separated as `PATH` is separated in the variable, a list in the file). A dossier is one folder holding `sources/*.md` and `report-*.md`. |
+| `VIEWER_DEEP_PROOF_TMP` | `deepProofTmp` | The temporary folder the Deep Proof server uses, only when it differs from this machine's. The live draft of a running Check Report is read from it. |
+| `VIEWER_PORT` | `port` | The port, default 8790; 0 picks a free one. |
+
+```json
+{
+  "deepProofData": "<absolute path of the Deep Proof data folder>",
+  "dossiers": ["<absolute path of one dossier folder>"],
+  "port": 8790
+}
+```
+
+**The address and the key.** The viewer listens on `127.0.0.1` only and answers only that host name. At each start it makes a new access key and prints `Process viewer: http://127.0.0.1:<port>/#key=<key>`. Open that address: the page moves the key into the browser tab's session storage and clears it from the address bar, then sends it as the `X-Viewer-Key` header with every request. Every `/api/` route without the key answers 401. A page opened without a key shows a field to paste it. The key keeps a sandboxed run, which shares the host network, from asking the viewer which dossier report is the flawed one.
+
+**What it shows.** The left bar lists Deep Proof Runs (a status icon and word for each: Running, Completed, Time Limit Reached, Failed, Interrupted, Not Recorded, Imported Report) and Benchmark Dossiers. A run page has a header of chips, then three blocks: Inputs, Process and Results. The timeline's details open in place. The page asks again every 3 seconds and keeps open details, the scroll position and the selected run. A dossier page lists the sources and the two reports under neutral names (`report-<first 12 hex digits of the SHA-256>.md`, in the order of that digest), with a download that keeps the neutral name, and the runs whose documents match by file hash. Deep Proof gives a reviewing agent the file name and the title of an imported report, so import the neutral download and rename nothing. The Settings panel is the only place that shows folder paths.
+
+**Limits.**
+
+- The viewer only reads. It serves GET requests only, never follows a link inside a folder it reads, never opens the Deep Proof database or anything outside `projects/`, and never opens an answer-key folder: a dossier setting that points at one stops the viewer at start. It starts no process and sends no request to any other host.
+- The process is shown only for runs that Deep Proof recorded: Deep Proof must have been started with `DEEP_PROOF_TRACE=1`. A run without a record shows a status worked out from its files, labelled "inferred from files", and a list of what is missing.
+- A Check Report's live draft is shown only when its work folder lies in the temporary folder the viewer knows (`deepProofTmp`). The Settings panel says when it does not match.
+- Text from a file is shown as text; outside links are shown, not followed. Data files (JSON) are listed by name and size and not displayed.
+- The trace and the kept work folder hold the documents of the run in plain files. Anyone who can read the Deep Proof data folder or who has the key can read every project.
+
+**Checks.** `node --test tools/test-process-viewer.mjs` is the model-free suite of the server (it is the `process-viewer` suite of `verify.mjs`). `CHROME="<path of a Chrome binary>" node tools/test-process-viewer-browser.mjs` drives the page in headless Chrome against a synthetic fixture on a free port and writes `result.md` and screenshots at 1440 and 390 pixels wide under `tmp/process-viewer-browser-<stamp>/`; it needs no model and no network. `node tools/check-viewer-readonly.mjs` compares a manifest of a data folder's `projects/` before and after the viewer reads every route; run it while no Deep Proof run is active.
 
 ## Platforms and toolchain
 
@@ -249,7 +284,7 @@ Exit codes: 0 when ALA succeeded, every required row of the checked mode passed 
 node tools/verify.mjs [--require-lean] [--only <suite>[,<suite>]] [--list]
 ```
 
-`verify.mjs` runs every check that needs no model, coding agent or internet: it resolves Python and Lean, runs each suite and prints a table of passes, failures and skips per suite, with the logs in `tmp/verify/<timestamp>/<suite>.log`. `--list` prints the suites and their commands without running them; the suites are `toolchain`, `verify`, `remote-verify`, `agent-home`, `ala`, `markdown-server`, `report-generation` and `python-tests` (the only one that needs Python 3.12 or later). The agent-home suite covers the setting and `set-home`. It also compares its fixture's login-file lists with a real ALA: the one in `ALA_CLI`, else the installed copy; with neither, that test is skipped with a reason.
+`verify.mjs` runs every check that needs no model, coding agent or internet: it resolves Python and Lean, runs each suite and prints a table of passes, failures and skips per suite, with the logs in `tmp/verify/<timestamp>/<suite>.log`. `--list` prints the suites and their commands without running them; the suites are `toolchain`, `verify`, `remote-verify`, `agent-home`, `ala`, `markdown-server`, `report-generation`, `process-viewer` and `python-tests` (the only one that needs Python 3.12 or later). The agent-home suite covers the setting and `set-home`. It also compares its fixture's login-file lists with a real ALA: the one in `ALA_CLI`, else the installed copy; with neither, that test is skipped with a reason.
 
 - A suite passes only if it exits 0 and prints a readable summary in which at least one test passed. A suite that cannot be started, exits non-zero, prints no summary, runs no test or skips every test fails.
 - `NOT RUN` means a suite needed Python 3.12 or later and none was found. It is a failure, not a skip: the script says so, runs the suites that need no Python, marks the others `NOT RUN`, and exits 1. It never reports a pass for a suite it did not run.
@@ -274,12 +309,14 @@ node tools/remote-verify.mjs --host <ssh-host> --target <absolute-remote-folder>
 
 ```sh
 node tools/verify.mjs
+node --test tools/test-process-viewer.mjs
+CHROME="<path of a Chrome binary>" node tools/test-process-viewer-browser.mjs
 node tools/test-audit-workspace.mjs investment-approval
 node tools/test-audit-workspace.mjs investment-approval-ro
 python3 tools/validate-readable-examples.py --output tmp/readable-pilot/example-validation.md
 ```
 
-The Python suite needs Python 3.12 or later; on a host without one, `verify.mjs` reports it as `NOT RUN`. `verify.mjs` covers the server, ALA integration, agent-home, toolchain and Python suites; individual suites can be run by their commands from `--list`, for example `node --test tools/test-ala.mjs` or `node tools/test-markdown-server.mjs`. The two `test-audit-workspace.mjs` commands read an already running server on port 8787.
+The Python suite needs Python 3.12 or later; on a host without one, `verify.mjs` reports it as `NOT RUN`. `verify.mjs` covers the server, ALA integration, agent-home, toolchain and Python suites; individual suites can be run by their commands from `--list`, for example `node --test tools/test-ala.mjs` or `node tools/test-markdown-server.mjs`. The two `test-audit-workspace.mjs` commands read an already running pilot server on port 8787 (`npm run pilot`). The process viewer's browser test starts its own viewer on a free port and a throwaway Chrome profile.
 
 Server tests use controlled isolated inputs and an explicitly simulated ALA checkout; they never start a coding agent. Proof tests execute real Lean and are skipped, with a reason, when Lean or Python 3.12 is missing. Browser tests read the running application without creating examples or mutating audit documents. Their artifacts remain under `tmp/` for inspection; the browser profile lives in the host temporary folder and is removed afterwards. The read-only example validator checks the seven added dossiers in both languages, both current report variants, retained source snapshots, individual phases, proof targets and logs. It returns a failure while any required run is pending or incomplete and writes a readable summary; it does not substitute structural validity for semantic review.
 
