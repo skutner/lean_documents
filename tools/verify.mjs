@@ -28,6 +28,7 @@ export const SUITES = [
   {name: 'ala', command: ['node', '--test', 'tools/test-ala.mjs']},
   {name: 'markdown-server', command: ['node', 'tools/test-markdown-server.mjs']},
   {name: 'report-generation', command: ['node', 'tools/test-report-generation.mjs']},
+  {name: 'process-viewer', command: ['node', '--test', 'tools/test-process-viewer.mjs']},
   {name: 'python-tests', command: ['{python}', '-m', 'unittest', 'discover', '-s', 'tests', '-v'], python: true}
 ];
 
