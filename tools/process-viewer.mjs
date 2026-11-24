@@ -12,7 +12,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {readFileSync} from 'node:fs';
+import {readFileSync, realpathSync} from 'node:fs';
 import {openRoots, proveNoFollow} from './pv-read.mjs';
 import {createTraceIndex, ViewerError, isId} from './pv-trace.mjs';
 import {createRunIndex} from './pv-runs.mjs';
@@ -87,9 +87,10 @@ const segment = value => {
 // ---------- The server ----------
 
 /** Starts the viewer. Proves the no-link flag first (macOS), resolves the roots, then listens on 127.0.0.1.
- * `deepProof` is `null` or `{url, recording: true|false|null, startedHere}`, shown by /api/status. `now`, `alive` and
+ * `server` is an http server that already listens on 127.0.0.1 (the launcher holds the port while it starts Deep Proof);
+ * the viewer takes it over instead of listening itself. `deepProof` is `null` or `{url, recording: true|false|null, startedHere}`, shown by /api/status. `now`, `alive` and
  * `pageFile` exist for tests. Returns `{server, port, url, roots, close}`. */
-export async function startViewer({settings, now = Date.now, alive, pageFile = PAGE_FILE, deepProof = null} = {}) {
+export async function startViewer({settings, now = Date.now, alive, pageFile = PAGE_FILE, deepProof = null, server: listening = null} = {}) {
   proveNoFollow();
   const roots = openRoots(settings);
   const traces = createTraceIndex({root: roots.data});
@@ -154,7 +155,7 @@ export async function startViewer({settings, now = Date.now, alive, pageFile = P
     throw new ViewerError(404, 'There is no such address.');
   }
 
-  const server = http.createServer((req, res) => {
+  const handle = (req, res) => {
     try {
       if (req.headers.host !== `127.0.0.1:${port}`) return unread(req, res, 400, `Use http://127.0.0.1:${port}`);
       if (req.method !== 'GET') return unread(req, res, 405, 'Only GET is served.', {Allow: 'GET'});
@@ -169,12 +170,18 @@ export async function startViewer({settings, now = Date.now, alive, pageFile = P
       if (error instanceof ViewerError) return json(res, error.status, {error: error.message});
       return json(res, 500, {error: 'The viewer could not complete this request.'});
     }
-  });
+  };
+  const server = listening ?? http.createServer();
+  server.removeAllListeners('request');
+  server.on('request', handle);
 
-  await new Promise((resolve, reject) => {
-    server.once('error', error => reject(new Error(error.code === 'EADDRINUSE' ? `Port ${settings.port} is in use. Set VIEWER_PORT to another port.` : 'The viewer could not start listening.')));
-    server.listen(settings.port, '127.0.0.1', resolve);
-  });
+
+  if (!listening) {
+    await new Promise((resolve, reject) => {
+      server.once('error', error => reject(new Error(error.code === 'EADDRINUSE' ? `Port ${settings.port} is in use. Set VIEWER_PORT to another port.` : 'The viewer could not start listening.')));
+      server.listen(settings.port, '127.0.0.1', resolve);
+    });
+  }
   port = server.address().port;
   return {
     server, port, roots, url: `http://127.0.0.1:${port}/`,
@@ -198,4 +205,4 @@ async function main() {
   if (!viewer.roots.data) console.log('No Deep Proof data folder is set. Set VIEWER_DEEP_PROOF_DATA or use npm run start.');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main();
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main();

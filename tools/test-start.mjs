@@ -16,7 +16,7 @@ import path from 'node:path';
 import http from 'node:http';
 import {spawn} from 'node:child_process';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {start, StartError, inspectProcess, classifyDeepProofPort, listenerPid} from './start.mjs';
+import {start, StartError, StartAborted, deepProofEnvironment, inspectProcess, classifyDeepProofPort, listenerPid} from './start.mjs';
 import {startViewer} from './process-viewer.mjs';
 import {TraceBuilder, runStartFields} from './process-viewer-fixture.mjs';
 
@@ -30,12 +30,13 @@ const FAKE_SERVER = `import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 if (process.env.FAKE_EXIT) { console.error('boom-from-the-fake-server'); process.exit(Number(process.env.FAKE_EXIT)); }
+fs.appendFileSync('spawns.log', process.pid + '\\n');
 const dir = path.resolve(process.env.ANALYST_DATA_DIR || '.runtime');
 fs.mkdirSync(path.join(dir, 'projects'), {recursive: true});
 http.createServer((req, res) => {
   if (req.url === '/__env') {
     res.setHeader('content-type', 'application/json');
-    return res.end(JSON.stringify({trace: process.env.DEEP_PROOF_TRACE ?? null, port: process.env.PORT ?? null, host: process.env.HOST ?? null, cert: process.env.SSL_CERT_FILE ?? null, pid: process.pid, cwd: process.cwd()}));
+    return res.end(JSON.stringify({trace: process.env.DEEP_PROOF_TRACE ?? null, port: process.env.PORT ?? null, host: process.env.HOST ?? null, cert: process.env.SSL_CERT_FILE ?? null, pid: process.pid, cwd: process.cwd(), npm: process.env.npm_lifecycle_event ?? null, path: process.env.PATH ?? null}));
   }
   res.setHeader('content-type', 'text/html');
   res.end('<!doctype html><title>Deep Proof</title>');
@@ -53,6 +54,11 @@ if (process.env.FAKE_BUILD_FAIL) {
   fs.mkdirSync(path.join(build, '.minutes-edition-8-cafe', 'keys'), {recursive: true});
   console.error('the generator failed (exit 2)');
   process.exit(1);
+}
+if (process.env.FAKE_BUILD_GRANDCHILD) {
+  const {spawn} = await import('node:child_process');
+  const late = "const fs=require('fs'),path=require('path');const d=process.argv[1];fs.writeFileSync(path.join(d,'grandchild.pid'),String(process.pid));setTimeout(()=>{fs.mkdirSync(path.join(d,'build','minutes-edition-8','keys'),{recursive:true})},1500)";
+  spawn(process.execPath, ['-e', late, data], {stdio: 'ignore'});
 }
 if (process.env.FAKE_BUILD_SLEEP) await new Promise(resolve => setTimeout(resolve, Number(process.env.FAKE_BUILD_SLEEP)));
 const target = path.join(build, 'minutes-edition-8');
@@ -169,7 +175,7 @@ test('the checkout is the sibling folder, DEEP_PROOF_DIR overrides it (also with
   for (const [extra, extraOptions, pattern] of [[{DEEP_PROOF_DIR: path.join(w.base, 'nonexistent')}, {}, /Deep Proof was not found in .*nonexistent\. Set DEEP_PROOF_DIR/], [{DEEP_PROOF_DIR: wrong}, {}, /Deep Proof was not found/], [{}, {nodeVersion: '23.9.0'}, /needs Node\.js 24 or later; this is 23\.9\.0/]]) {
     await assert.rejects(start({repoRoot: w.repo, deepProofPort, env: envFor(viewerPort, extra), open: false, log: () => {}, opener: () => {}, run: noRun, platform: 'darwin', timeouts: FAST, ...extraOptions}), error => error instanceof StartError && pattern.test(error.message) && !error.message.includes('\n'));
   }
-  assert.ok(!fs.existsSync(path.join(w.repo, 'tmp')), 'nothing was written: no log, no lock');
+  assert.ok(!fs.existsSync(path.join(w.repo, 'tmp')), 'nothing was written: no log');
   assert.ok(await refused(deepProofPort) && await refused(viewerPort), 'nothing listens');
 });
 
@@ -190,7 +196,6 @@ test('a free Deep Proof port starts the server with recording on, in its own fol
   assert.equal(status.connected, true);
   assert.equal(status.folders.data, path.join(w.dp, '.runtime'), 'the data folder of the server it started');
   assert.ok(fs.existsSync(path.join(w.repo, 'tmp', 'deep-proof-server.log')));
-  assert.ok(!fs.existsSync(path.join(w.repo, 'tmp', 'start.lock')), 'the start-up lock is released');
   // stop() is safe to call twice and ends both.
   const [a, b] = [r.stop(), r.stop()];
   assert.strictEqual(a, b);
@@ -298,14 +303,13 @@ test('port 8000 is free only when refused: another web page and a listener that 
     await new Promise(resolve => { server.closeAllConnections?.(); for (const s of sockets) s.destroy(); server.close(resolve); });
   }
   assert.ok(!fs.existsSync(path.join(w.repo, 'tmp', 'deep-proof-server.log')), 'nothing was spawned');
-  assert.ok(await refused(viewerPort), 'no viewer was started');
-  assert.ok(!fs.existsSync(path.join(w.repo, 'tmp', 'start.lock')));
+  assert.ok(await refused(viewerPort), 'no viewer was started, and the port held while starting is freed');
 });
 
 test('the six books come from one build, with no answer keys left, nothing written in the checkout; a failed build gives no books and a working viewer', async t => {
   const w = world(t);
   const {deepProofPort, viewerPort} = await ports(t);
-  const listTree = dir => fs.readdirSync(dir, {recursive: true}).filter(f => !f.startsWith('.runtime')).sort();
+  const listTree = dir => fs.readdirSync(dir, {recursive: true}).filter(f => !f.startsWith('.runtime') && f !== 'spawns.log').sort();
   const before = listTree(w.dp);
   const buildRoot = path.join(w.repo, 'tmp', 'minute-books', 'build');
   fs.mkdirSync(path.join(buildRoot, '.minutes-edition-8-old', 'keys'), {recursive: true});
@@ -407,29 +411,81 @@ test('stop() mentions a run that is still going, and says nothing when none is; 
   assert.ok(await refused(viewerPort), 'the viewer is closed');
 });
 
-test('a Deep Proof that exits at once fails the start with the log tail; two launchers started together leave one Deep Proof and one viewer', async t => {
+test('a Deep Proof that exits at once fails the start with the log tail; two launchers started together in one process start one Deep Proof', async t => {
   const w = world(t);
   const {deepProofPort, viewerPort} = await ports(t);
   await assert.rejects(launch(w, {deepProofPort, env: envFor(viewerPort, {FAKE_EXIT: '3'}), opener: () => {}, run: noRun}),
     error => /exited at start \(exit code 3\)/.test(error.message) && /boom-from-the-fake-server/.test(error.message));
-  assert.ok(await refused(deepProofPort) && await refused(viewerPort));
-  assert.ok(!fs.existsSync(path.join(w.repo, 'tmp', 'start.lock')), 'the lock is released after a failure');
-  // A lock that is still empty is being written: it is waited for, never deleted. An old empty one and one of a dead pid are taken over.
-  const lock = path.join(w.repo, 'tmp', 'start.lock');
-  fs.writeFileSync(lock, '');
-  await assert.rejects(launch(w, {deepProofPort, env: envFor(viewerPort), opener: () => {}, run: noRun, timeouts: {...FAST, lockMs: 300}}), error => /still starting/.test(error.message));
-  assert.ok(fs.existsSync(lock), 'the lock of another launcher was left alone');
-  const old = new Date(Date.now() - 60000);
-  fs.utimesSync(lock, old, old);
-  const taken = await launch(w, {deepProofPort, env: envFor(viewerPort, {FAKE_EXIT: '4'}), opener: () => {}, run: noRun}).catch(error => error);
-  assert.match(taken.message, /exited at start \(exit code 4\)/, 'an old empty lock is taken over');
-  fs.writeFileSync(lock, '2147483000');
+  assert.ok(await refused(deepProofPort) && await refused(viewerPort), 'the port held while starting is freed after a failure');
   const [a, b] = await Promise.all([launch(w, {deepProofPort, env: envFor(viewerPort), opener: () => {}, run: noRun}), launch(w, {deepProofPort, env: envFor(viewerPort), opener: () => {}, run: noRun})]);
   assert.deepEqual([a.alreadyRunning, b.alreadyRunning].sort(), [false, true], 'one starts, the other finds it');
   const winner = a.alreadyRunning ? b : a;
   assert.equal((await getJson(deepProofPort, '/__env')).pid, winner.deepProof.pid, 'the winner\'s server still answers');
-  assert.equal(fs.readFileSync(path.join(w.repo, 'tmp', 'deep-proof-server.log'), 'utf8').split('\n').filter(l => /boom/.test(l)).length, 2, 'only the two earlier failures are in the log: the winner is the one server started since');
+  assert.equal(fs.readFileSync(path.join(w.dp, 'spawns.log'), 'utf8').trim().split('\n').length, 1, 'exactly one Deep Proof was spawned');
+  assert.ok(w.logs.some(l => /already running/.test(l)));
   await winner.stop();
+});
+
+test('two launcher processes started together spawn exactly one Deep Proof; the other finds it and exits 0; the real listener check accepts the child', async t => {
+  const w = world(t);
+  const {deepProofPort, viewerPort} = await ports(t);
+  const dossier = path.join(w.base, 'a-dossier');
+  fs.mkdirSync(path.join(dossier, 'sources'), {recursive: true});
+  const code = `import {main} from ${JSON.stringify(pathToFileURL(path.join(tools, 'start.mjs')).href)};
+main(['--no-open'], {deepProofPort: ${deepProofPort}, repoRoot: ${JSON.stringify(w.repo)}, env: process.env}).then(c => { process.exitCode = c; });`;
+  const env = {PATH: process.env.PATH, VIEWER_PORT: String(viewerPort), VIEWER_DOSSIERS: dossier};
+  const launchers = [0, 1].map(() => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code], {env, stdio: ['ignore', 'pipe', 'pipe']});
+    child.out = '';
+    child.stdout.on('data', c => { child.out += c; });
+    child.stderr.on('data', c => { child.out += c; });
+    child.done = new Promise(resolve => child.on('exit', (c, sig) => resolve({code: c, signal: sig})));
+    t.after(() => child.kill('SIGKILL'));
+    return child;
+  });
+  for (let i = 0; i < 150 && !launchers.some(l => /Press Ctrl-C to stop the viewer and the Deep Proof/.test(l.out)) ; i++) await sleep(100);
+  const winner = launchers.find(l => /Press Ctrl-C to stop the viewer and the Deep Proof/.test(l.out));
+  assert.ok(winner, launchers.map(l => l.out).join('\n---\n'));
+  const loser = launchers.find(l => l !== winner);
+  assert.deepEqual(await loser.done, {code: 0, signal: null}, loser.out);
+  assert.match(loser.out, /already running/);
+  assert.equal(fs.readFileSync(path.join(w.dp, 'spawns.log'), 'utf8').trim().split('\n').length, 1, 'exactly one fake Deep Proof was spawned');
+  const dpPid = (await getJson(deepProofPort, '/__env')).pid;
+  winner.kill('SIGINT');
+  assert.deepEqual(await winner.done, {code: 0, signal: null});
+  assert.equal(alive(dpPid), false);
+  assert.ok(await refused(deepProofPort) && await refused(viewerPort));
+});
+
+test('Deep Proof gets the launcher\'s environment without npm: no npm_* variable and no node_modules/.bin on PATH; made-up values', async t => {
+  const dirty = {PATH: ['/repo/node_modules/.bin', '/usr/bin', '/other/node_modules/.bin/', '/opt/node_modules/.binary', '/opt/bin'].join(path.delimiter), npm_lifecycle_event: 'start', npm_config_user_agent: 'npm/11', NPM_CONFIG_PREFIX: '/x', HOME: '/home/made-up', SECRET_KEPT: 'yes'};
+  assert.deepEqual(deepProofEnvironment(dirty), {PATH: ['/usr/bin', '/opt/node_modules/.binary', '/opt/bin'].join(path.delimiter), HOME: '/home/made-up', SECRET_KEPT: 'yes'});
+  // And what the spawned server really receives.
+  const w = world(t);
+  const {deepProofPort, viewerPort} = await ports(t);
+  const r = await launch(w, {deepProofPort, env: envFor(viewerPort, {npm_lifecycle_event: 'start', PATH: `${path.join(w.repo, 'node_modules', '.bin')}${path.delimiter}${process.env.PATH}`}), opener: () => {}, run: noRun});
+  const seen = await getJson(deepProofPort, '/__env');
+  assert.equal(seen.npm, null);
+  assert.ok(!seen.path.includes('node_modules'), seen.path);
+  await r.stop();
+});
+
+test('the listener on the Deep Proof port must be the process that was spawned; an interrupt before spawning or after the viewer is up leaves nothing and says nothing misleading', async t => {
+  const w = world(t);
+  const {deepProofPort, viewerPort} = await ports(t);
+  const otherListener = (command, args) => (command === 'lsof' && args.some(a => a === `-iTCP:${deepProofPort}`) ? {status: 0, stdout: 'p1\n'} : {status: 1, stdout: ''});
+  await assert.rejects(launch(w, {deepProofPort, env: envFor(viewerPort), opener: () => {}, run: otherListener}), error => error.message === `Port ${deepProofPort} was taken by another program while Deep Proof started.`);
+  assert.ok(await refused(deepProofPort) && await refused(viewerPort), 'the child was stopped and the port freed');
+  // An abort that is already set stops before anything is spawned.
+  fs.rmSync(path.join(w.repo, 'tmp'), {recursive: true, force: true});
+  await assert.rejects(launch(w, {deepProofPort, env: envFor(viewerPort), opener: () => {}, run: noRun, signal: AbortSignal.abort()}), error => error instanceof StartAborted);
+  assert.ok(!fs.existsSync(path.join(w.repo, 'tmp', 'deep-proof-server.log')), 'nothing was spawned');
+  // An abort that arrives while the viewer starts: Deep Proof and viewer are stopped and "stopped by itself" is not logged.
+  w.logs.length = 0;
+  const controller = new AbortController();
+  await assert.rejects(launch(w, {deepProofPort, env: envFor(viewerPort), opener: () => {}, run: noRun, signal: controller.signal, log: line => { w.logs.push(line); if (/^Books:/.test(line)) controller.abort(); }}), error => error instanceof StartAborted);
+  assert.ok(!w.logs.some(l => /stopped by itself/.test(l)), w.logs.join(' | '));
+  assert.ok(await refused(deepProofPort) && await refused(viewerPort));
 });
 
 test('npm run start as a process: Ctrl-C (SIGINT) stops the viewer and the Deep Proof it started and exits 0', async t => {
@@ -456,12 +512,12 @@ main(['--no-open'], {deepProofPort: ${deepProofPort}, repoRoot: ${JSON.stringify
   assert.ok(await refused(deepProofPort) && await refused(viewerPort));
 });
 
-test('Ctrl-C while the books are being built stops the Deep Proof that was already started, releases the lock and exits 0', async t => {
+test('Ctrl-C while the books are being built stops the Deep Proof that was already started and the generator it spawned, and exits 0', async t => {
   const w = world(t);
   const {deepProofPort, viewerPort} = await ports(t);
   const code = `import {main} from ${JSON.stringify(pathToFileURL(path.join(tools, 'start.mjs')).href)};
 main(['--no-open'], {deepProofPort: ${deepProofPort}, repoRoot: ${JSON.stringify(w.repo)}, env: process.env}).then(c => { process.exitCode = c; });`;
-  const env = {PATH: process.env.PATH, VIEWER_PORT: String(viewerPort), FAKE_BUILD_SLEEP: '60000'};
+  const env = {PATH: process.env.PATH, VIEWER_PORT: String(viewerPort), FAKE_BUILD_SLEEP: '60000', FAKE_BUILD_GRANDCHILD: '1'};
   const child = spawn(process.execPath, ['--input-type=module', '-e', code], {env, stdio: ['ignore', 'pipe', 'pipe']});
   let out = '';
   child.stdout.on('data', c => { out += c; });
@@ -470,13 +526,17 @@ main(['--no-open'], {deepProofPort: ${deepProofPort}, repoRoot: ${JSON.stringify
   const exit = new Promise(resolve => child.on('exit', (c, s) => resolve({code: c, signal: s})));
   for (let i = 0; i < 100 && !/Building the six/.test(out); i++) await sleep(100);
   assert.match(out, /Building the six/, out);
+  const pidFile = path.join(w.repo, 'tmp', 'minute-books', 'grandchild.pid');
+  for (let i = 0; i < 100 && !fs.existsSync(pidFile); i++) await sleep(50);
   const dpPid = (await getJson(deepProofPort, '/__env')).pid;
   child.kill('SIGINT');
   assert.deepEqual(await exit, {code: 0, signal: null}, out);
   assert.equal(alive(dpPid), false, 'the Deep Proof that was started before the build is gone');
   assert.ok(await refused(deepProofPort) && await refused(viewerPort));
-  assert.ok(!fs.existsSync(path.join(w.repo, 'tmp', 'start.lock')), 'the lock is released');
-  assert.ok(!fs.existsSync(path.join(w.repo, 'tmp', 'minute-books', 'build', 'minutes-edition-8')), 'no half-built book folder');
+  const grandchild = Number(fs.readFileSync(path.join(w.repo, 'tmp', 'minute-books', 'grandchild.pid'), 'utf8'));
+  await sleep(2200); // the generator would have written its keys after 1.5 seconds
+  assert.equal(alive(grandchild), false, 'the process the build started is gone');
+  assert.ok(!fs.existsSync(path.join(w.repo, 'tmp', 'minute-books', 'build', 'minutes-edition-8')), 'no half-built book folder and no keys');
 });
 
 test('a Deep Proof that dies while the books are being built fails the start with its log tail and leaves nothing', async t => {
@@ -492,5 +552,4 @@ await new Promise(resolve => setTimeout(resolve, 400));
 `);
   await assert.rejects(launch(w, {deepProofPort, env: envFor(viewerPort), opener: () => {}, run: noRun}), error => /Deep Proof exited during start \(no exit code\)/.test(error.message) && error.message.includes('deep-proof-server.log'));
   assert.ok(await refused(deepProofPort) && await refused(viewerPort));
-  assert.ok(!fs.existsSync(path.join(w.repo, 'tmp', 'start.lock')));
 });

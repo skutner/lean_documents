@@ -76,6 +76,7 @@ async function classifyViewerPort(port, timeoutMs) {
   if (answer.state === 'ok' && answer.status === 200) {
     try {
       const status = JSON.parse(answer.body);
+      if (status && status.starting === true) return {kind: 'starting'};
       if (status && typeof status.pollMs === 'number' && status.folders && 'dossiersConfigured' in status) return {kind: 'viewer', status};
     } catch { /* not JSON: another program */ }
   }
@@ -135,38 +136,33 @@ export function inspectProcess(pid, {run = runCommand, platform = process.platfo
   }
 }
 
-// ---------- Start-up lock ----------
+// ---------- The viewer port as the start-up lock ----------
 
-const heldLocks = new Set();
-const pidAlive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; } };
+/** Binds the viewer port before anything else is started and answers `{starting: true}` on it until the viewer takes the
+ * server over. The operating system frees the port when the launcher dies, so nothing goes stale. */
+function listenEarly(port) {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      const body = JSON.stringify({starting: true});
+      res.writeHead(200, {'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store'});
+      res.end(body);
+    });
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => { server.removeListener('error', reject); resolve(server); });
+  });
+}
+const closeServer = server => new Promise(resolve => { server.close(() => resolve()); server.closeAllConnections(); });
 
-/** One start-up at a time per repository: an exclusive file below tmp/ that holds the pid of its owner and is stale when
- * that pid is gone. Two launchers started together would otherwise both start a Deep Proof on one data folder. */
-async function takeLock(file, {waitMs, pollMs, signal}) {
-  fs.mkdirSync(path.dirname(file), {recursive: true});
-  const until = Date.now() + waitMs;
-  for (;;) {
-    if (signal?.aborted) throw new StartAborted('Interrupted while waiting for another start.');
-    try {
-      fs.writeFileSync(file, String(process.pid), {flag: 'wx'});
-      heldLocks.add(file);
-      return () => { heldLocks.delete(file); try { fs.rmSync(file, {force: true}); } catch { /* already gone */ } };
-    } catch (error) {
-      if (error.code !== 'EEXIST') fail('The start-up lock could not be taken.');
-    }
-    // Stale only when it names a pid that is gone, or is unreadable for good: a file that is still empty is being written.
-    let text = null;
-    try { text = fs.readFileSync(file, 'utf8').trim(); } catch { /* released meanwhile */ }
-    const owner = Number(text);
-    const empty = text === '';
-    const young = () => { try { return Date.now() - fs.statSync(file).mtimeMs < 10000; } catch { return false; } };
-    if (text !== null && !(empty && young()) && !(Number.isInteger(owner) && owner > 0 && (heldLocks.has(file) || (owner !== process.pid && pidAlive(owner))))) {
-      try { fs.rmSync(file, {force: true}); } catch { /* another launcher took it */ }
-      continue;
-    }
-    if (Date.now() > until) fail('Another npm run start is still starting. Wait for it, then run npm run start again.');
-    await sleep(pollMs);
+/** The environment given to Deep Proof and to the book build: the launcher's own, without what npm adds when this runs as
+ * `npm run start` (the npm_* variables and every node_modules/.bin on PATH), so that Deep Proof does not find this
+ * repository's tools there. */
+export function deepProofEnvironment(env) {
+  const clean = {};
+  for (const [key, value] of Object.entries(env)) if (!/^npm_/i.test(key)) clean[key] = value;
+  if (typeof clean.PATH === 'string') {
+    clean.PATH = clean.PATH.split(path.delimiter).filter(entry => !/(^|[\\/])node_modules[\\/]\.bin[\\/]?$/.test(entry)).join(path.delimiter);
   }
+  return clean;
 }
 
 // ---------- Pieces of start() ----------
@@ -219,13 +215,15 @@ async function prepareBooks({repoRoot, checkout, env, run, python, log, buildMs,
     if (interpreter) args.push('--python', interpreter);
     log('Building the six edition 8 books once, below tmp/minute-books. This takes about a minute.');
     const built = await new Promise(resolve => {
-      const proc = spawn(process.execPath, args, {cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe']});
+      const proc = spawn(process.execPath, args, {cwd: repoRoot, env, detached: true, stdio: ['ignore', 'pipe', 'pipe']});
+      // The build runs in its own process group, so that the generator it starts goes with it.
+      const killGroup = () => { try { process.kill(-proc.pid, 'SIGKILL'); } catch { try { proc.kill('SIGKILL'); } catch { /* gone */ } } };
       let output = '';
       const add = chunk => { output = (output + chunk).slice(-8192); };
       proc.stdout.on('data', add);
       proc.stderr.on('data', add);
-      const timer = setTimeout(() => proc.kill('SIGKILL'), buildMs);
-      const onAbort = () => proc.kill('SIGKILL');
+      const timer = setTimeout(killGroup, buildMs);
+      const onAbort = killGroup;
       signal?.addEventListener('abort', onAbort, {once: true});
       proc.on('error', error => { clearTimeout(timer); resolve({status: 1, output: error.message}); });
       proc.on('close', status => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); resolve({status, output}); });
@@ -269,12 +267,14 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
   let settings;
   try { settings = loadSettings({env}); } catch (error) { fail(error.message); }
   const tmp = path.join(repoRoot, 'tmp');
-  const release = await takeLock(path.join(tmp, 'start.lock'), {waitMs: t.lockMs, pollMs: t.pollMs, signal});
   const deepProofUrl = `http://127.0.0.1:${deepProofPort}/`;
+  const childBase = deepProofEnvironment(env);
   let child = null;
   let exited = null;
   let viewer = null;
   let stopping = null;
+  let stoppingChild = false;
+  let early = null;
   let settle;
   const finished = new Promise(resolve => { settle = resolve; });
 
@@ -293,6 +293,7 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
   /** Stops only the process this function spawned: SIGTERM to its group, SIGKILL when it is still there after killMs. */
   const stopChild = async () => {
     if (!child || exited) return;
+    stoppingChild = true;
     const signal = name => { try { process.kill(-child.pid, name); } catch { try { child.kill(name); } catch { /* gone */ } } };
     signal('SIGTERM');
     const until = Date.now() + t.killMs;
@@ -304,23 +305,37 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
   };
 
   try {
-    // Step 2: the viewer port.
+    // Step 2: the viewer port is the lock. Whoever binds it first starts everything; the others find it taken.
     if (settings.port !== 0) {
-      const seen = await classifyViewerPort(settings.port, t.probeMs);
-      if (seen.kind === 'other') fail(`Port ${settings.port} is used by another program. Set VIEWER_PORT to another port.`);
-      if (seen.kind === 'viewer') {
-        const address = `http://127.0.0.1:${settings.port}/`;
-        const where = await classifyDeepProofPort(deepProofPort, t.probeMs);
-        if (where === 'free') fail('Deep Proof is not running. Stop the other npm run start, then run it again.');
-        if (where === 'other') fail(`Port ${deepProofPort} is used by another program.`);
-        const pid = listenerPid(deepProofPort, run);
-        const known = seen.status.deepProof;
-        const recording = known && 'recording' in known ? known.recording : pid ? inspectProcess(pid, {run, platform}).recording : null;
-        log(`The viewer is already running: ${address}`);
-        log(`Deep Proof is running at ${deepProofUrl} (pid ${pid ?? 'unknown'}), recording ${recordingWord(recording)}.`);
-        if (recording === false) log(OFF_TEXT_VIEWER_UP);
-        if (open) { try { opener(address); } catch { /* the address is printed */ } }
-        return {viewer: null, alreadyRunning: true, deepProof: {url: deepProofUrl, recording, startedHere: false, pid}, books: null, stop: async () => {}, finished: Promise.resolve(0)};
+      const until = Date.now() + t.lockMs;
+      let waited = false;
+      for (;;) {
+        if (signal?.aborted) throw new StartAborted('Interrupted while waiting for another start.');
+        try {
+          early = await listenEarly(settings.port);
+          break;
+        } catch (error) {
+          if (error.code !== 'EADDRINUSE') fail('The viewer could not start listening.');
+        }
+        const seen = await classifyViewerPort(settings.port, t.probeMs);
+        if (seen.kind === 'other') fail(`Port ${settings.port} is used by another program. Set VIEWER_PORT to another port.`);
+        if (seen.kind === 'viewer') {
+          const address = `http://127.0.0.1:${settings.port}/`;
+          const where = await classifyDeepProofPort(deepProofPort, t.probeMs);
+          if (where === 'free') fail('Deep Proof is not running. Stop the other npm run start, then run it again.');
+          if (where === 'other') fail(`Port ${deepProofPort} is used by another program.`);
+          const pid = listenerPid(deepProofPort, run);
+          const known = seen.status.deepProof;
+          const recording = known && 'recording' in known ? known.recording : pid ? inspectProcess(pid, {run, platform}).recording : null;
+          log(`The viewer is already running: ${address}`);
+          log(`Deep Proof is running at ${deepProofUrl} (pid ${pid ?? 'unknown'}), recording ${recordingWord(recording)}.`);
+          if (recording === false) log(OFF_TEXT_VIEWER_UP);
+          if (open) { try { opener(address); } catch { /* the address is printed */ } }
+          return {viewer: null, alreadyRunning: true, deepProof: {url: deepProofUrl, recording, startedHere: false, pid}, books: null, stop: async () => {}, finished: Promise.resolve(0)};
+        }
+        if (seen.kind === 'starting' && !waited) { log('Another npm run start is starting; waiting for it.'); waited = true; }
+        if (Date.now() > until) fail('Another npm run start is starting; wait for it.');
+        await sleep(t.pollMs);
       }
     }
 
@@ -339,8 +354,9 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
       log(`Deep Proof is already running at ${deepProofUrl} (pid ${pid ?? 'unknown'}), recording ${recordingWord(recording)}.`);
       if (recording === false) log(OFF_TEXT);
     } else {
-      const childEnv = {...env, DEEP_PROOF_TRACE: '1', PORT: String(deepProofPort), HOST: '127.0.0.1'};
+      const childEnv = {...childBase, DEEP_PROOF_TRACE: '1', PORT: String(deepProofPort), HOST: '127.0.0.1'};
       if (platform === 'darwin' && !env.SSL_CERT_FILE && !env.SSL_CERT_DIR && isFile(MAC_CA_BUNDLE)) childEnv.SSL_CERT_FILE = MAC_CA_BUNDLE;
+      checkpoint();
       fs.mkdirSync(tmp, {recursive: true});
       const fd = fs.openSync(logFile, 'a');
       try {
@@ -351,10 +367,11 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
       child.on('error', () => { exited = exited ?? {code: null, signal: null}; });
       child.on('exit', (code, signal) => {
         exited = {code, signal};
-        if (!viewer || stopping) return;
+        if (!viewer || stopping || stoppingChild) return;
         log(`Deep Proof stopped by itself (${code === null ? `signal ${signal}` : `exit code ${code}`}). Log: ${logFile}`);
         stopping = viewer.close().then(() => settle(1));
       });
+      log(`Starting Deep Proof; this can take up to ${Math.round(t.startMs / 1000)} seconds.`);
       const until = Date.now() + t.startMs;
       let ready = false;
       while (!ready) {
@@ -367,6 +384,12 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
         if ((await classifyDeepProofPort(deepProofPort, t.probeMs)) === 'deepproof') {
           await sleep(t.pollMs); // a server that lost the port to another one exits within moments
           if (exited) continue;
+          // The listener must be the process this command spawned (when the machine can tell).
+          const listener = listenerPid(deepProofPort, run);
+          if (listener !== null && listener !== child.pid) {
+            await stopChild();
+            fail(`Port ${deepProofPort} was taken by another program while Deep Proof started.`);
+          }
           ready = true;
         } else {
           await sleep(t.pollMs);
@@ -384,12 +407,13 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
     log(`Deep Proof data folder: ${dataDir}`);
     checkpoint();
     const ownBooks = settings.dossiers.length > 0;
-    const found = await prepareBooks({repoRoot, checkout, env, run, python: findPython, log, buildMs: t.buildMs, signal, build: !ownBooks});
+    const found = await prepareBooks({repoRoot, checkout, env: childBase, run, python: findPython, log, buildMs: t.buildMs, signal, build: !ownBooks});
     const books = ownBooks ? settings.dossiers : found;
     checkpoint();
     log(`Books: ${books.length}`);
     try {
-      viewer = await startViewer({settings: {...settings, deepProofData: dataDir, dossiers: books}, deepProof: {url: deepProofUrl, recording, startedHere}});
+      viewer = await startViewer({settings: {...settings, deepProofData: dataDir, dossiers: books}, deepProof: {url: deepProofUrl, recording, startedHere}, ...(early ? {server: early} : {})});
+      early = null;
     } catch (error) {
       await stopChild();
       fail(error.message);
@@ -414,11 +438,12 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
     };
     return {viewer, alreadyRunning: false, deepProof: {url: deepProofUrl, recording, startedHere, pid}, books, stop, finished};
   } catch (error) {
+    stoppingChild = true;
     if (viewer) await viewer.close().catch(() => {});
     await stopChild();
     throw error;
   } finally {
-    release();
+    if (early) await closeServer(early).catch(() => {});
   }
 }
 
@@ -447,6 +472,6 @@ export async function main(argv, {deepProofPort = DEEP_PROOF_PORT, env = process
   return running.finished;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   main(process.argv.slice(2)).then(code => { process.exitCode = code; });
 }

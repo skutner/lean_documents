@@ -8,7 +8,7 @@ Check claims in a supplied report against its source documents. Explain what is 
 npm run start
 ```
 
-`npm run start` is the only command. It starts Deep Proof from the sibling folder `../deep-proof-community-edition` with recording on, or reports on a Deep Proof that is already running; starts the read-only process viewer on Deep Proof's data folder and on the six edition 8 books; and opens `http://127.0.0.1:8790/` in the browser. The first start builds the six books once below `tmp/minute-books`. Ctrl-C stops the viewer and a Deep Proof that this command started. See [the process viewer section of the tools documentation](tools/README.md#deep-proof-process-viewer) for the overrides and the limits.
+`npm run start` is the only command: it starts Deep Proof from the sibling folder `../deep-proof-community-edition` with recording on (or reports on one that is already running), starts the read-only viewer on its data folder and on the six edition 8 books, and opens `http://127.0.0.1:8790/`, and Ctrl-C stops the viewer and a Deep Proof it started. The first start builds the six books once below `tmp/minute-books`. See [the tools documentation](tools/README.md#deep-proof-process-viewer) for the overrides and the limits.
 
 ## Deep Proof process viewer
 
