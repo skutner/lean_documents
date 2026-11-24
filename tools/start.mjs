@@ -28,6 +28,8 @@ const TIMEOUTS = {probeMs: 2000, startMs: 30000, killMs: 5000, lockMs: 180000, p
 
 /** A named problem, printed as one plain line. */
 export class StartError extends Error {}
+/** The launcher was interrupted while it was starting; everything it had started is stopped. */
+export class StartAborted extends StartError {}
 const fail = message => { throw new StartError(message); };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const isDirectory = folder => { try { return fs.statSync(folder).isDirectory(); } catch { return false; } };
@@ -140,10 +142,11 @@ const pidAlive = pid => { try { process.kill(pid, 0); return true; } catch (erro
 
 /** One start-up at a time per repository: an exclusive file below tmp/ that holds the pid of its owner and is stale when
  * that pid is gone. Two launchers started together would otherwise both start a Deep Proof on one data folder. */
-async function takeLock(file, {waitMs, pollMs}) {
+async function takeLock(file, {waitMs, pollMs, signal}) {
   fs.mkdirSync(path.dirname(file), {recursive: true});
   const until = Date.now() + waitMs;
   for (;;) {
+    if (signal?.aborted) throw new StartAborted('Interrupted while waiting for another start.');
     try {
       fs.writeFileSync(file, String(process.pid), {flag: 'wx'});
       heldLocks.add(file);
@@ -151,9 +154,13 @@ async function takeLock(file, {waitMs, pollMs}) {
     } catch (error) {
       if (error.code !== 'EEXIST') fail('The start-up lock could not be taken.');
     }
-    let owner = null;
-    try { owner = Number(fs.readFileSync(file, 'utf8')); } catch { /* released meanwhile */ }
-    if (owner !== null && !(Number.isInteger(owner) && owner > 0 && (heldLocks.has(file) || (owner !== process.pid && pidAlive(owner))))) {
+    // Stale only when it names a pid that is gone, or is unreadable for good: a file that is still empty is being written.
+    let text = null;
+    try { text = fs.readFileSync(file, 'utf8').trim(); } catch { /* released meanwhile */ }
+    const owner = Number(text);
+    const empty = text === '';
+    const young = () => { try { return Date.now() - fs.statSync(file).mtimeMs < 10000; } catch { return false; } };
+    if (text !== null && !(empty && young()) && !(Number.isInteger(owner) && owner > 0 && (heldLocks.has(file) || (owner !== process.pid && pidAlive(owner))))) {
       try { fs.rmSync(file, {force: true}); } catch { /* another launcher took it */ }
       continue;
     }
@@ -176,19 +183,19 @@ function findCheckout(env, repoRoot, nodeVersion) {
 /** The six books: `tmp/minute-books/build/<id>/fixtures/*`, built once by the checkout's own build script. Answer keys
  * never stay: the keys folder, the generation summary and stale staging folders are removed at every start. Returns the
  * dossier folders (empty when the build is not possible; the viewer then starts with none). */
-function prepareBooks({repoRoot, checkout, env, run, python, log, buildMs}) {
+async function prepareBooks({repoRoot, checkout, env, run, python, log, buildMs, signal, build = true}) {
   const script = path.join(checkout, 'tests', 'evaluation', 'minute-books');
   let selection;
   try {
     selection = JSON.parse(fs.readFileSync(path.join(script, 'selection.json'), 'utf8'));
   } catch {
-    log('The six books are not available: this Deep Proof has no minute-books selection. The viewer starts without them.');
+    if (build) log('The six books are not available: this Deep Proof has no minute-books selection. The viewer starts without them.');
     return [];
   }
   const id = selection?.id;
   const commit = selection?.generator?.commit;
   if (typeof id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(id)) {
-    log('The six books are not available: the selection of this Deep Proof is not readable. The viewer starts without them.');
+    if (build) log('The six books are not available: the selection of this Deep Proof is not readable. The viewer starts without them.');
     return [];
   }
   const dataRoot = path.join(repoRoot, 'tmp', 'minute-books');
@@ -203,6 +210,7 @@ function prepareBooks({repoRoot, checkout, env, run, python, log, buildMs}) {
     for (const name of names) if (name.startsWith(`.${id}-`) || name.startsWith('.generator-')) fs.rmSync(path.join(buildRoot, name), {recursive: true, force: true});
   };
   clean();
+  if (!build) return [];
   if (!isDirectory(fixtures)) {
     fs.rmSync(target, {recursive: true, force: true}); // an unfinished build that the build script would refuse to replace
     const args = [path.join(script, 'build.mjs'), '--data', dataRoot];
@@ -210,10 +218,25 @@ function prepareBooks({repoRoot, checkout, env, run, python, log, buildMs}) {
     const interpreter = python();
     if (interpreter) args.push('--python', interpreter);
     log('Building the six edition 8 books once, below tmp/minute-books. This takes about a minute.');
-    const built = spawnSync(process.execPath, args, {cwd: repoRoot, env, encoding: 'utf8', timeout: buildMs, maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe']});
+    const built = await new Promise(resolve => {
+      const proc = spawn(process.execPath, args, {cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe']});
+      let output = '';
+      const add = chunk => { output = (output + chunk).slice(-8192); };
+      proc.stdout.on('data', add);
+      proc.stderr.on('data', add);
+      const timer = setTimeout(() => proc.kill('SIGKILL'), buildMs);
+      const onAbort = () => proc.kill('SIGKILL');
+      signal?.addEventListener('abort', onAbort, {once: true});
+      proc.on('error', error => { clearTimeout(timer); resolve({status: 1, output: error.message}); });
+      proc.on('close', status => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); resolve({status, output}); });
+    });
     clean();
+    if (signal?.aborted) {
+      fs.rmSync(target, {recursive: true, force: true});
+      throw new StartAborted('Interrupted while the books were being built.');
+    }
     if (built.status !== 0) {
-      const reason = String(built.stderr || built.stdout || built.error?.message || 'no output').trim().split('\n').slice(-3).join(' ');
+      const reason = (built.output.trim() || 'no output').split('\n').slice(-3).join(' ');
       log(`The six books could not be built: ${reason}`);
       log('The viewer starts without them.');
       fs.rmSync(target, {recursive: true, force: true});
@@ -239,14 +262,14 @@ const recordingWord = recording => (recording === true ? 'ON' : recording === fa
  * `{viewer, deepProof: {url, recording, startedHere, pid}, books, stop, finished, alreadyRunning}`. `finished` resolves
  * 0 after stop() and 1 when a Deep Proof started here exits by itself. Everything outside the settings exists for tests. */
 export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofPort = DEEP_PROOF_PORT, open = true, opener = openBrowser, log = console.log,
-  run = runCommand, platform = process.platform, nodeVersion = process.versions.node, python, timeouts = {}} = {}) {
+  run = runCommand, platform = process.platform, nodeVersion = process.versions.node, python, timeouts = {}, signal} = {}) {
   const t = {...TIMEOUTS, ...timeouts};
   const findPython = python ?? (() => { try { return resolvePython({env}).path; } catch { return null; } });
   const checkout = findCheckout(env, repoRoot, nodeVersion);
   let settings;
   try { settings = loadSettings({env}); } catch (error) { fail(error.message); }
   const tmp = path.join(repoRoot, 'tmp');
-  const release = await takeLock(path.join(tmp, 'start.lock'), {waitMs: t.lockMs, pollMs: t.pollMs});
+  const release = await takeLock(path.join(tmp, 'start.lock'), {waitMs: t.lockMs, pollMs: t.pollMs, signal});
   const deepProofUrl = `http://127.0.0.1:${deepProofPort}/`;
   let child = null;
   let exited = null;
@@ -254,6 +277,18 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
   let stopping = null;
   let settle;
   const finished = new Promise(resolve => { settle = resolve; });
+
+  const logFile = path.join(tmp, 'deep-proof-server.log');
+  const tail = () => {
+    let lines = [];
+    try { lines = fs.readFileSync(logFile, 'utf8').trimEnd().split('\n').slice(-20); } catch { /* no log */ }
+    return lines.length ? `\n${lines.join('\n')}` : '';
+  };
+  /** Called between the slow steps: stops the start when the launcher was interrupted or when the server it started is gone. */
+  const checkpoint = () => {
+    if (signal?.aborted) throw new StartAborted('Interrupted while starting.');
+    if (child && exited) fail(`Deep Proof exited during start (${exited.code === null ? 'no exit code' : `exit code ${exited.code}`}). Its log is ${logFile}:${tail()}`);
+  };
 
   /** Stops only the process this function spawned: SIGTERM to its group, SIGKILL when it is still there after killMs. */
   const stopChild = async () => {
@@ -296,7 +331,6 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
     let pid;
     let startedHere = false;
     let heldDataDir = null;
-    const logFile = path.join(tmp, 'deep-proof-server.log');
     if (where === 'deepproof') {
       pid = listenerPid(deepProofPort, run);
       const info = pid ? inspectProcess(pid, {run, platform}) : {recording: null, dataDir: null};
@@ -321,14 +355,10 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
         log(`Deep Proof stopped by itself (${code === null ? `signal ${signal}` : `exit code ${code}`}). Log: ${logFile}`);
         stopping = viewer.close().then(() => settle(1));
       });
-      const tail = () => {
-        let lines = [];
-        try { lines = fs.readFileSync(logFile, 'utf8').trimEnd().split('\n').slice(-20); } catch { /* no log */ }
-        return lines.length ? `\n${lines.join('\n')}` : '';
-      };
       const until = Date.now() + t.startMs;
       let ready = false;
       while (!ready) {
+        if (signal?.aborted) throw new StartAborted('Interrupted while starting.');
         if (exited) fail(`Deep Proof exited at start (${exited.code === null ? 'no exit code' : `exit code ${exited.code}`}). Its log is ${logFile}:${tail()}`);
         if (Date.now() > until) {
           await stopChild();
@@ -352,7 +382,11 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
     // A folder read from another process that is not a folder (a path with a space cannot be read from ps output) gives way to the checkout's own.
     const dataDir = settings.deepProofData ?? (startedHere ? path.resolve(checkout, env.ANALYST_DATA_DIR || '.runtime') : heldDataDir && isDirectory(heldDataDir) ? heldDataDir : path.join(checkout, '.runtime'));
     log(`Deep Proof data folder: ${dataDir}`);
-    const books = settings.dossiers.length ? settings.dossiers : prepareBooks({repoRoot, checkout, env, run, python: findPython, log, buildMs: t.buildMs});
+    checkpoint();
+    const ownBooks = settings.dossiers.length > 0;
+    const found = await prepareBooks({repoRoot, checkout, env, run, python: findPython, log, buildMs: t.buildMs, signal, build: !ownBooks});
+    const books = ownBooks ? settings.dossiers : found;
+    checkpoint();
     log(`Books: ${books.length}`);
     try {
       viewer = await startViewer({settings: {...settings, deepProofData: dataDir, dossiers: books}, deepProof: {url: deepProofUrl, recording, startedHere}});
@@ -360,6 +394,7 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
       await stopChild();
       fail(error.message);
     }
+    checkpoint();
     log(`Process viewer: ${viewer.url}`);
     if (open) { try { opener(viewer.url); } catch { /* the address is printed */ } }
 
@@ -379,6 +414,7 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
     };
     return {viewer, alreadyRunning: false, deepProof: {url: deepProofUrl, recording, startedHere, pid}, books, stop, finished};
   } catch (error) {
+    if (viewer) await viewer.close().catch(() => {});
     await stopChild();
     throw error;
   } finally {
@@ -394,16 +430,19 @@ export async function main(argv, {deepProofPort = DEEP_PROOF_PORT, env = process
     console.error('Usage: npm run start [-- --no-open]');
     return 1;
   }
-  let running;
+  // The handlers come first: a Ctrl-C while the books are built or Deep Proof is starting must stop what was started.
+  const controller = new AbortController();
+  let running = null;
+  const stopOnSignal = () => { if (running) running.stop(); else controller.abort(); };
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, stopOnSignal);
   try {
-    running = await start({env, repoRoot, deepProofPort, open: !argv.includes('--no-open')});
+    running = await start({env, repoRoot, deepProofPort, open: !argv.includes('--no-open'), signal: controller.signal});
   } catch (error) {
+    if (error instanceof StartAborted) return 0;
     console.error(error instanceof StartError ? error.message : `Could not start: ${error.message}`);
     return 1;
   }
   if (running.alreadyRunning) return 0;
-  const stopOnSignal = () => { running.stop(); };
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, stopOnSignal);
   console.log(running.deepProof.startedHere ? 'Press Ctrl-C to stop the viewer and the Deep Proof this command started.' : 'Press Ctrl-C to stop the viewer. The Deep Proof that was already running stays up.');
   return running.finished;
 }

@@ -325,6 +325,7 @@ node tools/remote-verify.mjs --host <ssh-host> --target <absolute-remote-folder>
 node tools/verify.mjs
 node --test tools/test-process-viewer.mjs
 CHROME="<path of a Chrome binary>" node tools/test-process-viewer-browser.mjs
+node --test tools/test-start.mjs
 node tools/test-audit-workspace.mjs investment-approval
 node tools/test-audit-workspace.mjs investment-approval-ro
 python3 tools/validate-readable-examples.py --output tmp/readable-pilot/example-validation.md
