@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Operator check for the live gate: the viewer must leave a Deep Proof data folder exactly as it found it.
  *
- *   node tools/check-viewer-readonly.mjs [--settings <file>]
+ *   VIEWER_DEEP_PROOF_DATA=<data folder> node tools/check-viewer-readonly.mjs
  *
  * It takes a manifest of `<data>/projects/` (path, type, size, mode, inode, link count, modification time in
  * nanoseconds, SHA-256; access time left out), starts the viewer on a free port, reads every route it can reach twice,
@@ -54,11 +54,11 @@ const MAX_ROUTES = 20000;
 /** Reads every route the viewer offers for the data it finds: status, runs, each run page, its timeline and every step
  * body, every document of its cards, the dossiers with their documents and downloads. Returns a Map of route to
  * `status:body`, in the order read. */
-export async function crawl(base, key) {
+export async function crawl(base) {
   const answers = new Map();
   const get = async route => {
     if (answers.size >= MAX_ROUTES || answers.has(route)) return null;
-    const response = await fetch(base + route, {headers: {'X-Viewer-Key': key}});
+    const response = await fetch(base + route);
     const body = await response.text();
     answers.set(route, `${response.status}:${body}`);
     return response.status === 200 && (response.headers.get('content-type') || '').includes('json') ? JSON.parse(body) : null;
@@ -103,31 +103,27 @@ export function diff(before, after) {
 }
 
 async function main(argv) {
-  const env = {...process.env};
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--settings' && argv[i + 1]) env.VIEWER_SETTINGS = argv[++i];
-    else {
-      console.error('Usage: node tools/check-viewer-readonly.mjs [--settings <file>]');
-      return 2;
-    }
+  if (argv.length) {
+    console.error('Usage: node tools/check-viewer-readonly.mjs (no options; the data folder is VIEWER_DEEP_PROOF_DATA)');
+    return 2;
   }
   let settings;
   try {
-    settings = loadSettings({env});
+    settings = loadSettings({env: process.env});
   } catch (error) {
     console.error(error.message);
     return 2;
   }
   if (!settings.deepProofData) {
-    console.error('No Deep Proof data folder is set. Name it in the settings file or in VIEWER_DEEP_PROOF_DATA.');
+    console.error('No Deep Proof data folder is set. Name it in VIEWER_DEEP_PROOF_DATA.');
     return 2;
   }
   const viewer = await startViewer({settings: {...settings, port: 0}});
   try {
     const projects = path.join(viewer.roots.data.path, 'projects');
     const before = treeManifest(projects);
-    const first = await crawl(`http://127.0.0.1:${viewer.port}`, viewer.key);
-    const second = await crawl(`http://127.0.0.1:${viewer.port}`, viewer.key);
+    const first = await crawl(`http://127.0.0.1:${viewer.port}`);
+    const second = await crawl(`http://127.0.0.1:${viewer.port}`);
     const after = treeManifest(projects);
     const changes = diff(before, after);
     const answersEqual = first.size === second.size && [...first].every(([route, value]) => second.get(route) === value);

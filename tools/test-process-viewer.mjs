@@ -41,17 +41,9 @@ function fixture(t, options) {
 
 // The server modules, in the order they are built. Each must exist: a missing module fails the static test.
 // Every server module must exist: a missing one fails this test.
-/** A settings file below the worktree's tmp/ for a child viewer, so that no child reads the user's own settings file. */
-function pinnedSettings(t, fx, content = null) {
-  fs.mkdirSync(path.join(repoRoot, 'tmp'), {recursive: true});
-  const dir = fs.mkdtempSync(path.join(repoRoot, 'tmp', 'pv-pinned-'));
-  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
-  const file = path.join(dir, 'settings.json');
-  fs.writeFileSync(file, JSON.stringify(content ?? {deepProofData: fx.data, dossiers: fx.dossiers, deepProofTmp: fx.tmp, port: 0}));
-  return file;
-}
-/** The environment of a child viewer: pinned to fixture settings and to an explicit dossier list. */
-const childEnv = (t, fx, extra = {}) => ({PATH: process.env.PATH, VIEWER_SETTINGS: pinnedSettings(t, fx), VIEWER_DOSSIERS: fx.dossiers.join(path.delimiter), VIEWER_DEEP_PROOF_DATA: fx.data, VIEWER_DEEP_PROOF_TMP: fx.tmp, VIEWER_PORT: '0', ...extra});
+/** The environment of a child viewer: pinned to the fixture folders and to an explicit dossier list. The settings come
+ * from the environment only, so no child can read anything of the user's own. */
+const childEnv = (t, fx, extra = {}) => ({PATH: process.env.PATH, VIEWER_DOSSIERS: fx.dossiers.join(path.delimiter), VIEWER_DEEP_PROOF_DATA: fx.data, VIEWER_DEEP_PROOF_TMP: fx.tmp, VIEWER_PORT: '0', ...extra});
 
 // Every server module must exist: a missing one fails this test.
 const SERVER_MODULES = ['pv-read.mjs', 'pv-trace.mjs', 'pv-runs.mjs', 'pv-documents.mjs', 'pv-dossiers.mjs', 'process-viewer.mjs'];
@@ -117,7 +109,7 @@ test('analyst.sqlite and everything outside projects/ is never opened', async t 
   // Through the server: no answer holds the sentinel of the database files (mode 000), of jobs/ or of anything outside
   // projects/, and a request that names them is a plain 404.
   const v = await startServer(t, fx);
-  const answers = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  const answers = await crawl(`http://127.0.0.1:${v.port}`);
   assert.ok(answers.size > 100, `the crawl reached ${answers.size} routes`);
   for (const [route, value] of answers) assert.ok(!value.includes(SENTINEL), route);
   for (const name of ['../analyst.sqlite', 'analyst.sqlite', '../../analyst.sqlite', 'kept:../../../analyst.sqlite', 'kept:../../../../jobs/stale/note.txt', 'source:../../../analyst.sqlite', 'report:analyst.sqlite']) {
@@ -335,7 +327,7 @@ test('a folded spelling of keys, evaluator or any allowed name is never opened, 
   for (const e of evaluator) assert.equal((await request(v, `/api/runs/proj-alpha/run-check-done/document?name=${encodeURIComponent(`kept:notes/${e}/e.md`)}`)).status, 404, e);
   assert.equal((await request(v, `/api/runs/proj-alpha/run-check-done/document?name=${encodeURIComponent('kept:NOTES/agent-notes.md')}`)).status, 404);
   assert.equal((await request(v, `/api/runs/proj-alpha/run-check-done/document?name=${encodeURIComponent('kept:notes/agent-notes.md')}`)).status, 200);
-  const all = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  const all = await crawl(`http://127.0.0.1:${v.port}`);
   for (const [route, value] of all) assert.ok(!value.includes(SENTINEL), route);
   const page = JSON.parse((await request(v, '/api/runs/proj-alpha/run-check-done')).text);
   assert.ok(!page.results.some(r => /keys|evaluator/i.test(r.title)), 'the kept listing leaves answer-key names out');
@@ -383,7 +375,7 @@ test('a dossier setting that a volume resolves to a keys or evaluator folder sto
   }
   // A plain dossier still starts, and the answers hold no sentinel.
   const v = await startServer(t, fx);
-  for (const [route, value] of await crawl(`http://127.0.0.1:${v.port}`, v.key)) assert.ok(!value.includes(SENTINEL), route);
+  for (const [route, value] of await crawl(`http://127.0.0.1:${v.port}`)) assert.ok(!value.includes(SENTINEL), route);
 });
 
 test('one-line fields of the run list and of the run page are clipped, and the full text still opens', async t => {
@@ -851,9 +843,9 @@ async function startServer(t, fx, {settings = settingsOf(fx), ...options} = {}) 
 }
 
 /** One request with full control of method, host and headers. Resolves with status, headers, bytes and text. */
-function request(v, route, {method = 'GET', headers = {}, host, body, key = v.key} = {}) {
+function request(v, route, {method = 'GET', headers = {}, host, body} = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request({host: '127.0.0.1', port: v.port, path: route, method, headers: {host: host ?? `127.0.0.1:${v.port}`, ...(key === null ? {} : {'x-viewer-key': key}), ...headers}}, res => {
+    const req = http.request({host: '127.0.0.1', port: v.port, path: route, method, headers: {host: host ?? `127.0.0.1:${v.port}`, ...headers}}, res => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => {
@@ -873,32 +865,29 @@ const ROUTES = [
 ];
 const SECURITY = {'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer'};
 
-test('every route needs the key; a wrong key and a missing key answer 401', async t => {
+test('every route answers without any header, carries no CORS header, and the page keeps its policy', async t => {
   const fx = fixture(t);
   const v = await startServer(t, fx);
-  const message = 'Open the address the viewer printed in its terminal.';
-  for (const route of [...ROUTES, '/api/nothing-here']) {
+  for (const route of ROUTES) {
     const ok = await request(v, route);
+    assert.equal(ok.status, 200, route);
+    assert.match(ok.headers['content-type'], /^application\/json|^text\/markdown/, route);
     for (const [name, value] of Object.entries(SECURITY)) assert.equal(ok.headers[name], value, `${route} ${name}`);
-    for (const key of [null, 'wrong', v.key.slice(0, -1), v.key + '0', v.key.toUpperCase().replace(/[a-f]/gi, 'F'), '']) {
-      const r = await request(v, route, {key});
-      assert.equal(r.status, 401, `${route} with key ${JSON.stringify(key)}`);
-      assert.deepEqual(JSON.parse(r.text), {error: message});
-      for (const [name, value] of Object.entries(SECURITY)) assert.equal(r.headers[name], value);
-    }
-    // A key in the address instead of the header does not count.
-    const query = await request(v, route + (route.includes('?') ? '&' : '?') + `key=${v.key}`, {key: null});
-    assert.equal(query.status, 401, `${route} with the key in the query`);
-    const hash = await request(v, route, {key: null, headers: {'x-api-key': v.key, authorization: `Bearer ${v.key}`, cookie: `key=${v.key}`}});
-    assert.equal(hash.status, 401);
+    // A request from another origin gets no access-control header at all.
+    const evil = await request(v, route, {headers: {origin: 'http://evil.example'}});
+    assert.equal(evil.status, 200, route);
+    assert.deepEqual(Object.keys(evil.headers).filter(h => h.startsWith('access-control-')), [], `${route} carries a CORS header`);
   }
-  assert.equal((await request(v, '/api/status')).status, 200);
-  assert.equal((await request(v, '/api/nothing-here')).status, 404);
-  assert.equal(v.key.length, 32);
-  assert.match(v.key, /^[0-9a-f]{32}$/);
-  assert.equal(v.url, `http://127.0.0.1:${v.port}/#key=${v.key}`);
-  // The page is served without the key, holds no data and carries the exact policy of its one script.
-  const page = await request(v, '/', {key: null});
+  // An unknown route is a plain 404 in JSON, with the common headers.
+  const unknown = await request(v, '/api/nothing-here');
+  assert.equal(unknown.status, 404);
+  assert.match(unknown.headers['content-type'], /^application\/json/);
+  assert.deepEqual(JSON.parse(unknown.text), {error: 'There is no such address.'});
+  for (const [name, value] of Object.entries(SECURITY)) assert.equal(unknown.headers[name], value);
+  assert.equal(v.url, `http://127.0.0.1:${v.port}/`);
+  assert.ok(!('key' in v));
+  // The page holds no data and carries the exact policy of its one script.
+  const page = await request(v, '/');
   assert.equal(page.status, 200);
   assert.match(page.headers['content-type'], /^text\/html/);
   assert.equal(page.text.split('<script').length, 2, 'exactly one script element');
@@ -906,12 +895,11 @@ test('every route needs the key; a wrong key and a missing key answer 401', asyn
   assert.equal(page.headers['content-security-policy'], `default-src 'none'; script-src 'sha256-${crypto.createHash('sha256').update(script).digest('base64')}'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`);
   assert.doesNotMatch(page.headers['content-security-policy'], /unsafe-eval|unsafe-hashes/);
   for (const [name, value] of Object.entries(SECURITY)) assert.equal(page.headers[name], value);
-  assert.ok(!page.text.includes('Alpha Project') && !page.text.includes(fx.base) && !page.text.includes(v.key));
+  assert.deepEqual(Object.keys(page.headers).filter(h => h.startsWith('access-control-')), []);
+  assert.ok(!page.text.includes('Alpha Project') && !page.text.includes(fx.base));
   assert.equal(pagePolicy(Buffer.from('<p>no script</p>')).includes("script-src 'none'"), true);
   assert.equal(pagePolicy(Buffer.from('<script>a</script><script>b</script>')).includes("script-src 'none'"), true);
-  assert.equal((await request(v, '/favicon.ico', {key: null})).status, 404);
-  const hosts = await request(v, '/', {key: null});
-  assert.equal(hosts.status, 200);
+  assert.equal((await request(v, '/favicon.ico')).status, 404);
 });
 
 test('only GET is served and only for the host 127.0.0.1', async t => {
@@ -971,8 +959,8 @@ test('the data folder is byte for byte and time for time the same after every ro
   // Manifest of every path, type, size, mode, inode, link count, modification time in nanoseconds and SHA-256.
   const before = {data: treeManifest(fx.data), bench: treeManifest(fx.bench), tmp: treeManifest(fx.tmp)};
   assert.ok(before.data.length > 150 && before.bench.length > 20);
-  const first = await crawl(`http://127.0.0.1:${v.port}`, v.key);
-  const second = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  const first = await crawl(`http://127.0.0.1:${v.port}`);
+  const second = await crawl(`http://127.0.0.1:${v.port}`);
   const after = {data: treeManifest(fx.data), bench: treeManifest(fx.bench), tmp: treeManifest(fx.tmp)};
   for (const name of ['data', 'bench', 'tmp']) assert.deepEqual(diff(before[name], after[name]), {removed: [], added: []}, name);
   assert.deepEqual(after, before);
@@ -993,14 +981,14 @@ test('the data folder is byte for byte and time for time the same after every ro
 test('every route answers the same when the data folder and the dossiers are read-only for their owner', async t => {
   const fx = fixture(t);
   const normal = await startServer(t, fx);
-  const answers = await crawl(`http://127.0.0.1:${normal.port}`, normal.key);
+  const answers = await crawl(`http://127.0.0.1:${normal.port}`);
   await normal.close();
   makeReadOnly(fx.data);
   makeReadOnly(fx.bench);
   t.after(() => { makeRemovable(fx.data); makeRemovable(fx.bench); });
   assert.throws(() => fs.writeFileSync(path.join(fx.data, 'projects/proj-alpha/probe.txt'), 'x'), /EACCES|EPERM/, 'the data folder is read-only for its owner');
   const locked = await startServer(t, fx);
-  const again = await crawl(`http://127.0.0.1:${locked.port}`, locked.key);
+  const again = await crawl(`http://127.0.0.1:${locked.port}`);
   assert.equal(again.size, answers.size);
   for (const [route, value] of answers) assert.equal(again.get(route), value, route);
   assert.ok(answers.size > 100);
@@ -1020,7 +1008,7 @@ test('a link inside the data folder is not followed by any route', async t => {
   fs.renameSync(traces, traces + '-moved');
   fs.symlinkSync(outside, traces);
   const v = await startServer(t, fx);
-  const answers = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  const answers = await crawl(`http://127.0.0.1:${v.port}`);
   for (const [route, value] of answers) {
     assert.ok(!value.includes(SENTINEL), route);
     assert.ok(!/localhost|127\.0\.0\.1\s+localhost/.test(value) || route.includes('/api/status'), route);
@@ -1058,7 +1046,7 @@ test('the six dossiers are listed; the keys folders beside fixtures are never op
   for (const route of ['/api/dossiers/7/document?name=source%3Aprocedure.md', '/api/dossiers/0/download?name=x', '/api/dossiers/-1/download', '/api/dossiers/x', '/api/dossiers/1/other']) assert.equal((await request(v, route)).status, 404, route);
   assert.equal((await request(v, '/api/dossiers/1/document')).status, 404);
   assert.equal((await request(v, '/api/dossiers/1/document?name=source%3Aprocedure.md&part=9')).status, 404);
-  const all = await crawl(`http://127.0.0.1:${v.port}`, v.key);
+  const all = await crawl(`http://127.0.0.1:${v.port}`);
   for (const [route, value] of all) assert.ok(!value.includes(SENTINEL), route);
   // A dossier path with a keys segment stops the server, also through a link whose real path has one.
   for (const folder of fx.keysFolders) {
@@ -1144,36 +1132,33 @@ test('a report downloads under its neutral name and its bytes are unchanged', as
   assert.deepEqual([doc.part, doc.parts], [0, 1]);
 });
 
-test('settings come from the environment and a settings file below tmp, and nothing configured shows Not Connected', async t => {
+test('settings come from the environment only, and nothing configured shows Not Connected', async t => {
   const fx = fixture(t);
-  const repo = fs.mkdtempSync(path.join(realTmp, 'pv-repo-'));
-  t.after(() => fs.rmSync(repo, {recursive: true, force: true}));
-  fs.mkdirSync(path.join(repo, 'tmp/process-viewer'), {recursive: true});
-  const file = path.join(repo, 'tmp/process-viewer/settings.json');
-  const none = loadSettings({env: {}, repoRoot: repo});
-  assert.deepEqual(none, {deepProofData: null, dossiers: [], deepProofTmp: null, port: 8790});
-  fs.writeFileSync(file, JSON.stringify({deepProofData: fx.data, dossiers: [fx.dossiers[0]], deepProofTmp: fx.tmp, port: 8791}));
-  assert.deepEqual(loadSettings({env: {}, repoRoot: repo}), {deepProofData: fx.data, dossiers: [fx.dossiers[0]], deepProofTmp: fx.tmp, port: 8791});
-  const env = loadSettings({env: {VIEWER_DEEP_PROOF_DATA: '/x/y', VIEWER_DOSSIERS: ['/a', '/b'].join(path.delimiter), VIEWER_PORT: '0', VIEWER_DEEP_PROOF_TMP: '/z'}, repoRoot: repo});
+  assert.deepEqual(loadSettings({env: {}}), {deepProofData: null, dossiers: [], deepProofTmp: null, port: 8790});
+  // A settings file name in the environment is ignored: there is no settings file.
+  assert.deepEqual(loadSettings({env: {VIEWER_SETTINGS: '/etc/hosts'}}), {deepProofData: null, dossiers: [], deepProofTmp: null, port: 8790});
+  const env = loadSettings({env: {VIEWER_DEEP_PROOF_DATA: '/x/y', VIEWER_DOSSIERS: ['/a', '/b'].join(path.delimiter), VIEWER_PORT: '0', VIEWER_DEEP_PROOF_TMP: '/z'}});
   assert.deepEqual(env, {deepProofData: '/x/y', dossiers: ['/a', '/b'], deepProofTmp: '/z', port: 0});
-  for (const bad of [{VIEWER_PORT: '70000'}, {VIEWER_PORT: 'abc'}, {VIEWER_PORT: '1.5'}, {VIEWER_SETTINGS: '/etc/hosts'}, {VIEWER_SETTINGS: path.join(repo, 'tmp/../outside.json')}, {VIEWER_SETTINGS: path.join(repo, 'tmp/process-viewer/missing.json')}]) {
-    assert.throws(() => loadSettings({env: bad, repoRoot: repo}), Error, JSON.stringify(bad));
+  for (const bad of [{VIEWER_PORT: '70000'}, {VIEWER_PORT: 'abc'}, {VIEWER_PORT: '1.5'}, {VIEWER_PORT: '-1'}]) {
+    assert.throws(() => loadSettings({env: bad}), /port must be a whole number/, JSON.stringify(bad));
   }
-  fs.writeFileSync(file, '{not json');
-  assert.throws(() => loadSettings({env: {}, repoRoot: repo}), /not valid JSON/);
   // A relative folder is refused by the gate; nothing configured starts a server that shows Not Connected.
   await assert.rejects(startViewer({settings: {deepProofData: 'relative/path', dossiers: [], port: 0}}), /absolute/);
   const v = await startServer(t, fx, {settings: {deepProofData: null, dossiers: [], deepProofTmp: fx.tmp, port: 0}});
   const status = JSON.parse((await request(v, '/api/status')).text);
   assert.deepEqual([status.connected, status.dossiersConfigured, status.pollMs, status.tmpMatches], [false, 0, 3000, null]);
-  assert.match(status.settingsHint, /"deepProofData": "<absolute path of the Deep Proof data folder>"/);
+  assert.equal(status.deepProof, null);
+  assert.ok(!('settingsHint' in status));
   assert.deepEqual(JSON.parse((await request(v, '/api/runs')).text), []);
   assert.deepEqual(JSON.parse((await request(v, '/api/dossiers')).text), []);
   assert.equal((await request(v, '/api/runs/proj-alpha/run-analysis-done')).status, 404);
   // Connected: tmpMatches says whether the work folders of the traces lie in the configured temporary folder.
   const connected = await startServer(t, fx);
   const ok = JSON.parse((await request(connected, '/api/status')).text);
-  assert.deepEqual([ok.connected, ok.dossiersConfigured, ok.settingsHint], [true, 6, null]);
+  assert.deepEqual([ok.connected, ok.dossiersConfigured, ok.deepProof], [true, 6, null]);
+  // A launcher that knows Deep Proof passes it on; the status shows exactly the three fields.
+  const known = await startServer(t, fx, {deepProof: {url: 'http://127.0.0.1:8000/', recording: false, startedHere: true, pid: 4242, secret: 'x'}});
+  assert.deepEqual(JSON.parse((await request(known, '/api/status')).text).deepProof, {url: 'http://127.0.0.1:8000/', recording: false, startedHere: true});
   assert.equal(ok.tmpMatches, true);
   const other = fs.mkdtempSync(path.join(realTmp, 'pv-other-tmp-'));
   t.after(() => fs.rmSync(other, {recursive: true, force: true}));
@@ -1203,11 +1188,11 @@ test('a 70 MiB trace and a 2 MiB line are read in parts within the memory bound'
   t.after(() => child.kill('SIGKILL'));
   const line = await new Promise((resolve, reject) => {
     let out = '';
-    child.stdout.on('data', c => { out += c; const m = /Process viewer: (http:\/\/127\.0\.0\.1:(\d+)\/#key=([0-9a-f]{32}))/.exec(out); if (m) resolve(m); });
+    child.stdout.on('data', c => { out += c; const m = /Process viewer: http:\/\/127\.0\.0\.1:(\d+)\/\n/.exec(out); if (m) resolve(m); });
     child.on('exit', code => reject(new Error(`the viewer exited with ${code}`)));
     setTimeout(() => reject(new Error('the viewer did not start')), 20000);
   });
-  const v = {port: Number(line[2]), key: line[3]};
+  const v = {port: Number(line[1])};
   const rss = async () => Number((await promisify(execFile)('ps', ['-o', 'rss=', '-p', String(child.pid)])).stdout.trim()) / 1024;
   const baseline = await rss();
   let peak = baseline;
@@ -1246,8 +1231,6 @@ test('a 70 MiB trace and a 2 MiB line are read in parts within the memory bound'
 
 test('the read-only check tool reports an unchanged manifest on a fixture and finds a change', async t => {
   const fx = fixture(t);
-  const repo = fs.mkdtempSync(path.join(realTmp, 'pv-repo-'));
-  t.after(() => fs.rmSync(repo, {recursive: true, force: true}));
   const run = args => spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs'), ...args], {env: childEnv(t, fx), encoding: 'utf8', timeout: 60000});
   const ok = run([]);
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
@@ -1256,60 +1239,25 @@ test('the read-only check tool reports an unchanged manifest on a fixture and fi
   assert.equal(run(['--bogus']).status, 2);
   // The manifest covers projects/ only: the database files beside it are not part of it.
   assert.ok(treeManifest(path.join(fx.data, 'projects')).every(line => !line.includes('analyst')));
-  // Exit 2 means a named problem each time: an explicit settings file that is not there, one outside tmp/, and no data folder.
-  const check = env => spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs')], {env: childEnv(t, fx, {VIEWER_DEEP_PROOF_DATA: '', VIEWER_DEEP_PROOF_TMP: '', VIEWER_DOSSIERS: '', ...env}), encoding: 'utf8', timeout: 60000});
-  const missing = check({VIEWER_SETTINGS: path.join(repoRoot, 'tmp', 'pv-no-such-settings', 'settings.json')});
-  assert.equal(missing.status, 2);
-  assert.match(missing.stderr, /The settings file cannot be read\./);
-  const outside = check({VIEWER_SETTINGS: path.join(repo, 'tmp/none.json')});
-  assert.equal(outside.status, 2);
-  assert.match(outside.stderr, /The settings file must lie below the repository tmp\/ folder\./);
-  const empty = check({VIEWER_SETTINGS: pinnedSettings(t, fx, {}), VIEWER_DOSSIERS: ''});
+  // Exit 2 means a named problem: no data folder, or an option that does not exist.
+  const empty = spawnSync(process.execPath, [path.join(tools, 'check-viewer-readonly.mjs')], {env: childEnv(t, fx, {VIEWER_DEEP_PROOF_DATA: '', VIEWER_DEEP_PROOF_TMP: '', VIEWER_DOSSIERS: ''}), encoding: 'utf8', timeout: 60000});
   assert.equal(empty.status, 2);
   assert.match(empty.stderr, /No Deep Proof data folder is set\./);
+  assert.equal(run(['--settings', 'x.json']).status, 2);
   assert.equal(run(['--bogus']).status, 2);
   assert.match(run(['--bogus']).stderr, /Usage: node tools\/check-viewer-readonly\.mjs/);
 });
 
-test('every child viewer is pinned to fixture settings, and no test writes where the real settings file lives', () => {
-  // Static check of this file and of the fixture builder. The place of the user's own settings file is named in two
-  // pieces here, so that this check does not match itself.
-  const place = 'tmp/' + 'process-viewer';
-  const split = "'process-viewer', " + "'settings";
+test('every child viewer is started with the pinned environment, and no settings file is read or named', () => {
+  // Static check of this file, the fixture builder and the server. The words are split so that this check does not match itself.
+  const file = 'settings' + '.json';
   const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8');
   const fixtureSource = fs.readFileSync(path.join(tools, 'process-viewer-fixture.mjs'), 'utf8');
-  // 1. Each place that starts the viewer or its check as a child process builds its environment with childEnv(, so
-  // that none can fall back to the default settings file.
+  const serverSource = fs.readFileSync(path.join(tools, 'process-viewer.mjs'), 'utf8');
+  // Each place that starts the viewer or its check as a child process builds its environment with childEnv(, so that
+  // none can fall back to the environment of the person who runs the tests.
   const starts = [...source.matchAll(/spawn(?:Sync)?\(process\.execPath, \[path\.join\(tools, '([a-z-]+\.mjs)'\)[^\n]*/g)];
   assert.ok(starts.length >= 4, `found ${starts.length} places that start a viewer script`);
   for (const m of starts) assert.ok(m[0].includes('childEnv('), `${m[1]} is started without childEnv(: ${m[0].slice(0, 120)}`);
-  // 2. The place of the real settings file is named only through the temporary repository root (a folder of this test),
-  // (also through the `write` helper of the test below, which joins it with that root) and the fixture builder never names it.
-  for (const line of source.split('\n')) {
-    if (line.includes(place) || line.includes(split)) assert.ok(/path\.join\(repo, |^\s*write\('/.test(line), `a line names the real settings place: ${line.trim().slice(0, 120)}`);
-  }
-  assert.ok(!fixtureSource.includes(place) && !fixtureSource.includes('settings.json'));
-  // No write call joins the worktree root with that place.
-  assert.doesNotMatch(source, /(?:writeFileSync|mkdirSync|rmSync|rmdirSync|mkdtempSync|renameSync|symlinkSync|appendFileSync)\([^\n]*repoRoot[^\n]*process-viewer'/);
-});
-
-test('an explicit settings file wins over the default file, and the default file of a temporary root is read without it', t => {
-  const repo = fs.mkdtempSync(path.join(realTmp, 'pv-repo-'));
-  t.after(() => fs.rmSync(repo, {recursive: true, force: true}));
-  const write = (rel, value) => {
-    fs.mkdirSync(path.dirname(path.join(repo, rel)), {recursive: true});
-    fs.writeFileSync(path.join(repo, rel), JSON.stringify(value));
-    return path.join(repo, rel);
-  };
-  write('tmp/process-viewer/settings.json', {deepProofData: '/decoy/default/data', dossiers: ['/decoy/default/dossier'], port: 8801});
-  const explicit = write('tmp/elsewhere/own-settings.json', {deepProofData: '/chosen/data', dossiers: ['/chosen/dossier'], port: 8802});
-  // Without VIEWER_SETTINGS the default file of this root is the one read.
-  assert.deepEqual(loadSettings({env: {}, repoRoot: repo}), {deepProofData: '/decoy/default/data', dossiers: ['/decoy/default/dossier'], deepProofTmp: null, port: 8801});
-  // With it, the named file wins and the default one is not read.
-  assert.deepEqual(loadSettings({env: {VIEWER_SETTINGS: explicit}, repoRoot: repo}), {deepProofData: '/chosen/data', dossiers: ['/chosen/dossier'], deepProofTmp: null, port: 8802});
-  // Environment values win over both files.
-  assert.equal(loadSettings({env: {VIEWER_SETTINGS: explicit, VIEWER_DEEP_PROOF_DATA: '/from/env'}, repoRoot: repo}).deepProofData, '/from/env');
-  // A named file that is not below the root's tmp/ is refused, and a named file that is missing is an error, never a fallback.
-  assert.throws(() => loadSettings({env: {VIEWER_SETTINGS: path.join(repo, 'outside.json')}, repoRoot: repo}), /below the repository tmp\//);
-  assert.throws(() => loadSettings({env: {VIEWER_SETTINGS: path.join(repo, 'tmp/elsewhere/missing.json')}, repoRoot: repo}), /cannot be read/);
+  assert.ok(!fixtureSource.includes(file) && !serverSource.includes(file) && !serverSource.includes('VIEWER_' + 'SETTINGS'));
 });

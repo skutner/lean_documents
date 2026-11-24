@@ -215,7 +215,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
 .link-btn:hover { border-color: var(--results); }
 .link-btn .match { color: var(--muted); font-size: .88rem; }
 
-/* Welcome, key, settings, alerts */
+/* Welcome, notices, settings, alerts */
 .welcome h1 { margin: 0 0 8px; font-size: clamp(1.6rem, 4vw, 2.3rem); }
 .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 14px; margin: 26px 0; }
 .legend > div { background: var(--surface); border: 1px solid var(--line); border-left: 8px solid var(--accent); border-radius: var(--radius); padding: 16px 18px; }
@@ -224,10 +224,6 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
 .legend p { margin: 0; color: var(--muted); }
 .key-box { max-width: 34rem; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; }
 .key-box h1 { margin: 0 0 8px; font-size: 1.5rem; }
-.key-box label { display: block; font-weight: 600; margin: 16px 0 6px; }
-.key-box input { width: 100%; font: 1rem ui-monospace, Menlo, Consolas, monospace; padding: 10px 12px; border: 1px solid #94a3b8; border-radius: 10px; }
-.key-box .go { margin-top: 14px; background: var(--process); color: #fff; border: 0; border-radius: 10px; padding: 9px 20px; font-weight: 600; }
-.key-error { color: var(--bad); margin: 10px 0 0; font-weight: 600; }
 #settings-panel { position: fixed; z-index: 20; top: 16px; right: 16px; width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(15, 23, 42, .22); padding: 20px 22px; }
 #settings-panel[hidden] { display: none; }
 #settings-panel h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; font-size: 1.2rem; }
@@ -569,38 +565,15 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
 
   // ---------- State ----------
   var S = {
-    key: null, status: null, pollMs: 3000, runs: [], runsSig: '', dossiers: [], dossiersSig: '', filter: 'all',
+    status: null, pollMs: 3000, runs: [], runsSig: '', dossiers: [], dossiersSig: '', filter: 'all',
     view: null, gen: 0, polls: 0, timer: null, queue: Promise.resolve(), known: {}, firstRuns: true
   };
-
-  // ---------- The access key ----------
-  function keepKey(value) {
-    S.key = value;
-    try { sessionStorage.setItem('viewer-key', value); } catch (e) { /* storage may be blocked: the key stays in memory */ }
-  }
-  function dropKey() {
-    S.key = null;
-    try { sessionStorage.removeItem('viewer-key'); } catch (e) { /* nothing stored */ }
-  }
-  function takeKeyFromAddress() {
-    var m = /(^#|&)key=([0-9a-f]+)/.exec(location.hash);
-    if (m) {
-      keepKey(m[2]);
-      var rest = location.hash.replace(/(^#|&)key=[0-9a-f]+/, function (all, lead) { return lead === '&' ? '' : '#'; });
-      if (rest === '#' || rest === '#&') rest = '';
-      history.replaceState(null, '', location.pathname + location.search + rest);
-    } else {
-      try { S.key = sessionStorage.getItem('viewer-key') || null; } catch (e) { S.key = null; }
-    }
-  }
 
   // ---------- Talking to the viewer (GET only) ----------
   function ApiError(status, message) { this.status = status; this.message = message; }
   function api(path) {
-    if (!S.key) return Promise.reject(new ApiError(401, 'No access key.'));
-    return fetch(path, {method: 'GET', headers: {'X-Viewer-Key': S.key}, cache: 'no-store'}).then(function (res) {
+    return fetch(path, {method: 'GET', cache: 'no-store'}).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (body) {
-        if (res.status === 401) { onKeyRefused(); throw new ApiError(401, body.error || 'The access key was refused.'); }
         if (!res.ok) throw new ApiError(res.status, body.error || 'The viewer could not answer this request.');
         return body;
       });
@@ -1003,7 +976,6 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     $('nav-toggle').setAttribute('aria-expanded', String(open));
   }
   function route() {
-    if (!S.key) return;
     var r = parseRoute();
     var v = S.view;
     if (v && v.type === r.type && ((r.type === 'run' && v.pid === r.pid && v.rid === r.rid) || (r.type === 'dossier' && v.n === r.n) || r.type === 'welcome')) return;
@@ -1028,20 +1000,27 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   function renderWelcome() {
     var running = S.runs.filter(function (r) { return r.status === 'running'; }).length;
     var connected = S.status ? S.status.connected : true;
-    var kids = [
-      h('h1', {text: 'Deep Proof Process Viewer'}),
-      h('p', {class: 'muted', text: connected
-        ? 'Choose a run or a dossier on the left. Each run is shown in three parts, so that you can tell at a glance what went in, what happened and what came out.'
-        : 'No Deep Proof data folder is connected. Open Settings to see how to connect one.'}),
-      h('div', {class: 'legend'},
-        h('div', {class: 'l-inputs'}, h('h2', null, icon('inputs'), 'Inputs'), h('p', {text: 'The documents, the skill and the options the agent was given.'})),
-        h('div', {class: 'l-process'}, h('h2', null, icon('process'), 'Process'), h('p', {text: 'What happened, step by step: prompts, messages, checks and the time limit.'})),
-        h('div', {class: 'l-results'}, h('h2', null, icon('results'), 'Results'), h('p', {text: 'The report or the draft, the findings and the records behind them.'})))
-    ];
-    if (connected) kids.push(h('p', {class: 'muted', text: S.runs.length + (S.runs.length === 1 ? ' run' : ' runs') + ' found' + (running ? ', ' + running + ' running now.' : '.')}));
-    else if (S.status && S.status.settingsHint) kids.push(h('pre', {class: 'plain', text: S.status.settingsHint}));
+    var dp = S.status ? S.status.deepProof : null;
+    var kids = [h('h1', {text: 'Deep Proof Process Viewer'})];
+    if (!connected) kids.push(h('p', {class: 'muted', 'data-welcome': 'not-connected', text: 'No Deep Proof data folder is connected. Start with npm run start.'}));
+    else if (!S.runs.length) {
+      kids.push(h('p', {class: 'muted', 'data-welcome': 'no-runs'}, 'No runs yet. Start an analysis or a report check in Deep Proof' + (dp && dp.url ? ' at ' : '.'),
+        dp && dp.url ? h('a', {href: dp.url, target: '_blank', rel: 'noopener noreferrer', text: dp.url}) : null,
+        dp && dp.url ? '. It appears here within a few seconds.' : ' It appears here within a few seconds.'));
+    } else kids.push(h('p', {class: 'muted', text: 'Choose a run or a dossier on the left. Each run is shown in three parts, so that you can tell at a glance what went in, what happened and what came out.'}));
+    if (dp && dp.recording === false) kids.push(h('p', {class: 'callout warn', 'data-welcome': 'recording-off', text: 'Recording is off in the running Deep Proof. New runs will show no steps. Stop that server, then run npm run start again.'}));
+    if (dp && dp.recording === null) kids.push(h('p', {class: 'callout', 'data-welcome': 'recording-unknown', text: 'The viewer could not tell whether Deep Proof is recording.'}));
+    kids.push(h('div', {class: 'legend'},
+      h('div', {class: 'l-inputs'}, h('h2', null, icon('inputs'), 'Inputs'), h('p', {text: 'The documents, the skill and the options the agent was given.'})),
+      h('div', {class: 'l-process'}, h('h2', null, icon('process'), 'Process'), h('p', {text: 'What happened, step by step: prompts, messages, checks and the time limit.'})),
+      h('div', {class: 'l-results'}, h('h2', null, icon('results'), 'Results'), h('p', {text: 'The report or the draft, the findings and the records behind them.'}))));
+    if (connected && S.runs.length) kids.push(h('p', {class: 'muted', text: S.runs.length + (S.runs.length === 1 ? ' run' : ' runs') + ' found' + (running ? ', ' + running + ' running now.' : '.')}));
     fill(main, h('div', {class: 'welcome'}, kids));
-    main._welcomeSig = sig([S.runs.length, running, connected]);
+    main._welcomeSig = welcomeSig(S.runs.length, running);
+  }
+  function welcomeSig(count, running) {
+    var dp = S.status ? S.status.deepProof : null;
+    return sig([count, running, S.status ? S.status.connected : true, dp ? dp.recording : 'none']);
   }
 
   function block(kind, word, lead, iconName) {
@@ -1337,8 +1316,8 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   }
   function downloadReport(n, report, button) {
     button.disabled = true;
-    // The key travels in a header, so a plain link cannot fetch the file: read it, then save it under its neutral name.
-    return fetch('/api/dossiers/' + n + '/download?name=' + enc('report:' + report.sha12), {method: 'GET', headers: {'X-Viewer-Key': S.key}, cache: 'no-store'}).then(function (res) {
+    // Read the file, then save it under its neutral name.
+    return fetch('/api/dossiers/' + n + '/download?name=' + enc('report:' + report.sha12), {method: 'GET', cache: 'no-store'}).then(function (res) {
       if (!res.ok) throw new ApiError(res.status, 'The report could not be downloaded.');
       return res.blob();
     }).then(function (blob) {
@@ -1421,7 +1400,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
       S.status = st;
       var close = closeButton();
       var tmpText = st.tmpMatches === true ? 'Work folders of running checks are found.' : st.tmpMatches === false
-        ? 'The Deep Proof server uses another temporary folder than the one set here. Live drafts of running checks cannot be shown. Set the temporary folder in the settings file.'
+        ? 'The Deep Proof server uses another temporary folder than the one set here. Live drafts of running checks cannot be shown. Set VIEWER_DEEP_PROOF_TMP to that folder.'
         : 'No running check has reported a work folder yet.';
       var dl = h('dl', null,
         h('dt', {text: 'Connection'}), h('dd', {text: st.connected ? 'Connected to a Deep Proof data folder.' : 'No Deep Proof data folder is connected.'}),
@@ -1431,8 +1410,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
         h('dt', {text: 'Dossier folders (' + st.folders.dossiers.length + ')'}),
         st.folders.dossiers.length ? st.folders.dossiers.map(function (p) { return h('dd', {text: p}); }) : h('dd', {text: 'None set'}));
       fill(panel, close, h('h2', {id: 'settings-heading'}, icon('gear'), 'Settings'),
-        h('p', {class: 'muted', text: 'The viewer reads these folders and never writes to them. It takes them from its environment and a settings file; this page cannot change them.'}), dl,
-        st.settingsHint ? h('div', null, h('p', {class: 'muted', text: 'Settings file, for example:'}), h('pre', {text: st.settingsHint})) : null);
+        h('p', {class: 'muted', text: 'The viewer reads these folders and never writes to them. npm run start sets them; this page cannot change them.'}), dl);
       close.focus();
     }, function (error) { fill(panel, h('h2', {id: 'settings-heading'}, 'Settings'), h('p', {text: error.message}), closeButton()); });
   }
@@ -1442,44 +1420,8 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     if (keepFocus !== false) $('settings-open').focus();
   }
 
-  // ---------- The key screen ----------
-  function showKeyScreen(message) {
-    S.view = null;
-    closeSettings(false);
-    clearTimeout(S.timer);
-    S.gen += 1;
-    var input = h('input', {id: 'key-input', type: 'text', autocomplete: 'off', spellcheck: 'false', 'aria-describedby': 'key-help'});
-    var error = h('p', {class: 'key-error', id: 'key-error', role: 'alert', text: message || ''});
-    var go = h('button', {type: 'button', class: 'go', 'data-key-go': '', text: 'Connect'});
-    function submit() {
-      var m = /([0-9a-f]{32})/i.exec(input.value.trim());
-      var typed = input.value.trim();
-      if (!m && /^[0-9a-f]+$/i.test(typed)) m = [typed, typed];
-      if (!m) { error.textContent = 'This is not an access key. Paste the key from the address the viewer printed.'; return; }
-      keepKey(m[1].toLowerCase());
-      start();
-    }
-    go.addEventListener('click', submit);
-    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
-    document.body.classList.remove('view-open');
-    fill($('runs-list'));
-    fill($('dossier-list'));
-    $('runs-list')._nodes = null; $('dossier-list')._nodes = null; $('run-filters')._nodes = null; fill($('run-filters'));
-    fill(main, h('div', {class: 'key-box', 'data-key-form': ''},
-      h('h1', {text: 'Open the viewer with its access key'}),
-      h('p', {id: 'key-help', class: 'muted', text: 'The viewer printed an address in its terminal. Open that address, or paste its key here: the long code after “#key=”.'}),
-      h('label', {for: 'key-input', text: 'Access key'}), input, go, error));
-    input.focus();
-  }
-  function onKeyRefused() {
-    var had = S.key;
-    dropKey();
-    if (had) showKeyScreen('The viewer refused this key. It makes a new one every time it starts.');
-  }
-
   // ---------- Polling ----------
   function handleError(error) {
-    if (error && error.status === 401) return;
     showAlert(error && error.message ? error.message : 'Something went wrong. Trying again.');
   }
   function announce(list) {
@@ -1500,7 +1442,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
         S.runs = list;
         S.runsSig = sig(list);
         renderRuns();
-        if (S.view && S.view.type === 'welcome' && main._welcomeSig !== sig([list.length, list.filter(function (r) { return r.status === 'running'; }).length, S.status ? S.status.connected : true])) renderWelcome();
+        if (S.view && S.view.type === 'welcome' && main._welcomeSig !== welcomeSig(list.length, list.filter(function (r) { return r.status === 'running'; }).length)) renderWelcome();
       }
       return changed;
     });
@@ -1549,7 +1491,6 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   }
   function poll() {
     clearTimeout(S.timer);
-    if (!S.key) return;
     var id = S.pollId = (S.pollId || 0) + 1;
     enqueue(function () {
       return refreshRuns().then(function (changed) { return changed ? refreshDossiers(true) : refreshDossiers(false); }).then(refreshView).then(function () {
@@ -1558,7 +1499,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
         document.body.setAttribute('data-poll-count', String(S.polls));
       });
     }).then(function () {
-      if (S.key && id === S.pollId) S.timer = setTimeout(poll, S.pollMs);
+      if (id === S.pollId) S.timer = setTimeout(poll, S.pollMs);
     });
   }
 
@@ -1570,13 +1511,12 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
       S.known = {}; S.firstRuns = true; S.runsSig = ''; S.dossiersSig = '';
       return refreshRuns().then(function () { return refreshDossiers(true); });
     }).then(function () {
-      if (!S.key) return;
       var r = parseRoute();
       S.view = null;
       if (r.type === 'welcome') { S.view = {type: 'welcome', gen: ++S.gen}; document.body.classList.remove('view-open'); setNavState(true); renderWelcome(); }
       else route();
       poll();
-    }).catch(function (error) { if (error.status !== 401) { showAlert(error.message); S.timer = setTimeout(start, 3000); } });
+    }).catch(function (error) { showAlert(error.message); S.timer = setTimeout(start, 3000); });
   }
 
   // ---------- Wiring ----------
@@ -1584,22 +1524,10 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   $('settings-open').addEventListener('click', function () { if ($('settings-panel').hidden) openSettings(); else closeSettings(); });
   $('nav-toggle').addEventListener('click', function () { setNavState(!document.body.classList.contains('nav-open')); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('settings-panel').hidden) closeSettings(); });
-  /** The address can gain a key after the page has loaded (typed or pasted into this tab, or a link to it clicked): only the hash
-   * changes then and the page is not loaded again. Such a key is taken exactly as at load: kept for the tab, cleared from the address
-   * at once, and the page connects with it, whatever it showed before. Any other hash is a view address. */
-  function onHashChange() {
-    if (!/(^#|&)key=[0-9a-f]+/.test(location.hash)) { route(); return; }
-    clearTimeout(S.timer);
-    S.pollId = (S.pollId || 0) + 1;
-    S.gen += 1;
-    takeKeyFromAddress();
-    start();
-  }
-  window.addEventListener('hashchange', onHashChange);
+  window.addEventListener('hashchange', route);
 
-  takeKeyFromAddress();
   setNavState(true);
-  if (S.key) start(); else showKeyScreen('');
+  start();
 })();
 </script>
 </body>

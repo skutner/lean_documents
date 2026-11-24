@@ -10,7 +10,7 @@
  * Output: tmp/process-viewer-browser-<stamp>/ with result.md (every assertion as pass or fail) and the screenshots of a run
  * page and of a dossier page at 1440 and 390 pixels wide. The exit code is 0 only when every assertion passed. */
 import fs from 'node:fs/promises';
-import {existsSync, appendFileSync, readFileSync, realpathSync, mkdtempSync, writeFileSync} from 'node:fs';
+import {existsSync, appendFileSync, readFileSync, realpathSync, mkdtempSync, writeFileSync, rmSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -44,7 +44,6 @@ const events = {requests: [], exceptions: [], consoleErrors: [], ignored: [], ho
 let browser = null;
 let viewer = null;
 let fetchHook = null;
-const usedKeys = [];
 let fixtureBase = null;
 let profileRoot = null;
 let outDir = null;
@@ -173,7 +172,7 @@ async function changeAnswer(p, change) {
   return answerJson(p, p.responseStatusCode, value);
 }
 /** One GET of the viewer's own API from this process (not the page), for the numbers the page should show. */
-const apiGet = async route => (await fetch(`http://127.0.0.1:${viewer.port}${route}`, {headers: {'X-Viewer-Key': viewer.key}})).json();
+const apiGet = async route => (await fetch(`http://127.0.0.1:${viewer.port}${route}`)).json();
 /** Opens the document of a card and returns the milliseconds until its text is on the page. */
 async function openCardTimed(selector, bodySelector, timeout = 15000) {
   const began = Date.now();
@@ -256,7 +255,6 @@ try {
   writeFileSync(path.join(fx.data, 'projects', fx.pid, 'analyses', 'run-analysis-done', 'report.md'), Array.from({length: LONG_PARAGRAPHS}, (_, i) => `Paragraph ${i + 1} of the long report, with some words.`).join('\n\n') + '\n');
   const settings = {deepProofData: fx.data, dossiers: fx.dossiers, deepProofTmp: fx.tmp, port: 0};
   viewer = await startViewer({settings, pageFile: PAGE_FILE});
-  usedKeys.push(viewer.key);
   const origin = `http://127.0.0.1:${viewer.port}`;
   assert.notEqual(viewer.port, 8787);
   assert.notEqual(viewer.port, 8790);
@@ -288,17 +286,29 @@ try {
   notes.push(`Browser: ${version}`);
   await setViewport(...WIDTHS[0]);
 
-  // ----- Start: the key leaves the address -----
-  await check('the page loads with the policy of its one script, moves the key from the address into the tab and clears the address', async () => {
+  // ----- Start: no key, no key screen -----
+  await check('the page loads at its plain address with the policy of its one script, shows the lists at once and asks for nothing; a bookmark with an old key in the address opens the welcome view and view addresses still route', async () => {
     const page = await fetch(`${origin}/`);
     const policy = page.headers.get('content-security-policy');
     assert.match(policy, /script-src 'sha256-[A-Za-z0-9+/=]+'/, 'the script is allowed by hash, not refused');
+    assert.equal(viewer.url, `${origin}/`);
     await browser.page('Page.navigate', {url: viewer.url});
     await waitFor(`document.querySelectorAll('nav [data-run-key]').length > 0`, {label: 'the run list'});
-    assert.equal(await ev('location.hash'), '', 'the address holds no key any more');
-    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), viewer.key);
-    assert.ok(!(await ev('location.href')).includes(viewer.key));
-    assert.ok(events.requests.every(r => !r.url.includes(viewer.key)), 'no request carries the key in its address');
+    assert.equal(await ev(`document.querySelectorAll('input').length`), 0, 'the page has no field to fill in');
+    assert.equal(await ev(`document.querySelectorAll('[data-key-form]').length`), 0, 'the page has no key screen');
+    assert.equal(await ev(`sessionStorage.length`), 0, 'the page keeps nothing in the tab');
+    // An old bookmark with a key in the address opens the welcome view and sends the key nowhere.
+    await ev(`window.__sameDocument = 1; location.hash = '#key=abc'; true`);
+    await waitFor(`!!document.querySelector('main .welcome')`, {label: 'the welcome view after an old key address'});
+    assert.equal(await ev('window.__sameDocument'), 1, 'the page was not loaded again');
+    // View addresses still route.
+    await showView('run-analysis-done');
+    assert.equal(await ev('location.hash'), '#/run/proj-alpha/run-analysis-done');
+    await showView('dossier:2');
+    assert.equal(await ev('location.hash'), '#/dossier/2');
+    assert.ok(events.requests.every(r => !/key=|viewer-key/i.test(r.url)), 'no request carries a key in its address');
+    assert.deepEqual(events.requests.filter(r => new URL(r.url).origin !== origin && !r.url.startsWith('about:') && !r.url.startsWith('blob:')), []);
+    await showView('welcome');
     return 'script-src carries a hash';
   });
 
@@ -850,97 +860,21 @@ try {
     return `${expected} entries`;
   });
 
-  await check('when the viewer restarts with another key, the page goes to the key screen, closes the settings panel and takes the new key', async () => {
+  await check('when the viewer restarts on the same port, the page reconnects by itself and keeps showing its data', async () => {
     await showView('run-analysis-done');
     await click('#settings-open');
     await waitFor(`!document.getElementById('settings-panel').hidden && document.querySelector('#settings-panel dl')`, {label: 'settings open'});
+    await click('#settings-open');
+    await waitFor(`document.getElementById('settings-panel').hidden`, {label: 'settings closed'});
     const port = viewer.port;
-    const newKey = crypto.randomBytes(16).toString('hex');
     await viewer.close();
-    viewer = await startViewer({settings: {...settings, port}, key: newKey, pageFile: PAGE_FILE});
-    usedKeys.push(newKey);
+    viewer = await startViewer({settings: {...settings, port}, pageFile: PAGE_FILE});
     assert.equal(viewer.port, port);
-    await waitFor(`!!document.querySelector('[data-key-form]')`, {timeout: 15000, label: 'the key screen'});
-    assert.equal(await ev(`document.getElementById('settings-panel').hidden`), true, 'the settings panel is closed');
-    assert.equal(await ev(`document.getElementById('settings-open').getAttribute('aria-expanded')`), 'false');
-    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), null);
-    assert.match(await ev(`document.getElementById('key-error').textContent`), /refused/);
-    assert.equal(await ev(`document.querySelectorAll('nav [data-run-key]').length`), 0, 'no data left on the page');
-    await click('#key-input');
-    await browser.page('Input.insertText', {text: newKey});
-    await pressEnter('#key-input');
-    await waitFor(`document.querySelectorAll('nav [data-run-key]').length > 0 && !!document.querySelector('main [data-run-key="proj-alpha/run-analysis-done"]')`, {timeout: 10000, label: 'the page after the new key'});
-  });
-
-  // ----- The key screen -----
-  await check('without a key the page asks for one; a wrong key is refused in words; the right key opens the lists', async () => {
-    await ev(`sessionStorage.clear(); true`);
-    await browser.page('Page.navigate', {url: `${origin}/`});
-    await waitFor(`document.querySelector('[data-key-form] input') && document.querySelectorAll('nav [data-run-key]').length === 0`, {label: 'the key field'});
-    assert.ok(!(await ev(`document.body.innerText`)).includes('Alpha Project'), 'no data without a key');
-    await click('#key-input');
-    await browser.page('Input.insertText', {text: '0'.repeat(32)});
-    await click('[data-key-go]');
-    await waitFor(`document.querySelector('[data-key-form]') && /refused/.test(document.getElementById('key-error').textContent)`, {label: 'the refusal'});
-    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), null, 'the refused key is not kept');
-    await click('#key-input');
-    await ev(`document.getElementById('key-input').value = ''; true`);
-    await browser.page('Input.insertText', {text: `#key=${viewer.key}`});
-    await pressEnter('#key-input');
-    await waitFor(`document.querySelectorAll('nav [data-run-key]').length === 19`, {label: 'the run list after the right key'});
-    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), viewer.key);
-  });
-
-  await check('a key that reaches the address after the page has loaded (hash change, no reload) is taken, kept for the tab and cleared from the address at once, from the key screen, from a wrong-key state and while a view is shown; view addresses still route', async () => {
-    const takeKey = key => ev(`location.hash = ${json(`#key=${key}`)}; true`);
-    const connected = `document.querySelectorAll('nav [data-run-key]').length === 19 && !document.querySelector('[data-key-form]')`;
-    const stays = async label => {
-      assert.equal(await ev('window.__sameDocument'), 1, `${label}: the page was not loaded again`);
-      assert.equal(await ev('location.hash'), '', `${label}: the key is gone from the address`);
-      assert.ok(!(await ev('location.href')).includes(viewer.key), `${label}: no key in the address`);
-    };
-    // 1. From the key screen.
-    await ev(`sessionStorage.clear(); true`);
-    await browser.page('Page.navigate', {url: `${origin}/`});
-    await waitFor(`document.querySelector('[data-key-form] input') && document.querySelectorAll('nav [data-run-key]').length === 0`, {label: 'the key screen'});
-    await ev(`window.__sameDocument = 1; true`);
-    await takeKey(viewer.key);
-    await waitFor(connected, {label: 'the run list after the key in the address'});
-    await stays('from the key screen');
-    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), viewer.key, 'the key is kept for the tab');
-    // 2. From a wrong-key state: a wrong key in the address is refused, then the right one is taken.
-    await takeKey('0'.repeat(32));
-    await waitFor(`document.querySelector('[data-key-form]') && /refused/.test(document.getElementById('key-error').textContent)`, {label: 'the refusal of a wrong key from the address'});
-    await stays('after a wrong key');
-    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), null, 'the refused key is not kept');
-    await takeKey(viewer.key);
-    await waitFor(connected, {label: 'the run list after the right key'});
-    await stays('from a wrong-key state');
-    assert.equal(await ev(`sessionStorage.getItem('viewer-key')`), viewer.key);
-    // 3. While a run is shown: the key replaces the old one, the page loads its data again and may fall back to the start page.
-    await openRun('run-failed');
-    await ev(`window.__sameDocument = 1; true`);
-    await takeKey(viewer.key);
-    await waitFor(`!!document.querySelector('main .welcome') && ${connected}`, {label: 'the start page after the key, while a run was shown'});
-    await stays('while a run was shown');
-    
     const before = await polls();
-    await waitPolls(1);
-    assert.ok((await polls()) > before, 'the page polls with the new key');
-    // 3b. While a dossier is shown, a wrong key replaces the right one and is refused.
-    await openDossier(1);
-    await takeKey('1'.repeat(32));
-    await waitFor(`document.querySelector('[data-key-form]') && /refused/.test(document.getElementById('key-error').textContent)`, {label: 'the refusal while a dossier was shown'});
-    await stays('while a dossier was shown');
-    await takeKey(viewer.key);
-    await waitFor(connected, {label: 'the run list again'});
-    // 4. A hash that is a view address still routes, and a key is never put into a URL the page builds.
-    await showView('run-analysis-done');
-    assert.equal(await ev('location.hash'), '#/run/proj-alpha/run-analysis-done');
-    await showView('dossier:2');
-    assert.equal(await ev('location.hash'), '#/dossier/2');
-    assert.ok(events.requests.every(r => !r.url.includes(viewer.key) && !r.url.includes('0'.repeat(32)) && !r.url.includes('1'.repeat(32))), 'no request carries a key in its address');
-    assert.deepEqual(events.requests.filter(r => new URL(r.url).origin !== origin && !r.url.startsWith('about:') && !r.url.startsWith('blob:')), []);
+    await waitPolls(2);
+    assert.ok((await polls()) > before, 'the page polls again after the restart');
+    assert.equal(await ev(`document.querySelectorAll('[data-key-form]').length`), 0, 'no key screen appears');
+    assert.ok(await ev(`!!document.querySelector('main [data-run-key="proj-alpha/run-analysis-done"]') && document.querySelectorAll('nav [data-run-key]').length > 0`), 'the run and the lists are still there');
   });
 
   // ----- Hostile text that the page's old patterns could not survive -----
@@ -997,28 +931,56 @@ try {
     return `${ms} ms, ${shown.breaks} line breaks`;
   });
 
+  // ----- What the welcome page says when there is nothing to show -----
+  await check('a viewer on the same port with an empty data folder and recording off tells so: no runs yet with the address of Deep Proof, and recording is off', async () => {
+    const empty = mkdtempSync(path.join(os.tmpdir(), 'pv-empty-data-'));
+    try {
+      const port = viewer.port;
+      await viewer.close();
+      viewer = await startViewer({settings: {...settings, deepProofData: empty, port}, pageFile: PAGE_FILE, deepProof: {url: 'http://127.0.0.1:8000/', recording: false, startedHere: false}});
+      assert.equal(viewer.port, port);
+      await browser.page('Page.navigate', {url: `${origin}/`});
+      await waitFor(`!!document.querySelector('main [data-welcome="no-runs"]')`, {label: 'the no-runs line'});
+      const none = await ev(`document.querySelector('main [data-welcome="no-runs"]').textContent`);
+      assert.equal(none, 'No runs yet. Start an analysis or a report check in Deep Proof at http://127.0.0.1:8000/. It appears here within a few seconds.');
+      assert.equal(await ev(`document.querySelector('main [data-welcome="no-runs"] a').getAttribute('href')`), 'http://127.0.0.1:8000/');
+      assert.equal(await ev(`document.querySelector('main [data-welcome="recording-off"]').textContent`), 'Recording is off in the running Deep Proof. New runs will show no steps. Stop that server, then run npm run start again.');
+      assert.equal(await ev(`document.querySelectorAll('nav [data-run-key]').length`), 0);
+      // Recording unknown has its own line.
+      await viewer.close();
+      viewer = await startViewer({settings: {...settings, deepProofData: empty, port}, pageFile: PAGE_FILE, deepProof: {url: 'http://127.0.0.1:8000/', recording: null, startedHere: false}});
+      await browser.page('Page.navigate', {url: `${origin}/`});
+      await waitFor(`!!document.querySelector('main [data-welcome="recording-unknown"]')`, {label: 'the unknown line'});
+      assert.equal(await ev(`document.querySelector('main [data-welcome="recording-unknown"]').textContent`), 'The viewer could not tell whether Deep Proof is recording.');
+      assert.equal(await ev(`document.querySelectorAll('main [data-welcome="recording-off"]').length`), 0);
+      // Not connected at all.
+      await viewer.close();
+      viewer = await startViewer({settings: {...settings, deepProofData: null, port}, pageFile: PAGE_FILE});
+      await browser.page('Page.navigate', {url: `${origin}/`});
+      await waitFor(`!!document.querySelector('main [data-welcome="not-connected"]')`, {label: 'the not-connected line'});
+      assert.equal(await ev(`document.querySelector('main [data-welcome="not-connected"]').textContent`), 'No Deep Proof data folder is connected. Start with npm run start.');
+    } finally {
+      rmSync(empty, {recursive: true, force: true});
+    }
+  });
+
   // ----- Whole session -----
-  await check('no request other than GET was sent, every request went to the viewer, and every request carried no key in its address', async () => {
+  await check('no request other than GET was sent, every request went to the viewer, and no address carried a key', async () => {
     const wrong = events.requests.filter(r => r.method !== 'GET');
     assert.deepEqual(wrong, []);
     const foreign = events.requests.filter(r => new URL(r.url).origin !== origin && !r.url.startsWith('about:') && !r.url.startsWith('blob:'));
     assert.deepEqual(foreign, []);
-    assert.ok(events.requests.every(r => usedKeys.every(key => !r.url.includes(key))));
+    assert.ok(events.requests.every(r => !/key=|viewer-key/i.test(r.url)));
     assert.ok(events.requests.length > 100, `${events.requests.length} requests were seen`);
     return `${events.requests.length} requests, all GET`;
   });
 
   await check('no page exception and no console error, and no request for a file that is not served', async () => {
     // Chrome asks every page for /favicon.ico; the viewer serves two routes and answers 404 in JSON. That one request is recorded, not counted.
-    // Chrome also logs the deliberate 401 of the wrong key in the key-screen check, once, on /api/status.
-    // Also expected: the 401 of the restart with another key (the next poll, the same step as the page's first refused request),
-    // and the one 404 the test itself made the viewer's answer for a run in the check of the second click.
-    const isRefusal = e => /\(Unauthorized\)/.test(e) && /\/api\//.test(e);
+    // Also expected: the one 404 the test itself made the viewer's answer for a run in the check of the second click.
     const isMade404 = e => /\(Not Found\)/.test(e) && /\/api\/runs\/proj-alpha\/run-failed/.test(e);
-    const refusals = events.consoleErrors.filter(isRefusal);
-    assert.ok(refusals.length <= 6, `only the deliberate 401s (wrong keys, the restart, and requests in flight): ${json(refusals)}`);
     assert.ok(events.consoleErrors.filter(isMade404).length <= 1);
-    const expected = e => /favicon\.ico/.test(e) || isRefusal(e) || isMade404(e);
+    const expected = e => /favicon\.ico/.test(e) || isMade404(e);
     const real = events.consoleErrors.filter(e => !expected(e));
     for (const e of events.consoleErrors) if (expected(e)) events.ignored.push(e);
     assert.deepEqual(events.hookErrors, [], 'the test\'s own interception worked');
@@ -1026,7 +988,7 @@ try {
     assert.deepEqual(real, []);
     const other = events.requests.filter(r => !/\/api\//.test(r.url) && !/favicon\.ico$/.test(r.url) && new URL(r.url).pathname !== '/');
     assert.deepEqual(other, []);
-    return events.ignored.length ? `${events.ignored.length} expected console message(s) set aside (favicon 404, the deliberate 401s, the 404 the test made)` : '';
+    return events.ignored.length ? `${events.ignored.length} expected console message(s) set aside (favicon 404, the 404 the test made)` : '';
   });
 } catch (error) {
   failedSetup = error;

@@ -2,13 +2,12 @@
 /** The Deep Proof process viewer: a read-only server that shows the recorded steps of Deep Proof analyses and Check
  * Reports from a Deep Proof data folder on this machine, and the benchmark dossiers where they are.
  *
- *   node tools/process-viewer.mjs
+ *   node tools/process-viewer.mjs        (bare server; `npm run start` runs tools/start.mjs, which sets everything up)
  *
- * It binds 127.0.0.1 only, serves GET only, and answers every /api/ route only with the access key it prints at start.
- * It never writes, never follows a link inside a foreign folder, never opens the Deep Proof database or anything outside
- * `projects/`, never opens answer keys, and starts no process. Settings (read once, never written): the environment
- * (VIEWER_DEEP_PROOF_DATA, VIEWER_DOSSIERS, VIEWER_DEEP_PROOF_TMP, VIEWER_PORT, VIEWER_SETTINGS) and a settings file
- * below the repository's tmp/ folder, `tmp/process-viewer/settings.json` unless VIEWER_SETTINGS names another. */
+ * It binds 127.0.0.1 only, serves GET only and answers only its own host name. It never writes, never follows a link
+ * inside a foreign folder, never opens the Deep Proof database or anything outside `projects/`, never opens answer keys,
+ * and starts no process. Settings come from the environment only and are never written: VIEWER_DEEP_PROOF_DATA,
+ * VIEWER_DOSSIERS, VIEWER_DEEP_PROOF_TMP, VIEWER_PORT. */
 import http from 'node:http';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -25,42 +24,19 @@ export const REPO_ROOT = path.resolve(TOOLS, '..');
 export const DEFAULT_PORT = 8790;
 export const POLL_MS = 3000;
 const PAGE_FILE = path.join(TOOLS, 'process-viewer.html');
-const KEY_ERROR = 'Open the address the viewer printed in its terminal.';
-export const SETTINGS_EXAMPLE = JSON.stringify({
-  deepProofData: '<absolute path of the Deep Proof data folder>',
-  dossiers: ['<absolute path of one dossier folder>', '<absolute path of another dossier folder>'],
-  deepProofTmp: '<optional: absolute path of the temporary folder the Deep Proof server uses>',
-  port: DEFAULT_PORT
-}, null, 2);
 
 // ---------- Settings ----------
 
-/** Reads the settings once. The environment wins over the settings file. Throws a plain message on a bad value. */
-export function loadSettings({env = process.env, repoRoot = REPO_ROOT} = {}) {
-  const tmp = path.join(repoRoot, 'tmp');
-  const explicit = Boolean(env.VIEWER_SETTINGS);
-  const file = path.resolve(explicit ? env.VIEWER_SETTINGS : path.join(tmp, 'process-viewer', 'settings.json'));
-  if (!file.startsWith(tmp + path.sep)) throw new Error('The settings file must lie below the repository tmp/ folder.');
-  let fromFile = {};
-  try {
-    fromFile = JSON.parse(readFileSync(file, 'utf8'));
-  } catch (error) {
-    if (explicit || error.code !== 'ENOENT') throw new Error(error instanceof SyntaxError ? 'The settings file is not valid JSON.' : 'The settings file cannot be read.');
-  }
-  if (!fromFile || typeof fromFile !== 'object' || Array.isArray(fromFile)) throw new Error('The settings file must hold one JSON object.');
-  const dossiers = env.VIEWER_DOSSIERS ? env.VIEWER_DOSSIERS.split(path.delimiter).filter(Boolean) : fromFile.dossiers ?? [];
-  if (!Array.isArray(dossiers) || dossiers.some(d => typeof d !== 'string')) throw new Error('"dossiers" must be a list of folder paths.');
-  const text = (value, name) => {
-    if (value === undefined || value === null || value === '') return null;
-    if (typeof value !== 'string') throw new Error(`"${name}" must be a folder path.`);
-    return value;
-  };
-  const rawPort = env.VIEWER_PORT !== undefined && env.VIEWER_PORT !== '' ? Number(env.VIEWER_PORT) : fromFile.port ?? DEFAULT_PORT;
+/** Reads the settings once, from the environment only. Throws a plain message on a bad value. */
+export function loadSettings({env = process.env} = {}) {
+  const dossiers = env.VIEWER_DOSSIERS ? env.VIEWER_DOSSIERS.split(path.delimiter).filter(Boolean) : [];
+  const text = value => (value === undefined || value === null || value === '' ? null : value);
+  const rawPort = env.VIEWER_PORT !== undefined && env.VIEWER_PORT !== '' ? Number(env.VIEWER_PORT) : DEFAULT_PORT;
   if (!Number.isInteger(rawPort) || rawPort < 0 || rawPort > 65535) throw new Error('The port must be a whole number from 0 to 65535.');
   return {
-    deepProofData: text(env.VIEWER_DEEP_PROOF_DATA ?? fromFile.deepProofData, 'deepProofData'),
+    deepProofData: text(env.VIEWER_DEEP_PROOF_DATA),
     dossiers,
-    deepProofTmp: text(env.VIEWER_DEEP_PROOF_TMP ?? fromFile.deepProofTmp, 'deepProofTmp'),
+    deepProofTmp: text(env.VIEWER_DEEP_PROOF_TMP),
     port: rawPort
   };
 }
@@ -93,8 +69,6 @@ export function pagePolicy(page) {
   return `default-src 'none'; script-src ${script}; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`;
 }
 
-const digest = value => crypto.createHash('sha256').update(String(value)).digest();
-const keyMatches = (given, key) => typeof given === 'string' && crypto.timingSafeEqual(digest(given), digest(key));
 const number = (value, name) => {
   if (value === null || value === undefined || value === '') return 0;
   if (!/^\d{1,9}$/.test(value)) throw new ViewerError(400, `${name} must be a whole number.`);
@@ -113,8 +87,9 @@ const segment = value => {
 // ---------- The server ----------
 
 /** Starts the viewer. Proves the no-link flag first (macOS), resolves the roots, then listens on 127.0.0.1.
- * `key`, `now`, `alive` and `pageFile` exist for tests. Returns `{server, port, key, url, roots, close}`. */
-export async function startViewer({settings, key = crypto.randomBytes(16).toString('hex'), now = Date.now, alive, pageFile = PAGE_FILE} = {}) {
+ * `deepProof` is `null` or `{url, recording: true|false|null, startedHere}`, shown by /api/status. `now`, `alive` and
+ * `pageFile` exist for tests. Returns `{server, port, url, roots, close}`. */
+export async function startViewer({settings, now = Date.now, alive, pageFile = PAGE_FILE, deepProof = null} = {}) {
   proveNoFollow();
   const roots = openRoots(settings);
   const traces = createTraceIndex({root: roots.data});
@@ -133,7 +108,7 @@ export async function startViewer({settings, key = crypto.randomBytes(16).toStri
       tmpMatches: parents.length ? parents.every(p => p === roots.tmp.path) : null,
       pollMs: POLL_MS,
       folders: {data: roots.data?.path ?? null, tmp: roots.tmp.path, dossiers: roots.dossiers.map(d => d.path)},
-      settingsHint: roots.data ? null : SETTINGS_EXAMPLE
+      deepProof: deepProof ? {url: deepProof.url, recording: deepProof.recording, startedHere: Boolean(deepProof.startedHere)} : null
     };
   }
 
@@ -188,8 +163,6 @@ export async function startViewer({settings, key = crypto.randomBytes(16).toStri
       const url = new URL(req.url, `http://127.0.0.1:${port}`);
       if (url.pathname === '/') return page(res);
       if (!url.pathname.startsWith('/api/')) return json(res, 404, {error: 'There is no such address.'});
-      // The key is read from the header only, never from the address.
-      if (!keyMatches(req.headers['x-viewer-key'], key)) return json(res, 401, {error: KEY_ERROR});
       return route(res, url);
     } catch (error) {
       if (res.headersSent) return res.destroy();
@@ -199,12 +172,12 @@ export async function startViewer({settings, key = crypto.randomBytes(16).toStri
   });
 
   await new Promise((resolve, reject) => {
-    server.once('error', error => reject(new Error(error.code === 'EADDRINUSE' ? `Port ${settings.port} is in use. Set VIEWER_PORT or "port" in the settings file.` : 'The viewer could not start listening.')));
+    server.once('error', error => reject(new Error(error.code === 'EADDRINUSE' ? `Port ${settings.port} is in use. Set VIEWER_PORT to another port.` : 'The viewer could not start listening.')));
     server.listen(settings.port, '127.0.0.1', resolve);
   });
   port = server.address().port;
   return {
-    server, port, key, roots, url: `http://127.0.0.1:${port}/#key=${key}`,
+    server, port, roots, url: `http://127.0.0.1:${port}/`,
     close: () => new Promise(resolve => {
       server.close(() => resolve());
       server.closeAllConnections();
@@ -222,7 +195,7 @@ async function main() {
     return;
   }
   console.log(`Process viewer: ${viewer.url}`);
-  if (!viewer.roots.data) console.log('No Deep Proof data folder is set. The page shows how to set it.');
+  if (!viewer.roots.data) console.log('No Deep Proof data folder is set. Set VIEWER_DEEP_PROOF_DATA or use npm run start.');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main();
