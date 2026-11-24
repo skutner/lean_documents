@@ -860,18 +860,16 @@ try {
     return `${expected} entries`;
   });
 
-  await check('when the viewer restarts on the same port, the page reconnects by itself and keeps showing its data', async () => {
+  await check('when the viewer is down for longer than a poll the page says so, then reconnects by itself and keeps showing its data', async () => {
     await showView('run-analysis-done');
-    await click('#settings-open');
-    await waitFor(`!document.getElementById('settings-panel').hidden && document.querySelector('#settings-panel dl')`, {label: 'settings open'});
-    await click('#settings-open');
-    await waitFor(`document.getElementById('settings-panel').hidden`, {label: 'settings closed'});
     const port = viewer.port;
     await viewer.close();
+    await waitFor(`!document.getElementById('alert').hidden && /cannot be reached/.test(document.getElementById('alert').textContent)`, {timeout: 8000, label: 'the alert while the viewer is down'});
     viewer = await startViewer({settings: {...settings, port}, pageFile: PAGE_FILE});
     assert.equal(viewer.port, port);
+    await waitFor(`document.getElementById('alert').hidden`, {timeout: 10000, label: 'the alert clears after the restart'});
     const before = await polls();
-    await waitPolls(2);
+    await waitPolls(1);
     assert.ok((await polls()) > before, 'the page polls again after the restart');
     assert.equal(await ev(`document.querySelectorAll('[data-key-form]').length`), 0, 'no key screen appears');
     assert.ok(await ev(`!!document.querySelector('main [data-run-key="proj-alpha/run-analysis-done"]') && document.querySelectorAll('nav [data-run-key]').length > 0`), 'the run and the lists are still there');
@@ -947,6 +945,13 @@ try {
       assert.equal(await ev(`document.querySelector('main [data-welcome="no-runs"] a').getAttribute('href')`), 'http://127.0.0.1:8000/');
       assert.equal(await ev(`document.querySelector('main [data-welcome="recording-off"]').textContent`), 'Recording is off in the running Deep Proof. New runs will show no steps. Stop that Deep Proof server and any other npm run start, then run npm run start again.');
       assert.equal(await ev(`document.querySelectorAll('nav [data-run-key]').length`), 0);
+      // The viewer restarts with recording on and the open tab is not reloaded: the warning goes away by itself.
+      await viewer.close();
+      viewer = await startViewer({settings: {...settings, deepProofData: empty, port}, pageFile: PAGE_FILE, deepProof: {url: 'http://127.0.0.1:8000/', recording: true, startedHere: true}});
+      await waitFor(`!document.querySelector('main [data-welcome="recording-off"]') && !!document.querySelector('main [data-welcome="no-runs"]')`, {timeout: 10000, label: 'the warning leaves a tab that was not reloaded'});
+      await viewer.close();
+      viewer = await startViewer({settings: {...settings, deepProofData: empty, port}, pageFile: PAGE_FILE, deepProof: {url: 'http://127.0.0.1:8000/', recording: false, startedHere: false}});
+      await waitFor(`!!document.querySelector('main [data-welcome="recording-off"]')`, {timeout: 10000, label: 'the warning appears in a tab that was not reloaded'});
       // Recording unknown has its own line.
       await viewer.close();
       viewer = await startViewer({settings: {...settings, deepProofData: empty, port}, pageFile: PAGE_FILE, deepProof: {url: 'http://127.0.0.1:8000/', recording: null, startedHere: false}});
@@ -981,7 +986,10 @@ try {
     // Also expected: the one 404 the test itself made the viewer's answer for a run in the check of the second click.
     const isMade404 = e => /\(Not Found\)/.test(e) && /\/api\/runs\/proj-alpha\/run-failed/.test(e);
     assert.ok(events.consoleErrors.filter(isMade404).length <= 1);
-    const expected = e => /favicon\.ico/.test(e) || isMade404(e);
+    // The viewer is closed for a few seconds on purpose in the restart check: Chrome logs the refused polls as ERR_CONNECTION_REFUSED.
+    const isRefused = e => /ERR_CONNECTION_REFUSED/.test(e) && /\/api\//.test(e);
+    assert.ok(events.consoleErrors.filter(isRefused).length <= 6, 'only the polls of the deliberate restart were refused');
+    const expected = e => /favicon\.ico/.test(e) || isMade404(e) || isRefused(e);
     const real = events.consoleErrors.filter(e => !expected(e));
     for (const e of events.consoleErrors) if (expected(e)) events.ignored.push(e);
     assert.deepEqual(events.hookErrors, [], 'the test\'s own interception worked');

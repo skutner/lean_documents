@@ -1489,11 +1489,18 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
     }
     return Promise.resolve();
   }
+  /** The status is asked for again at every poll, so that a viewer that restarted with other facts (Deep Proof recording or not) shows them. */
+  function refreshStatus() {
+    return api('/api/status').then(function (st) {
+      S.status = st;
+      if (S.view && S.view.type === 'welcome' && main._welcomeSig !== welcomeSig(S.runs.length, S.runs.filter(function (r) { return r.status === 'running'; }).length)) renderWelcome();
+    });
+  }
   function poll() {
     clearTimeout(S.timer);
     var id = S.pollId = (S.pollId || 0) + 1;
     enqueue(function () {
-      return refreshRuns().then(function (changed) { return changed ? refreshDossiers(true) : refreshDossiers(false); }).then(refreshView).then(function () {
+      return refreshStatus().then(refreshRuns).then(function (changed) { return changed ? refreshDossiers(true) : refreshDossiers(false); }).then(refreshView).then(function () {
         showAlert('');
         S.polls += 1;
         document.body.setAttribute('data-poll-count', String(S.polls));
