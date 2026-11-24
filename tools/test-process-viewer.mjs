@@ -871,7 +871,7 @@ test('every route answers without any header, carries no CORS header, and the pa
   for (const route of ROUTES) {
     const ok = await request(v, route);
     assert.equal(ok.status, 200, route);
-    assert.match(ok.headers['content-type'], /^application\/json|^text\/markdown/, route);
+    assert.match(ok.headers['content-type'], route.includes('/download') ? /^text\/markdown/ : /^application\/json; charset=utf-8$/, route);
     for (const [name, value] of Object.entries(SECURITY)) assert.equal(ok.headers[name], value, `${route} ${name}`);
     // A request from another origin gets no access-control header at all.
     const evil = await request(v, route, {headers: {origin: 'http://evil.example'}});

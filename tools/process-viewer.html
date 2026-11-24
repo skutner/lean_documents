@@ -1008,7 +1008,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
         dp && dp.url ? h('a', {href: dp.url, target: '_blank', rel: 'noopener noreferrer', text: dp.url}) : null,
         dp && dp.url ? '. It appears here within a few seconds.' : ' It appears here within a few seconds.'));
     } else kids.push(h('p', {class: 'muted', text: 'Choose a run or a dossier on the left. Each run is shown in three parts, so that you can tell at a glance what went in, what happened and what came out.'}));
-    if (dp && dp.recording === false) kids.push(h('p', {class: 'callout warn', 'data-welcome': 'recording-off', text: 'Recording is off in the running Deep Proof. New runs will show no steps. Stop that server, then run npm run start again.'}));
+    if (dp && dp.recording === false) kids.push(h('p', {class: 'callout warn', 'data-welcome': 'recording-off', text: 'Recording is off in the running Deep Proof. New runs will show no steps. Stop that Deep Proof server and any other npm run start, then run npm run start again.'}));
     if (dp && dp.recording === null) kids.push(h('p', {class: 'callout', 'data-welcome': 'recording-unknown', text: 'The viewer could not tell whether Deep Proof is recording.'}));
     kids.push(h('div', {class: 'legend'},
       h('div', {class: 'l-inputs'}, h('h2', null, icon('inputs'), 'Inputs'), h('p', {text: 'The documents, the skill and the options the agent was given.'})),

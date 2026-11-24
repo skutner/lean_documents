@@ -934,6 +934,7 @@ try {
   // ----- What the welcome page says when there is nothing to show -----
   await check('a viewer on the same port with an empty data folder and recording off tells so: no runs yet with the address of Deep Proof, and recording is off', async () => {
     const empty = mkdtempSync(path.join(os.tmpdir(), 'pv-empty-data-'));
+    await showView('welcome');
     try {
       const port = viewer.port;
       await viewer.close();
@@ -944,7 +945,7 @@ try {
       const none = await ev(`document.querySelector('main [data-welcome="no-runs"]').textContent`);
       assert.equal(none, 'No runs yet. Start an analysis or a report check in Deep Proof at http://127.0.0.1:8000/. It appears here within a few seconds.');
       assert.equal(await ev(`document.querySelector('main [data-welcome="no-runs"] a').getAttribute('href')`), 'http://127.0.0.1:8000/');
-      assert.equal(await ev(`document.querySelector('main [data-welcome="recording-off"]').textContent`), 'Recording is off in the running Deep Proof. New runs will show no steps. Stop that server, then run npm run start again.');
+      assert.equal(await ev(`document.querySelector('main [data-welcome="recording-off"]').textContent`), 'Recording is off in the running Deep Proof. New runs will show no steps. Stop that Deep Proof server and any other npm run start, then run npm run start again.');
       assert.equal(await ev(`document.querySelectorAll('nav [data-run-key]').length`), 0);
       // Recording unknown has its own line.
       await viewer.close();
