@@ -29,6 +29,7 @@ export const SUITES = [
   {name: 'markdown-server', command: ['node', 'tools/test-markdown-server.mjs']},
   {name: 'report-generation', command: ['node', 'tools/test-report-generation.mjs']},
   {name: 'process-viewer', command: ['node', '--test', 'tools/test-process-viewer.mjs']},
+  {name: 'start', command: ['node', '--test', 'tools/test-start.mjs']},
   {name: 'python-tests', command: ['{python}', '-m', 'unittest', 'discover', '-s', 'tests', '-v'], python: true}
 ];
 

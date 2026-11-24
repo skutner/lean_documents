@@ -4,8 +4,7 @@
   "private": true,
   "description": "Evidence-to-proof review: audits the findings of a supplied report against its source documents.",
   "scripts": {
-    "start": "node tools/process-viewer.mjs",
-    "pilot": "node tools/pilot.mjs",
+    "start": "node tools/start.mjs",
     "test": "node tools/verify.mjs",
     "set-home": "node tools/set-home.mjs"
   },
