@@ -171,6 +171,7 @@ export async function startViewer({settings, now = Date.now, alive, pageFile = P
       return json(res, 500, {error: 'The viewer could not complete this request.'});
     }
   };
+  if (listening && listening.address()?.address !== '127.0.0.1') throw new Error('The server handed to the viewer must listen on 127.0.0.1 only.');
   const server = listening ?? http.createServer();
   server.removeAllListeners('request');
   server.on('request', handle);

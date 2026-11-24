@@ -574,6 +574,7 @@ pre.plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .88
   function api(path) {
     return fetch(path, {method: 'GET', cache: 'no-store'}).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (body) {
+        if (res.status === 503 && body.starting) throw new ApiError(503, 'The viewer is starting. Trying again.');
         if (!res.ok) throw new ApiError(res.status, body.error || 'The viewer could not answer this request.');
         return body;
       });

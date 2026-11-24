@@ -553,3 +553,47 @@ await new Promise(resolve => setTimeout(resolve, 400));
   await assert.rejects(launch(w, {deepProofPort, env: envFor(viewerPort), opener: () => {}, run: noRun}), error => /Deep Proof exited during start \(no exit code\)/.test(error.message) && error.message.includes('deep-proof-server.log'));
   assert.ok(await refused(deepProofPort) && await refused(viewerPort));
 });
+
+test('the early listener answers 503 {"starting": true} on every route; an open page treats it as not ready; a handed-in server must be bound to 127.0.0.1; a server error after the handover stops everything', async t => {
+  const w = world(t);
+  const {deepProofPort, viewerPort} = await ports(t);
+  // A slow Deep Proof keeps the early listener up while the test reads it.
+  fs.writeFileSync(path.join(w.dp, 'server.mjs'), `await new Promise(r => setTimeout(r, 1200));\n${FAKE_SERVER}`);
+  const starting = launch(w, {deepProofPort, env: envFor(viewerPort), opener: () => {}, run: noRun});
+  let answers = null;
+  for (let i = 0; i < 50 && !answers; i++) {
+    const status = await fetch(`http://127.0.0.1:${viewerPort}/api/status`).catch(() => null);
+    if (status) answers = status;
+    else await sleep(20);
+  }
+  assert.ok(answers, 'the early listener is up');
+  for (const route of ['/api/status', '/api/runs', '/']) {
+    const r = await fetch(`http://127.0.0.1:${viewerPort}${route}`);
+    assert.equal(r.status, 503, route);
+    assert.deepEqual(await r.json(), {starting: true});
+    assert.match(r.headers.get('content-type'), /^application\/json/);
+    assert.equal(r.headers.get('cache-control'), 'no-store');
+    assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+  }
+  const r = await starting;
+  assert.equal((await fetch(`http://127.0.0.1:${viewerPort}/api/status`)).status, 200, 'the handover heals the same address');
+  // The page treats a 503 as a viewer that is not ready: a readable alert, no script error (the page reads body.starting before anything else).
+  const page = fs.readFileSync(path.join(tools, 'process-viewer.html'), 'utf8');
+  assert.match(page, /res\.status === 503 && body\.starting\) throw new ApiError\(503, 'The viewer is starting\. Trying again\.'\)/);
+  // A server error after the handover: one line with the code only, and the normal stop runs.
+  const dpPid = r.deepProof.pid;
+  r.viewer.server.emit('error', Object.assign(new Error('details SECRET_TOKEN=hunter2'), {code: 'EIO'}));
+  assert.equal(await r.finished, 0);
+  assert.ok(w.logs.includes("The viewer's server failed (EIO); stopping."));
+  assert.ok(!JSON.stringify(w.logs).includes('hunter2'));
+  assert.equal(alive(dpPid), false);
+  assert.ok(await refused(deepProofPort) && await refused(viewerPort));
+  // A server bound to every interface is refused before any handler is attached.
+  const wide = http.createServer();
+  const marker = () => {};
+  wide.on('request', marker);
+  await new Promise(resolve => wide.listen(0, '0.0.0.0', resolve));
+  t.after(() => wide.close());
+  await assert.rejects(startViewer({settings: {deepProofData: null, dossiers: [], deepProofTmp: null, port: 0}, server: wide}), /must listen on 127\.0\.0\.1 only/);
+  assert.deepEqual(wide.listeners('request'), [marker], 'no request handler was attached');
+});

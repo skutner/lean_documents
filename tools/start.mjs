@@ -73,10 +73,12 @@ export async function classifyDeepProofPort(port, timeoutMs) {
 async function classifyViewerPort(port, timeoutMs) {
   const answer = await httpGet(port, '/api/status', timeoutMs);
   if (answer.state === 'refused') return {kind: 'free'};
+  if (answer.state === 'ok' && answer.status === 503) {
+    try { if (JSON.parse(answer.body)?.starting === true) return {kind: 'starting'}; } catch { /* not ours */ }
+  }
   if (answer.state === 'ok' && answer.status === 200) {
     try {
       const status = JSON.parse(answer.body);
-      if (status && status.starting === true) return {kind: 'starting'};
       if (status && typeof status.pollMs === 'number' && status.folders && 'dossiersConfigured' in status) return {kind: 'viewer', status};
     } catch { /* not JSON: another program */ }
   }
@@ -143,8 +145,9 @@ export function inspectProcess(pid, {run = runCommand, platform = process.platfo
 function listenEarly(port) {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
+      // 503 on every route: an open page must read this as a viewer that is not ready, never as a status or a run list.
       const body = JSON.stringify({starting: true});
-      res.writeHead(200, {'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store'});
+      res.writeHead(503, {'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'});
       res.end(body);
     });
     server.once('error', reject);
@@ -436,6 +439,11 @@ export async function start({env = process.env, repoRoot = REPO_ROOT, deepProofP
       })();
       return stopping;
     };
+    // A failure of the viewer's server after the handover stops everything through the normal path.
+    viewer.server.on('error', error => {
+      log(`The viewer's server failed (${typeof error?.code === 'string' ? error.code : 'error'}); stopping.`);
+      stop();
+    });
     return {viewer, alreadyRunning: false, deepProof: {url: deepProofUrl, recording, startedHere, pid}, books, stop, finished};
   } catch (error) {
     stoppingChild = true;

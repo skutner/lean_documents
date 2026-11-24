@@ -997,7 +997,7 @@ try {
     assert.deepEqual(real, []);
     const other = events.requests.filter(r => !/\/api\//.test(r.url) && !/favicon\.ico$/.test(r.url) && new URL(r.url).pathname !== '/');
     assert.deepEqual(other, []);
-    return events.ignored.length ? `${events.ignored.length} expected console message(s) set aside (favicon 404, the 404 the test made)` : '';
+    return events.ignored.length ? `${events.ignored.length} expected console message(s) set aside (favicon 404, the 404 the test made, the refused polls of the deliberate restart)` : '';
   });
 } catch (error) {
   failedSetup = error;
